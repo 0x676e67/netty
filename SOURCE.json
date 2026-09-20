@@ -1,0 +1,72 @@
+{
+  "product_commit": "dc1cabe551a63525cd4ed7c8ee39cf1d48ea8f8a",
+  "product_source_sha256": {
+    "src/body/chan.rs": "2490df7e3e9ed259b8a7d98517564ab00cd6c92e337b4800c0fbed4c9fd71e58",
+    "src/body/incoming.rs": "bae0c859a52c7b0adc0c95472581ae1490863decb9064d5cce9669cb5f7b66a3",
+    "src/body/length.rs": "ea7405153c19356edcc94618a8ea31630fbf85b52541d19aeeb92f6333619958",
+    "src/body.rs": "c78854bc2cc2080dd54a057c9d01680455bae3d21c5c7a082411418c4421b08d",
+    "src/conn/http1.rs": "46338922c6d26afc7616f8eae913b70d862993b50f1b53f9c2a18a0b58e50343",
+    "src/conn/http2.rs": "4a5bbd18fd6cd32f0ff3647005bed6d6c0e215e5866acf2926f83470f4912599",
+    "src/conn/http3/datagram.rs": "87a3e41b822b8723f9ffd90c3a5531239680992f87b436e3824de50f37779e6a",
+    "src/conn/http3.rs": "d90e18c9373b5b360e12124ca7e5ef459f1e38b66731fcc80ddd920f5de0d690",
+    "src/conn.rs": "5a28db58d9e035e4448f0374503a5173a92e80d075b0c49917e2822ca40776ed",
+    "src/dispatch.rs": "0a57baf9e35593db66dab096c853a22646afd6937ba1cb44b3bebb4ef21b74fa",
+    "src/error.rs": "cf36a7bcc9f67170c1dddd4912579ba1d45b0d6f68dfc8f6fdce4a2d3e05ae01",
+    "src/ext/h1_reason_phrase.rs": "cb01be61499683f475a376370c10c528f61e31aa04c0f3665cb151877594da9c",
+    "src/ext/informational.rs": "06f173c1fadae1d1b77b1ed134b720ba7f49c158f0e4fbdae2ec4895a52323ba",
+    "src/ext/preserve_header.rs": "283199ca0d7f2eebffee22f50eed76b9e09ef87faca0fbbaaabfe51d18ae4567",
+    "src/ext.rs": "c85b6ec0c0c2625b72a0cb106a7e6ff5a7c926e6486b5b0b72f7801a8f009047",
+    "src/lib.rs": "f70778eee4580c4d8fa2357c403efd4547a651d3c9628fe6f22fcb4ee5cfe003",
+    "src/lock.rs": "ae01179ad4a756405d5c9f25b343de1ec6d4b2873b8c1e49002a72d00e6f4c84",
+    "src/proto/headers.rs": "dfbe1a3a7f8c8f158295c00b5d4aeef6ff78c643fab95f6015fbe2282555b67f",
+    "src/proto/http1/buf.rs": "6de00f0162a5b8c2a05cdf2cab1c37f7a1f084b192770751664dbc0127ca6d22",
+    "src/proto/http1/conn.rs": "e171fbbf37ae566c6bb24aaf2686b73c53c588f6068685e8dd76f9e26ff9cf57",
+    "src/proto/http1/decode.rs": "ba37786dc65f222c4b911bb42958281dcc5df80a64099bbfe7ed078bc354b8d9",
+    "src/proto/http1/dispatch.rs": "c86fc7c29411a5b72bb5491a7862f11f1a650a78184b871fa2ec438b51a8c815",
+    "src/proto/http1/encode.rs": "c427b23d1fc35333d6676cede3e804c0d52a47e5703a9de6937bb49af290ff80",
+    "src/proto/http1/io.rs": "2f0d72f62f4707862b7feed5f4ee573a8bc919c7ed978699647f01afa2ceec01",
+    "src/proto/http1/role.rs": "8b9cf6445e98343bd9357cf2a0172c46f241b816ba152a1bcd85f5ba304653be",
+    "src/proto/http1.rs": "e3b7218c38441fe4dcccbcdf2695d436fdc632816e6cac6c11597b2022b1849e",
+    "src/proto/http2/client.rs": "9696448388d06a075a0c1d852bd4899eef9c966c4802f828d16a49c3a7e86e93",
+    "src/proto/http2/ping.rs": "ccbc19dc6bd3b83c38df574794a709aec5f7076aa2fc5349101f41552e612d6a",
+    "src/proto/http2/upgrade.rs": "cd71026373871e1e07651fc9302952811ad298bf2682b5ac58eb5db06aa23446",
+    "src/proto/http2.rs": "a10dd486c37e537c22c27be1c03b96d557cdf01c1e3734955d7fd00e974fed2d",
+    "src/proto/http3/client.rs": "84ec5abeef1d57daa3a5f93e846887250bae56bd9b80699c42fef2049162fde0",
+    "src/proto/http3/datagram.rs": "41132bea7ba981e9b2f8e97398a525f1cea86f5905eeed47df88310b6d27efe2",
+    "src/proto/http3/dispatch.rs": "bc0b50e63157d94910999a258c6b0896978819bb80767a1e61458cc656952b78",
+    "src/proto/http3/transport.rs": "435b059c1167b47bb105dccc170c59e507fc38ddedca8a4343d07a3fa88866e5",
+    "src/proto/http3/upgrade.rs": "a92ed93940d8168f90ee32c344205a2fac5c32eea9d0629b788a857aa5e872b7",
+    "src/proto/http3.rs": "db0a95559a79d53e33a14d5acd2718d11660f66b81edc7b03d3c82633af3d61f",
+    "src/proto.rs": "783433cdd6b2ba1c341af8f2c1e149184b5b56cb360fff054ef102585e7ecdf1",
+    "src/rt/bounds.rs": "c14fc12ba6db0dd8a5177d5d26d9bfe8347b642510ccf36b03f8235f58d68ce6",
+    "src/rt/quic/datagram.rs": "9b9196f1152c3d14a58036d679548f4db1f6e86c23479c74af0bd51cba3c2dc4",
+    "src/rt/quic.rs": "b95a46e2db5d827f82e8b1b6df250b64e3c669bb6d3490aed8ba18c1b48a4eb5",
+    "src/rt/timer.rs": "3e13b2efc4c9fd819e5af80d5b2cc49ebbe2130e14d7fedee2ee2c5c451d226c",
+    "src/rt.rs": "f7edb6b04c8d2e85560629b1aab4eb829f41d97e6523d07642de6e650e8e19ca",
+    "src/trace.rs": "c2ec16bdef0625f4b66a8612f08c5ea23ebbaad23c994c49a9e34a08cfce639a",
+    "src/upgrade.rs": "1d89a14e99d20890a24210b76bebc33321bbbf81832f1a108825592f0863ff55"
+  },
+  "benchmark_origins": {
+    "bench/http3.rs": {
+      "sha256": "b05ef32d594e4b3d1ee44674cab404ce85d014b36eafe707d3ed42938384b8d0"
+    },
+    "bench/http3/profile.rs": {
+      "sha256": "ca37bac2cf2938d53218cee61ad7a47403ed2cca2f936c116c2d96276310ad28"
+    },
+    "bench/runtime_matrix.rs": {
+      "sha256": "faf6b4f0a00de64ed882bf66655331c6b3b599bb3fbbab9aa11cd14703b034d0"
+    },
+    "bench/http2-adapter.rs": {
+      "sha256": "7bbe2b2e6ade7bd85d36e3b44b19818b5480d7e14fbd4e7c2825a3bc1912f550"
+    },
+    "Cargo.lock": {
+      "sha256": "090ea59ac40ecafcdaee163959d3f791b5ffab0a2bfac95888e24be22f2fb4f9"
+    }
+  },
+  "hash_encoding": "SHA256 of UTF-8 source bytes with LF line endings",
+  "validation": {
+    "windows": "Rust 1.98.0, locked/offline, -D warnings, both benchmarks compiled",
+    "m3": "Rust 1.98.1, optimized locked/offline, -D warnings; 15 short cases / 30 direct-adapter measurements passed",
+    "performance_claim": false
+  }
+}
