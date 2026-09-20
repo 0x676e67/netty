@@ -1,0 +1,40 @@
+# Chrome 152 ordinary fields captured from a loopback HTTP/1.1 navigation.
+# HTTP/3 supplies :authority instead of Host; this is not a wire-order capture.
+# No cookies, authorization, referrer, or user-specific identifiers are retained.
+[request]
+sec-ch-ua: "Chromium";v="152", "Not?A_Brand";v="24", "Google Chrome";v="152"
+sec-ch-ua-mobile: ?0
+sec-ch-ua-platform: "Windows"
+upgrade-insecure-requests: 1
+user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36
+accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7
+sec-fetch-site: cross-site
+sec-fetch-mode: navigate
+sec-fetch-user: ?1
+sec-fetch-dest: document
+accept-encoding: gzip, deflate, br, zstd
+accept-language: en,zh-CN;q=0.9,zh;q=0.8
+
+# Five synthetic application fields, not sent by Chrome itself.
+# Values stay fixed so per-request ID generation does not enter the measurement.
+x-client-version: 1.0.0
+x-request-id: 7b03c8f2-68d4-4f5a-ae1c-4d870936f2b9
+x-feature-flags: search-v2,compact-results
+x-api-version: 2026-09
+x-client-platform: desktop
+
+# Designed response workload, not a captured server response.
+# The response body remains uncompressed; no content-encoding is advertised.
+[response]
+content-type: text/html; charset=utf-8
+cache-control: no-cache
+date: Sat, 05 Sep 2026 00:00:00 GMT
+etag: "bench-v1"
+last-modified: Fri, 04 Sep 2026 00:00:00 GMT
+server: benchmark
+vary: accept-encoding
+strict-transport-security: max-age=31536000
+x-content-type-options: nosniff
+x-frame-options: DENY
+referrer-policy: no-referrer
+content-security-policy: default-src 'none'; frame-ancestors 'none'
