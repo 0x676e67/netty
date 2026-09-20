@@ -1,0 +1,27 @@
+[package]
+name = "wreq-quiche-interop"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[workspace]
+
+[features]
+http3-datagram = []
+[[test]]
+name = "client"
+path = "client.rs"
+[dependencies]
+wreq-proto = { path = "../..", features = ["full"] }
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+futures-util = { version = "0.3", features = ["sink"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+quic = { version = "=0.12.1", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+quinn = { version = "=0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = "=0.14.9"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-quiche = { version = "=0.19.1", default-features = false }
+tempfile = "3"
+[patch.crates-io]
+http3 = { git = "https://github.com/0x676e67/http3", rev = "e7103dc594a88b8473a1f6af477c5e17266767cb" }
