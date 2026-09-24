@@ -102,7 +102,7 @@ mod h3_client {
     ///
     /// ```
     /// use std::future::Future;
-    /// use hwire::rt::Executor;
+    /// use netty::rt::Executor;
     ///
     /// #[derive(Clone)]
     /// struct TokioExecutor;

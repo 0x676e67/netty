@@ -753,45 +753,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
 
 [[package]]
-name = "hwire"
-version = "0.2.5"
-dependencies = [
- "bytes",
- "compio",
- "futures-channel",
- "futures-util",
- "h2",
- "h3",
- "h3-quinn",
- "http",
- "http-body",
- "http-body-util",
- "http2",
- "http3",
- "http3-datagram",
- "http3-quic",
- "httparse",
- "hwire",
- "hyper",
- "pin-project-lite",
- "pretty_env_logger",
- "quic",
- "quinn",
- "rcgen",
- "rustls",
- "send_wrapper",
- "smallvec",
- "socket2",
- "spmc",
- "tokio",
- "tokio-test",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "want",
-]
-
-[[package]]
 name = "hyper"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -959,6 +920,45 @@ name = "mod_use"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "21909324aa58f5c284d91cac514c6d081210901dc372d7c8ea6a9d7e0406097a"
+
+[[package]]
+name = "netty"
+version = "0.2.5"
+dependencies = [
+ "bytes",
+ "compio",
+ "futures-channel",
+ "futures-util",
+ "h2",
+ "h3",
+ "h3-quinn",
+ "http",
+ "http-body",
+ "http-body-util",
+ "http2",
+ "http3",
+ "http3-datagram",
+ "http3-quic",
+ "httparse",
+ "hyper",
+ "netty",
+ "pin-project-lite",
+ "pretty_env_logger",
+ "quic",
+ "quinn",
+ "rcgen",
+ "rustls",
+ "send_wrapper",
+ "smallvec",
+ "socket2",
+ "spmc",
+ "tokio",
+ "tokio-test",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "want",
+]
 
 [[package]]
 name = "nom"

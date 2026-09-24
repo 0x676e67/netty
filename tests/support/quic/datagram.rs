@@ -8,7 +8,7 @@ use futures_util::{
     stream::{self, BoxStream},
     StreamExt,
 };
-use hwire::rt::quic::{
+use netty::rt::quic::{
     ConnectionError, DatagramConnection, DatagramError, RecvDatagram, SendDatagram,
 };
 

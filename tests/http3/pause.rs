@@ -10,7 +10,7 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use futures_util::task::AtomicWaker;
-use hwire::rt::quic::{self, BidiStream, Connection, OpenStreams, RecvStream, SendStream};
+use netty::rt::quic::{self, BidiStream, Connection, OpenStreams, RecvStream, SendStream};
 use tokio::sync::Notify;
 
 #[derive(Clone, Default)]

@@ -1,7 +1,7 @@
 //! Runtime components
 //!
-//! This module provides traits and types that allow hwire to be runtime-agnostic.
-//! By abstracting over async runtimes, hwire can work with different executors, timers, and IO
+//! This module provides traits and types that allow netty to be runtime-agnostic.
+//! By abstracting over async runtimes, netty can work with different executors, timers, and IO
 //! transports.
 //!
 //! The main runtime components are:
@@ -13,7 +13,7 @@
 //! - **IO Transports**: [`tokio::io::AsyncRead`] and [`tokio::io::AsyncWrite`] provide asynchronous
 //!   reading and writing; applications provide adapters for other IO backends.
 //!
-//! By implementing these traits, you can customize how hwire interacts with your chosen
+//! By implementing these traits, you can customize how netty interacts with your chosen
 //! runtime environment. Concrete runtime adapters in this repository are test utilities only.
 
 pub mod bounds;

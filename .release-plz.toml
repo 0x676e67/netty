@@ -10,5 +10,5 @@ git_tag_enable = true
 git_tag_name = "{{ package }}-v{{ version }}"
 
 [[package]]
-name = "hwire"
+name = "netty"
 git_tag_name = "v{{ version }}"

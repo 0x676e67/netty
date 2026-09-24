@@ -8,7 +8,7 @@
 #![cfg_attr(all(test, feature = "nightly"), feature(test))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-//! # hwire
+//! # netty
 //!
 //! An asynchronous HTTP library with streaming bodies and pluggable runtime and transport
 //! interfaces.

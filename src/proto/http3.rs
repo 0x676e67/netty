@@ -2,7 +2,7 @@
 //!
 //! Extended CONNECT and pseudo-header ordering use request extensions:
 //! ```
-//! use hwire::http3::{Protocol, PseudoId, PseudoOrder};
+//! use netty::http3::{Protocol, PseudoId, PseudoOrder};
 //!
 //! let request = http::Request::connect("https://example.com/tunnel")
 //!     .extension(Protocol::WEBSOCKET)

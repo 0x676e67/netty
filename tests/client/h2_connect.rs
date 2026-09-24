@@ -5,8 +5,8 @@ use futures_channel::oneshot;
 use futures_util::future::BoxFuture;
 use http::{Request, Response, StatusCode};
 use http_body_util::Empty;
-use hwire::{conn::http2, rt::Executor as _, upgrade::Upgraded};
 use hyper::service::service_fn;
+use netty::{conn::http2, rt::Executor as _, upgrade::Upgraded};
 use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio_test::{assert_pending, assert_ready, task};
 
@@ -28,7 +28,7 @@ struct Driver {
 
 // ===== impl Executor =====
 
-impl<F> hwire::rt::Executor<F> for Executor
+impl<F> netty::rt::Executor<F> for Executor
 where
     F: Future<Output = ()> + Send + 'static,
 {
@@ -156,7 +156,7 @@ fn connect_request(
         .finish(
             http2::Builder::new(executor)
                 .options(
-                    hwire::http2::Http2Options::builder()
+                    netty::http2::Http2Options::builder()
                         .initial_window_size(1024)
                         .build(),
                 )
@@ -185,7 +185,7 @@ fn connect_request(
     });
     let response = driver.finish(client.try_send_request(request)).unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let upgraded = driver.finish(hwire::upgrade::on(response)).unwrap();
+    let upgraded = driver.finish(netty::upgrade::on(response)).unwrap();
     let server = TokioIo::new(driver.finish(server_rx).unwrap());
     (driver, upgraded, server, client)
 }
@@ -299,6 +299,6 @@ async fn h2_connect_reset_during_backpressure() {
     assert!(error
         .get_ref()
         .unwrap()
-        .downcast_ref::<hwire::Error>()
+        .downcast_ref::<netty::Error>()
         .is_some());
 }
