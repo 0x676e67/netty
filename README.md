@@ -36,10 +36,6 @@ fn main() {
 }
 ```
 
-## Low-level
-
-**netty** handles HTTP protocol details, leaving runtime and transport to its callers; [wreq] provides a ready-to-use client.
-
 ## Documentation
 
 - [Protocol API][protocol-api]
@@ -60,6 +56,5 @@ Unless you explicitly state otherwise, any contribution intentionally submitted 
 [No](https://netty.io).
 
 [Hyper]: https://github.com/hyperium/hyper
-[wreq]: https://github.com/0x676e67/wreq
 [protocol-api]: https://docs.rs/netty
 [license]: ./LICENSE
