@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790326269566,
+  "lastUpdate": 1790326598074,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -11987,6 +11987,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 5513778,
             "range": "± 160192.70",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ae79c3cf5fa4915decedc42981fc161b3ca9471b",
+          "message": "Clean up release-plz workflow by removing HTTP/3 patch\n\nRemoved HTTP/3 patching steps from the workflow.",
+          "timestamp": "2026-09-25T16:53:16+08:00",
+          "tree_id": "8090dde82efa51fee302cd4d975da95d13ba8596",
+          "url": "https://github.com/0x676e67/netty/commit/ae79c3cf5fa4915decedc42981fc161b3ca9471b"
+        },
+        "date": 1790326596334,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 62162,
+            "range": "± 2726.15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 4290975,
+            "range": "± 92303.10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 23697,
+            "range": "± 420.03",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 24536,
+            "range": "± 354.22",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 28965,
+            "range": "± 581.18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 100948,
+            "range": "± 3569.49",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 41000259,
+            "range": "± 4951.37",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 77360,
+            "range": "± 1954.44",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 16782332,
+            "range": "± 16410126.34",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 24835943,
+            "range": "± 16449343.79",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 8370816,
+            "range": "± 78673.06",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 58148803,
+            "range": "± 3330801.62",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 58793525,
+            "range": "± 1102238.19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 5815033,
+            "range": "± 65501.47",
             "unit": "ns/iter"
           }
         ]
