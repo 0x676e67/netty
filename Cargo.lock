@@ -923,7 +923,7 @@ checksum = "21909324aa58f5c284d91cac514c6d081210901dc372d7c8ea6a9d7e0406097a"
 
 [[package]]
 name = "netty"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "bytes",
  "compio",
