@@ -4,7 +4,7 @@ use super::*;
 
 struct Preserve;
 
-impl hwire::ext::OnPreserveHeaderCallback for Preserve {
+impl netty::ext::OnPreserveHeaderCallback for Preserve {
     fn call(&self, headers: &mut HeaderMap) {
         // The callback must see automatically inserted framing fields.
         assert_eq!(headers["content-length"], "0");
@@ -59,7 +59,7 @@ async fn preserve_header_callback_reaches_peer_in_order() {
             .header("x-last", "two")
             .body(Full::new(Bytes::new()))
             .unwrap();
-        hwire::ext::on_preserve_header(&mut request, Preserve);
+        netty::ext::on_preserve_header(&mut request, Preserve);
         tx.try_send_request(request)
             .await
             .unwrap()

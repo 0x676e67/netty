@@ -434,7 +434,7 @@ async fn async_test(cfg: __TestConfig) {
             let stream = TcpStream::connect(addr).await.unwrap();
 
             let res = if http2_only {
-                let (mut sender, conn) = hwire::conn::http2::Builder::new(rt::TokioExecutor::new())
+                let (mut sender, conn) = netty::conn::http2::Builder::new(rt::TokioExecutor::new())
                     .handshake(stream)
                     .await
                     .unwrap();
@@ -446,7 +446,7 @@ async fn async_test(cfg: __TestConfig) {
                 });
                 sender.try_send_request(req).await.unwrap()
             } else {
-                let (mut sender, conn) = hwire::conn::http1::Builder::default()
+                let (mut sender, conn) = netty::conn::http1::Builder::default()
                     .handshake(stream)
                     .await
                     .unwrap();
@@ -532,7 +532,7 @@ async fn naive_proxy(cfg: ProxyConfig) -> (SocketAddr, impl Future<Output = ()>)
 
                         let resp = if http2_only {
                             let (mut sender, conn) =
-                                hwire::conn::http2::Builder::new(rt::TokioExecutor::new())
+                                netty::conn::http2::Builder::new(rt::TokioExecutor::new())
                                     .handshake(stream)
                                     .await
                                     .unwrap();
@@ -545,7 +545,7 @@ async fn naive_proxy(cfg: ProxyConfig) -> (SocketAddr, impl Future<Output = ()>)
 
                             sender.try_send_request(req).await.unwrap()
                         } else {
-                            let builder = hwire::conn::http1::Builder::default();
+                            let builder = netty::conn::http1::Builder::default();
                             let (mut sender, conn) = builder.handshake(stream).await.unwrap();
 
                             tokio::task::spawn(async move {
@@ -567,7 +567,7 @@ async fn naive_proxy(cfg: ProxyConfig) -> (SocketAddr, impl Future<Output = ()>)
                         let mut builder = Response::builder().status(parts.status);
                         *builder.headers_mut().unwrap() = parts.headers;
 
-                        Result::<Response<hwire::body::Incoming>, hwire::Error>::Ok(
+                        Result::<Response<netty::body::Incoming>, netty::Error>::Ok(
                             builder.body(body).unwrap(),
                         )
                     }

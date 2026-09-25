@@ -1,7 +1,7 @@
 [changelog]
 body = """
 {%- macro remote_url() -%}
-  https://github.com/0x676e67/hwire
+  https://github.com/0x676e67/netty
 {%- endmacro -%}
 
 {% macro print_commit(commit) -%}
@@ -37,7 +37,7 @@ protect_breaking_commits = false
 tag_pattern = "^v[0-9].*"
 sort_commits = "newest"
 commit_preprocessors = [
-  { pattern = '\((\w+\s)?#([0-9]+)\)', replace = "([#${2}](https://github.com/0x676e67/hwire/issues/${2}))" },
+  { pattern = '\((\w+\s)?#([0-9]+)\)', replace = "([#${2}](https://github.com/0x676e67/netty/issues/${2}))" },
 ]
 commit_parsers = [
   { message = "^feat", group = "<!-- 0 -->Features" },

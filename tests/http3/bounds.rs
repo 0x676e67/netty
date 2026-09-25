@@ -6,7 +6,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use hwire::rt::quic::{self as rt, OpenStreams};
+use netty::rt::quic::{self as rt, OpenStreams};
 
 use super::*;
 

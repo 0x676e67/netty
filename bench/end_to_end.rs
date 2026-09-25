@@ -11,7 +11,7 @@ use std::{convert::Infallible, net::SocketAddr};
 use futures_util::future::join_all;
 use http::{Method, Request, Response};
 use http_body_util::BodyExt;
-use hwire::http2::Http2Options;
+use netty::http2::Http2Options;
 
 use crate::support::{rt, tokiort};
 
@@ -306,15 +306,15 @@ impl Opts {
         let addr = spawn_server(&rt, &self);
 
         enum Client {
-            Http1(hwire::conn::http1::SendRequest<BoxedBody>),
-            Http2(hwire::conn::http2::SendRequest<BoxedBody>),
+            Http1(netty::conn::http1::SendRequest<BoxedBody>),
+            Http2(netty::conn::http2::SendRequest<BoxedBody>),
         }
 
         let mut client = rt.block_on(async {
             if self.http2 {
                 let tcp = tokio::net::TcpStream::connect(&addr).await.unwrap();
 
-                let (tx, conn) = hwire::conn::http2::Builder::new(rt::TokioExecutor::new())
+                let (tx, conn) = netty::conn::http2::Builder::new(rt::TokioExecutor::new())
                     .options(
                         Http2Options::builder()
                             .initial_window_size(self.http2_stream_window)
@@ -331,7 +331,7 @@ impl Opts {
                 todo!("http/1 parallel >1");
             } else {
                 let tcp = tokio::net::TcpStream::connect(&addr).await.unwrap();
-                let (tx, conn) = hwire::conn::http1::Builder::default()
+                let (tx, conn) = netty::conn::http1::Builder::default()
                     .handshake(tcp)
                     .await
                     .unwrap();
@@ -381,7 +381,7 @@ impl Opts {
                 }
             };
             async {
-                let res: Response<hwire::body::Incoming> = fut.await.expect("client wait");
+                let res: Response<netty::body::Incoming> = fut.await.expect("client wait");
                 let mut body = res.into_body();
                 while let Some(_chunk) = body.frame().await {}
             }

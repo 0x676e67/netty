@@ -46,7 +46,7 @@ jobs:
       - *install-rust
       # The published hwire 0.2.5 needs HTTP/3 fixes not yet on crates.io.
       # Apply them to release-plz's separate semver baseline workspace.
-      # Remove after a hwire release depends on a fixed crates.io HTTP/3.
+      # Remove after a netty release depends on a fixed crates.io HTTP/3.
       - name: Patch HTTP/3 for the semver baseline
         run: |
           mkdir -p "$HOME/.cargo"

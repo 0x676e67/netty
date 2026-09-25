@@ -11,7 +11,7 @@ pub(crate) struct OnInformational(Arc<dyn OnInformationalCallback + Send + Sync>
 /// # let some_body = ();
 /// let mut req = http::Request::new(some_body);
 ///
-/// hwire::ext::on_informational(&mut req, |res| {
+/// netty::ext::on_informational(&mut req, |res| {
 ///     println!("informational: {:?}", res.status());
 /// });
 ///

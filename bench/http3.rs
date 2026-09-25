@@ -21,7 +21,7 @@ use std::{
 use bytes::{Buf, Bytes};
 use http::{Request, Response};
 use http_body_util::{BodyExt, Full};
-use hwire::{conn::http3::Builder, http3::Http3Options, rt::Executor};
+use netty::{conn::http3::Builder, http3::Http3Options, rt::Executor};
 use tokio::{task::JoinSet, time::timeout};
 
 #[derive(Clone, Default)]
@@ -59,7 +59,7 @@ impl<F: Future<Output = ()> + Send + 'static> Executor<F> for Exec {
 
 #[derive(Clone)]
 enum Sender {
-    Proto(hwire::conn::http3::SendRequest<Full<Bytes>>),
+    Proto(netty::conn::http3::SendRequest<Full<Bytes>>),
     Direct(http3::client::SendRequest<http3_quic::OpenStreams, Bytes>),
     Cloned(http3::client::SendRequest<http3_quic::OpenStreams, Bytes>),
     Task(http3::client::SendRequest<http3_quic::OpenStreams, Bytes>),
@@ -416,7 +416,7 @@ async fn measure(
     client_endpoint.wait_idle().await;
     server_endpoint.wait_idle().await;
     let implementation = if proto {
-        "hwire"
+        "netty"
     } else if direct_tasks {
         "http3-task"
     } else if direct_clone {

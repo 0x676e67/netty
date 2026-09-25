@@ -1,11 +1,11 @@
 [package]
-name = "hwire"
+name = "netty"
 version = "0.2.5"
-description = "Async HTTP, down to the wire"
+description = "Async network clients, down to the wire"
 keywords = ["http", "client"]
 categories = ["web-programming::http-client"]
-repository = "https://github.com/0x676e67/hwire"
-documentation = "https://docs.rs/hwire"
+repository = "https://github.com/0x676e67/netty"
+documentation = "https://docs.rs/netty"
 authors = ["0x676e67 <gngppz@gmail.com>", "Sean McArthur <sean@seanmonstar.com>"]
 license = "Apache-2.0"
 edition = "2021"
@@ -67,7 +67,7 @@ http-body-util = "0.1.3"
 pretty_env_logger = "0.5"
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-util = { version = "0.3", default-features = false, features = ["alloc", "sink"] }
-hwire = { path = "." }
+netty = { path = "." }
 hyper = { version = "1.7.0", default-features = false, features = [
     "http1",
     "http2",

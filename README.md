@@ -1,10 +1,10 @@
-# hwire
+# netty
 
-[![CI](https://github.com/0x676e67/hwire/actions/workflows/ci.yml/badge.svg)](https://github.com/0x676e67/hwire/actions/workflows/ci.yml)
-[![License](https://img.shields.io/crates/l/hwire.svg)][license]
-[![Crates.io](https://img.shields.io/crates/v/hwire.svg)](https://crates.io/crates/hwire)
+[![CI](https://github.com/0x676e67/netty/actions/workflows/ci.yml/badge.svg)](https://github.com/0x676e67/netty/actions/workflows/ci.yml)
+[![License](https://img.shields.io/crates/l/netty.svg)][license]
+[![Crates.io](https://img.shields.io/crates/v/netty.svg)](https://crates.io/crates/netty)
 
-Async HTTP, down to the wire.
+Async network clients, down to the wire.
 
 ## Features
 
@@ -23,27 +23,23 @@ Add the protocol crate to `Cargo.toml`:
 
 ```toml
 [dependencies]
-hwire = "0.2"
+netty = "0.2"
 ```
 
 The client APIs are organized by protocol:
 
 ```rust
-use hwire::conn::{http1, http2};
+use netty::conn::{http1, http2};
 
 fn main() {
     // ...
 }
 ```
 
-## Low-level
-
-**hwire** handles HTTP protocol details, leaving runtime and transport to its callers; [wreq] provides a ready-to-use client.
-
 ## Documentation
 
 - [Protocol API][protocol-api]
-- [Runtime contracts](https://docs.rs/hwire/latest/hwire/rt/)
+- [Runtime contracts](https://docs.rs/netty/latest/netty/rt/)
 
 ## License
 
@@ -53,7 +49,12 @@ Licensed under either of Apache License, Version 2.0 ([LICENSE][license] or [htt
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the [Apache-2.0][license] license, shall be licensed as above, without any additional terms or conditions.
 
+## FAQ
+
+**Is this the Java networking framework?**
+
+[No](https://netty.io).
+
 [Hyper]: https://github.com/hyperium/hyper
-[wreq]: https://github.com/0x676e67/wreq
-[protocol-api]: https://docs.rs/hwire
+[protocol-api]: https://docs.rs/netty
 [license]: ./LICENSE

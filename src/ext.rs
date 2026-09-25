@@ -1,4 +1,4 @@
-//! Extensions for HTTP messages in hwire.
+//! Extensions for HTTP messages in netty.
 //!
 //! Extensions carry metadata and callbacks alongside a message's headers and body.
 //! Use [`http::Request::extensions`] or [`http::Response::extensions`] to read the
@@ -14,7 +14,7 @@
 //!
 //! ```
 //! # let response = http::Response::new(());
-//! let reason = response.extensions().get::<hwire::ext::ReasonPhrase>();
+//! let reason = response.extensions().get::<netty::ext::ReasonPhrase>();
 //! if let Some(reason) = reason {
 //!     println!("{reason:?}");
 //! }

@@ -11,7 +11,7 @@ use std::{
 use bytes::{Buf, Bytes};
 use http::{Request, Response};
 use http_body_util::{BodyExt, Full};
-use hwire::{http3::Http3Options, rt::Executor};
+use netty::{http3::Http3Options, rt::Executor};
 use tokio::{task::JoinSet, time::timeout};
 
 #[derive(Clone, Default)]
@@ -90,7 +90,7 @@ async fn cancellation_and_close() {
     let client_quic = client_quic.unwrap();
     let ((tx, driver), mut server) = tokio::join!(
         async {
-            hwire::conn::http3::Builder::new(exec.clone())
+            netty::conn::http3::Builder::new(exec.clone())
                 .options(Http3Options::builder().send_grease(false).build())
                 .handshake(crate::native::Connection::new(client_quic.clone()))
                 .await
