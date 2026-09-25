@@ -44,18 +44,6 @@ jobs:
     steps:
       - *checkout
       - *install-rust
-      # The published hwire 0.2.5 needs HTTP/3 fixes not yet on crates.io.
-      # Apply them to release-plz's separate semver baseline workspace.
-      # Remove after a netty release depends on a fixed crates.io HTTP/3.
-      - name: Patch HTTP/3 for the semver baseline
-        run: |
-          mkdir -p "$HOME/.cargo"
-          cat >> "$HOME/.cargo/config.toml" <<'EOF'
-
-          [patch.crates-io]
-          http3 = { git = "https://github.com/0x676e67/http3", rev = "ec227449ecf66a129b47529352b8a0954d005f3d" }
-          http3-datagram = { git = "https://github.com/0x676e67/http3", rev = "ec227449ecf66a129b47529352b8a0954d005f3d" }
-          EOF
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
