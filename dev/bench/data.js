@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790354967414,
+  "lastUpdate": 1790529348471,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -12527,6 +12527,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 5577002,
             "range": "± 91964.40",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f598a3edfcc72c4ad0ca7e1a0aff884ee1cff3d7",
+          "message": "fix(http2): do not reserve capacity for idle Upgraded streams (#140)\n\nThe send task of an HTTP/2 `Upgraded` stream reserved one byte of capacity at the top of\nevery loop, before any write was queued. As with `PipeToSendStream` before #4061, an idle\ntunnel then pins the last byte of the connection-level window, and a second stream can\ndeadlock against peers that only send WINDOW_UPDATE once their window is exhausted.\n\nPull the next write from the channel first, hold it until h2 has capacity, and only then\nreserve. The next write is still not pulled before the held one is handed to h2, so the\nwriter keeps seeing backpressure. The task now always polls the channel when it holds\nnothing, which makes the separate close notification unnecessary, so remove it.\n\nRefs #4003\n\nLocal adaptation: retain netty's http2 crate paths and Tokio I/O traits.\nUse the existing deterministic CONNECT driver with an upstream Hyper server\ninstead of the upstream raw h2 server. Keep the server's upgraded receive\nside unread to withhold WINDOW_UPDATE, and assert that the second one-byte\nrequest completes before reading the tunnel. No dependency changes.\n\nCo-authored-by: Leo Camus <leo.camus23@gmail.com>",
+          "timestamp": "2026-09-28T01:11:53+08:00",
+          "tree_id": "4bea3af3236f623ccb8ee0dbbdecae48f23036c1",
+          "url": "https://github.com/0x676e67/netty/commit/f598a3edfcc72c4ad0ca7e1a0aff884ee1cff3d7"
+        },
+        "date": 1790529347364,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 91245,
+            "range": "± 3639.87",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 6783146,
+            "range": "± 660201.32",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 21550,
+            "range": "± 521.27",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 23745,
+            "range": "± 505.42",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 33764,
+            "range": "± 944.50",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 104795,
+            "range": "± 2326.03",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 40999897,
+            "range": "± 5175.69",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 86141,
+            "range": "± 2023.32",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 16221117,
+            "range": "± 16396430.03",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 7963053,
+            "range": "± 131896.54",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 7943678,
+            "range": "± 141311.86",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 94300042,
+            "range": "± 1703443.88",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 54704235,
+            "range": "± 894184.84",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 5468411,
+            "range": "± 186756.95",
             "unit": "ns/iter"
           }
         ]
