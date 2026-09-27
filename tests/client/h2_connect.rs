@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures_channel::oneshot;
 use futures_util::future::BoxFuture;
 use http::{Request, Response, StatusCode};
-use http_body_util::Empty;
+use http_body_util::{BodyExt, Empty, Full};
 use hyper::service::service_fn;
 use netty::{conn::http2, rt::Executor as _, upgrade::Upgraded};
 use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
@@ -206,6 +206,88 @@ async fn h2_extended_connect_peer_support() {
     driver.finish(server.write_all(b"pong")).unwrap();
     driver.finish(upgraded.read_exact(&mut received)).unwrap();
     assert_eq!(&received, b"pong");
+    driver.finish(upgraded.shutdown()).unwrap();
+    driver.finish(server.shutdown()).unwrap();
+}
+
+// https://github.com/hyperium/hyper/issues/4003, for HTTP/2 CONNECT
+//
+// Like `h2_idle_stream_does_not_pin_connection_window`, but the idle
+// stream is the send side of an `Upgraded` tunnel. It must not reserve
+// connection-level flow control capacity while it has nothing to write.
+#[tokio::test]
+async fn h2_idle_upgraded_does_not_pin_connection_window() {
+    // One byte short of the initial connection-level window.
+    // https://www.rfc-editor.org/rfc/rfc9113.html#section-6.9.2
+    const STREAM_A_LEN: usize = 65534;
+
+    let (tx, rx) = mpsc::channel();
+    let executor = Executor(tx);
+    let mut driver = Driver {
+        executor: executor.clone(),
+        rx,
+        tasks: Vec::new(),
+    };
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (server_tx, server_rx) = oneshot::channel();
+    let server_tx = std::sync::Mutex::new(Some(server_tx));
+    let upgrade_executor = executor.clone();
+    let service = service_fn(move |request: Request<hyper::body::Incoming>| {
+        let tx = (request.method() == http::Method::CONNECT)
+            .then(|| server_tx.lock().unwrap().take().unwrap());
+        let executor = upgrade_executor.clone();
+        async move {
+            if let Some(tx) = tx {
+                let upgrade = hyper::upgrade::on(request);
+                executor.execute(async move {
+                    tx.send(upgrade.await.unwrap()).unwrap();
+                });
+            } else {
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                assert_eq!(body, Bytes::from_static(b"b"));
+            }
+            Ok::<_, std::convert::Infallible>(Response::new(Empty::<Bytes>::new()))
+        }
+    });
+    let server_executor = executor.clone();
+    let (mut client, conn) = driver
+        .finish(http2::Builder::new(executor).handshake::<_, Full<Bytes>>(client_io))
+        .unwrap();
+    driver.spawn(async move {
+        hyper::server::conn::http2::Builder::new(server_executor)
+            .initial_stream_window_size(65535)
+            .initial_connection_window_size(65535)
+            .serve_connection(TokioIo::new(server_io), service)
+            .await
+            .unwrap();
+    });
+    driver.spawn(async move {
+        conn.await.unwrap();
+    });
+    let request = Request::connect("localhost:443")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = driver.finish(client.try_send_request(request)).unwrap();
+    let mut upgraded = driver.finish(netty::upgrade::on(response)).unwrap();
+    let mut server = TokioIo::new(driver.finish(server_rx).unwrap());
+
+    // Keep the Hyper server's upgraded receive side alive without reading it,
+    // so it cannot release capacity and send WINDOW_UPDATE for the tunnel.
+    let data = vec![b'a'; STREAM_A_LEN];
+    driver.finish(upgraded.write_all(&data)).unwrap();
+
+    // Driver::finish polls every task to quiescence. The idle tunnel must leave
+    // the final connection-window byte available for the second request.
+    let request = Request::post("https://localhost/b")
+        .body(Full::new(Bytes::from_static(b"b")))
+        .unwrap();
+    let mut response = task::spawn(client.try_send_request(request));
+    let response = assert_ready!(driver.poll(&mut response)).unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut received = vec![0; STREAM_A_LEN];
+    driver.finish(server.read_exact(&mut received)).unwrap();
+    assert_eq!(received, data);
     driver.finish(upgraded.shutdown()).unwrap();
     driver.finish(server.shutdown()).unwrap();
 }
