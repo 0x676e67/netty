@@ -1,3 +1,8 @@
+//! Presents an [`rt::quic`](crate::rt::quic) backend to the `http3` protocol
+//! layer, which expects its own `quic` traits. This is the inverse of
+//! [`Compat`](crate::rt::quic::Compat): the backend implements the crate's
+//! contract, and this adapter satisfies http3's.
+
 use std::task::{ready, Context, Poll};
 
 use bytes::Buf;
@@ -5,20 +10,25 @@ use http3::quic::WriteBuf;
 
 use crate::rt::quic;
 
+/// Wraps a backend connection or opener for the protocol layer.
 #[derive(Clone)]
 pub(crate) struct Transport<T>(pub(crate) T);
 
+/// Wraps a backend stream, holding one write the backend has not accepted yet.
 pub(crate) struct Stream<T, B> {
     inner: T,
     pending: Option<WriteBuf<B>>,
 }
 
+/// The error http3 expects when accepting streams ends normally, which the
+/// backend reports as `None`.
 fn closed() -> http3::quic::ConnectionErrorIncoming {
     http3::quic::ConnectionErrorIncoming::ApplicationClose {
         error_code: http3::error::Code::H3_NO_ERROR.value(),
     }
 }
 
+/// A backend contract violation, reported as an internal connection error.
 fn contract_error(reason: &str) -> http3::quic::StreamErrorIncoming {
     http3::quic::StreamErrorIncoming::ConnectionErrorIncoming {
         connection_error: http3::quic::ConnectionErrorIncoming::InternalError(reason.into()),
@@ -27,9 +37,12 @@ fn contract_error(reason: &str) -> http3::quic::StreamErrorIncoming {
 
 // ===== impl Transport =====
 
-impl<B: Buf, Q: quic::Connection<B>> http3::quic::Connection<B> for Transport<Q> {
+impl<B, Q> http3::quic::Connection<B> for Transport<Q>
+where
+    B: Buf,
+    Q: quic::Connection<B>,
+{
     type RecvStream = Stream<Q::RecvStream, B>;
-
     type OpenStreams = Transport<Q::OpenStreams>;
 
     fn poll_accept_recv(
@@ -55,9 +68,12 @@ impl<B: Buf, Q: quic::Connection<B>> http3::quic::Connection<B> for Transport<Q>
     }
 }
 
-impl<B: Buf, Q: quic::OpenStreams<B>> http3::quic::OpenStreams<B> for Transport<Q> {
+impl<B, Q> http3::quic::OpenStreams<B> for Transport<Q>
+where
+    B: Buf,
+    Q: quic::OpenStreams<B>,
+{
     type SendStream = Stream<Q::SendStream, B>;
-
     type BidiStream = Stream<Q::BidiStream, B>;
 
     fn poll_open_bidi(
@@ -82,6 +98,7 @@ impl<B: Buf, Q: quic::OpenStreams<B>> http3::quic::OpenStreams<B> for Transport<
 // ===== impl Stream =====
 
 impl<T, B> Stream<T, B> {
+    /// Wraps a backend stream with no pending write.
     fn new(inner: T) -> Self {
         Self {
             inner,
@@ -90,7 +107,11 @@ impl<T, B> Stream<T, B> {
     }
 }
 
-impl<T: quic::SendStream<B>, B: Buf> http3::quic::SendStream<B> for Stream<T, B> {
+impl<T, B> http3::quic::SendStream<B> for Stream<T, B>
+where
+    T: quic::SendStream<B>,
+    B: Buf,
+{
     fn poll_ready(
         &mut self,
         cx: &mut Context<'_>,
@@ -152,7 +173,11 @@ impl<T: quic::SendStream<B>, B: Buf> http3::quic::SendStream<B> for Stream<T, B>
     }
 }
 
-impl<T: quic::SendStream<B>, B: Buf> http3::quic::SendStreamUnframed<B> for Stream<T, B> {
+impl<T, B> http3::quic::SendStreamUnframed<B> for Stream<T, B>
+where
+    T: quic::SendStream<B>,
+    B: Buf,
+{
     fn poll_send<D: Buf>(
         &mut self,
         cx: &mut Context<'_>,
@@ -163,7 +188,11 @@ impl<T: quic::SendStream<B>, B: Buf> http3::quic::SendStreamUnframed<B> for Stre
     }
 }
 
-impl<T: quic::RecvStream, B: Buf> http3::quic::RecvStream for Stream<T, B> {
+impl<T, B> http3::quic::RecvStream for Stream<T, B>
+where
+    T: quic::RecvStream,
+    B: Buf,
+{
     type Buf = T::Buf;
 
     fn poll_data(
@@ -182,9 +211,12 @@ impl<T: quic::RecvStream, B: Buf> http3::quic::RecvStream for Stream<T, B> {
     }
 }
 
-impl<T: quic::BidiStream<B>, B: Buf> http3::quic::BidiStream<B> for Stream<T, B> {
+impl<T, B> http3::quic::BidiStream<B> for Stream<T, B>
+where
+    T: quic::BidiStream<B>,
+    B: Buf,
+{
     type SendStream = Stream<T::SendStream, B>;
-
     type RecvStream = Stream<T::RecvStream, B>;
 
     fn split(self) -> (Self::SendStream, Self::RecvStream) {

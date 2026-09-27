@@ -13,7 +13,7 @@ use std::{
 };
 
 use futures_util::future::LocalBoxFuture;
-use hwire::rt::{Executor, Sleep, Timer};
+use netty::rt::{Executor, Sleep, Timer};
 use send_wrapper::SendWrapper;
 
 /// Future executor that utilises the `compio` runtime.

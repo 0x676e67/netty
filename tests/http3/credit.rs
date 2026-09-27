@@ -2,22 +2,8 @@
 use std::sync::Arc;
 
 use futures_util::{stream::FuturesUnordered, StreamExt};
-use tokio::sync::mpsc;
 
 use super::*;
-
-#[derive(Clone)]
-struct CompletionExec(mpsc::UnboundedSender<()>);
-
-impl<F: Future<Output = ()> + Send + 'static> Executor<F> for CompletionExec {
-    fn execute(&self, future: F) {
-        let completed = self.0.clone();
-        tokio::spawn(async move {
-            future.await;
-            let _ = completed.send(());
-        });
-    }
-}
 
 #[tokio::test]
 async fn canceled_openers_do_not_strand_other_credit_waiters() {
@@ -32,12 +18,11 @@ async fn canceled_openers_do_not_strand_other_credit_waiters() {
         let server_quic = server.clone();
         let pause = pause::Pause::default();
         pause.resume();
-        let (completed, mut completions) = mpsc::unbounded_channel();
-        let (mut tx, driver) = Builder::new(CompletionExec(completed))
-            .handshake::<_, ClientBody>(pause.wrap(crate::native::Connection::new(client)))
+        let (mut tx, driver) = Builder::new(Exec)
+            .handshake(pause.wrap(crate::native::Connection::new(client)))
             .await
             .unwrap();
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let mut server = h3::server::builder()
             .build::<_, Bytes>(h3_quinn::Connection::new(server))
             .await
@@ -45,23 +30,22 @@ async fn canceled_openers_do_not_strand_other_credit_waiters() {
         let mut requests = Vec::new();
         for index in 0..REQUESTS {
             tx.ready().await.unwrap();
-            requests.push(Some(
+            let mut request = tokio_test::task::spawn(
                 tx.try_send_request(
                     Request::get(format!("https://localhost/{index}"))
                         .body(Full::new(Bytes::new()))
                         .unwrap(),
                 ),
-            ));
+            );
+            assert!(request.poll().is_pending());
+            requests.push(Some(request));
             pause.waiting_for_credit().await;
         }
         for request in requests.iter_mut().step_by(2) {
             drop(request.take());
         }
-        // Wait for cancellation to destroy the native OpenBi futures before
-        // granting credit, so canceled requests cannot race onto the wire.
-        for _ in 0..REQUESTS / 2 {
-            completions.recv().await.unwrap();
-        }
+        // Dropping a request future destroys its native OpenBi future at once,
+        // so canceled requests cannot race onto the wire once credit arrives.
         server_quic.set_max_concurrent_bi_streams(1_u32.into());
         let peer = tokio::spawn(async move {
             let mut seen = [false; REQUESTS];
@@ -114,12 +98,10 @@ async fn canceled_openers_do_not_strand_other_credit_waiters() {
             })
             .collect::<FuturesUnordered<_>>();
         while survivors.next().await.is_some() {}
-        for _ in 0..REQUESTS / 2 {
-            completions.recv().await.unwrap();
-        }
         assert!(client_stats.stats().frame_rx.max_streams_bidi > 1);
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         peer.await.unwrap();
     })
     .await;

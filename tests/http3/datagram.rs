@@ -1,4 +1,4 @@
-use hwire::conn::http3::datagram::{self, SendErrorKind};
+use netty::conn::http3::datagram::{self, SendErrorKind};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
@@ -12,7 +12,7 @@ async fn dropping_rejected_connect_body_preserves_next_datagram_session() {
             mut server,
             server_quic,
             _endpoints,
-        } = pair_config::<ClientBody, _>(
+        } = pair_config(
             Http3Options::builder().max_concurrent_requests(1).build(),
             Exec,
             true,
@@ -21,7 +21,7 @@ async fn dropping_rejected_connect_body_preserves_next_datagram_session() {
             None,
         )
         .await;
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let (reset_old, reset) = oneshot::channel();
         let (old_reset, reset_seen) = oneshot::channel();
         let server_task = tokio::spawn(async move {
@@ -81,7 +81,7 @@ async fn dropping_rejected_connect_body_preserves_next_datagram_session() {
         let mut rejected = tx.try_send_request(datagram_request()).await.unwrap();
         assert_eq!(rejected.status(), 407);
         assert!(datagram::on(&mut rejected).is_none());
-        assert!(hwire::upgrade::on(&mut rejected).await.is_err());
+        assert!(netty::upgrade::on(&mut rejected).await.is_err());
         drop(rejected);
 
         let mut response = tx.try_send_request(datagram_request()).await.unwrap();
@@ -97,7 +97,8 @@ async fn dropping_rejected_connect_body_preserves_next_datagram_session() {
         assert!(receiver.recv().await.is_none());
         drop(control);
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -113,7 +114,7 @@ async fn control_fin_closes_only_its_datagram_direction() {
                 mut server,
                 server_quic,
                 _endpoints,
-            } = pair_config::<ClientBody, _>(
+            } = pair_config(
                 Http3Options::builder().max_concurrent_requests(1).build(),
                 Exec,
                 true,
@@ -122,7 +123,7 @@ async fn control_fin_closes_only_its_datagram_direction() {
                 None,
             )
             .await;
-            let client_driver = tokio::spawn(driver);
+            let mut client_driver = Box::pin(driver);
             let (finish_peer, finish) = oneshot::channel();
             let server_task = tokio::spawn(async move {
                 let resolver = server.accept().await.unwrap().unwrap();
@@ -215,7 +216,8 @@ async fn control_fin_closes_only_its_datagram_direction() {
                 .is_empty());
             drop(control);
             drop(tx);
-            client_driver.await.unwrap().unwrap();
+            client_driver.as_mut().graceful_shutdown();
+            client_driver.await.unwrap();
             server_task.await.unwrap();
         })
         .await;
@@ -231,7 +233,7 @@ async fn control_reset_wakes_datagrams_and_releases_request() {
             mut server,
             _endpoints,
             ..
-        } = pair_config::<ClientBody, _>(
+        } = pair_config(
             Http3Options::builder().max_concurrent_requests(1).build(),
             Exec,
             true,
@@ -240,7 +242,7 @@ async fn control_reset_wakes_datagrams_and_releases_request() {
             None,
         )
         .await;
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let (reset_peer, reset) = oneshot::channel();
         let server_task = tokio::spawn(async move {
             let resolver = server.accept().await.unwrap().unwrap();
@@ -308,7 +310,8 @@ async fn control_reset_wakes_datagrams_and_releases_request() {
             .is_empty());
         drop(control);
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;

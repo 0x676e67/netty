@@ -1,3 +1,6 @@
+//! Adapts transports written against http3's own `quic` traits to the
+//! [`rt::quic`](super) contract.
+
 use std::task::{Context, Poll};
 
 use bytes::Buf;
@@ -31,14 +34,15 @@ impl<T> Compat<T> {
     }
 }
 
-impl<B: Buf, T: http3::quic::Connection<B>> Connection<B> for Compat<T>
+impl<B, T> Connection<B> for Compat<T>
 where
+    B: Buf,
+    T: http3::quic::Connection<B>,
     T::SendStream: http3::quic::SendStreamUnframed<B>,
     T::BidiStream: http3::quic::BidiStream<B> + http3::quic::SendStreamUnframed<B>,
     <T::BidiStream as http3::quic::BidiStream<B>>::SendStream: http3::quic::SendStreamUnframed<B>,
 {
     type RecvStream = Compat<T::RecvStream>;
-
     type OpenStreams = Compat<T::OpenStreams>;
 
     fn poll_accept_recv(
@@ -64,14 +68,15 @@ where
     }
 }
 
-impl<B: Buf, T: http3::quic::OpenStreams<B>> OpenStreams<B> for Compat<T>
+impl<B, T> OpenStreams<B> for Compat<T>
 where
+    B: Buf,
+    T: http3::quic::OpenStreams<B>,
     T::SendStream: http3::quic::SendStreamUnframed<B>,
     T::BidiStream: http3::quic::BidiStream<B> + http3::quic::SendStreamUnframed<B>,
     <T::BidiStream as http3::quic::BidiStream<B>>::SendStream: http3::quic::SendStreamUnframed<B>,
 {
     type SendStream = Compat<T::SendStream>;
-
     type BidiStream = Compat<T::BidiStream>;
 
     fn poll_open_bidi(
@@ -93,7 +98,11 @@ where
     }
 }
 
-impl<B: Buf, T: http3::quic::SendStreamUnframed<B>> SendStream<B> for Compat<T> {
+impl<B, T> SendStream<B> for Compat<T>
+where
+    B: Buf,
+    T: http3::quic::SendStreamUnframed<B>,
+{
     fn poll_send<D: Buf>(
         &mut self,
         cx: &mut Context<'_>,
@@ -135,13 +144,13 @@ impl<T: http3::quic::RecvStream> RecvStream for Compat<T> {
     }
 }
 
-impl<B: Buf, T> BidiStream<B> for Compat<T>
+impl<B, T> BidiStream<B> for Compat<T>
 where
+    B: Buf,
     T: http3::quic::BidiStream<B> + http3::quic::SendStreamUnframed<B>,
     T::SendStream: http3::quic::SendStreamUnframed<B>,
 {
     type SendStream = Compat<T::SendStream>;
-
     type RecvStream = Compat<T::RecvStream>;
 
     fn split(self) -> (Self::SendStream, Self::RecvStream) {

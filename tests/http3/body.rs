@@ -1,7 +1,198 @@
 use super::*;
 
 #[tokio::test]
-async fn last_sender_drop_dispatches_queued_requests() {
+async fn graceful_shutdown_returns_connect_waiting_for_settings() {
+    for (polled, drop_sender) in [(false, false), (true, false), (false, true), (true, true)] {
+        bounded(async {
+            let (_, server_config, client_config) = tls::config();
+            let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
+            let (mut tx, driver) = Builder::new(Exec)
+                .options(Http3Options::builder().max_concurrent_requests(1).build())
+                .handshake::<_, ClientBody>(native::Connection::new(client))
+                .await
+                .unwrap();
+            let mut driver = Box::pin(driver);
+            let mut active = tokio_test::task::spawn(
+                tx.try_send_request(
+                    Request::get("https://localhost/active")
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                ),
+            );
+            assert!(active.poll().is_pending());
+            let mut request = Request::connect("https://localhost/connect-udp")
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(http3::ext::Protocol::CONNECT_UDP);
+            let mut waiting = tokio_test::task::spawn(tx.try_send_request(request));
+            if polled {
+                assert!(waiting.poll().is_pending());
+            }
+            if drop_sender {
+                drop(tx);
+            }
+            // Delay the upstream HTTP/3 server's SETTINGS until after shutdown.
+            // The ordinary request occupies the slot and keeps the drain alive.
+            driver.as_mut().graceful_shutdown();
+            // Repeated shutdown must also preserve the original wakeup.
+            driver.as_mut().graceful_shutdown();
+            if polled {
+                assert!(waiting.is_woken());
+            }
+            let mut error = match waiting.poll() {
+                std::task::Poll::Ready(Err(error)) => error,
+                other => panic!("unsent CONNECT not returned on shutdown: {other:?}"),
+            };
+            assert!(error.error().is_canceled());
+            assert_eq!(error.take_message().unwrap().uri().path(), "/connect-udp");
+            std::future::poll_fn(|cx| {
+                assert!(driver.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            let mut server = h3::server::builder()
+                .enable_extended_connect(true)
+                .build::<_, Bytes>(h3_quinn::Connection::new(server))
+                .await
+                .unwrap();
+            let peer = tokio::spawn(async move {
+                let (request, mut stream) = server
+                    .accept()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .resolve_request()
+                    .await
+                    .unwrap();
+                assert_eq!(request.uri().path(), "/active");
+                assert!(stream.recv_data().await.unwrap().is_none());
+                stream.send_response(Response::new(())).await.unwrap();
+                stream
+                    .send_data(Bytes::from_static(b"drained"))
+                    .await
+                    .unwrap();
+                stream.finish().await.unwrap();
+                assert!(server.accept().await.err().unwrap().is_h3_no_error());
+            });
+            let body = active.await.unwrap().into_body().collect().await.unwrap();
+            assert_eq!(body.to_bytes(), "drained");
+            driver.await.unwrap();
+            peer.await.unwrap();
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn last_sender_drop_preserves_connect_waiting_for_settings() {
+    bounded(async {
+        let (_, server_config, client_config) = tls::config();
+        let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
+        let (mut tx, driver) = Builder::new(Exec)
+            .handshake::<_, ClientBody>(native::Connection::new(client))
+            .await
+            .unwrap();
+        let mut request = Request::connect("https://localhost/connect-udp")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(http3::ext::Protocol::CONNECT_UDP);
+        let mut waiting = tokio_test::task::spawn(tx.try_send_request(request));
+        assert!(waiting.poll().is_pending());
+        drop(tx);
+        assert!(waiting.poll().is_pending());
+        let mut drive = Box::pin(driver);
+        assert!(timeout(Duration::ZERO, drive.as_mut()).await.is_err());
+        // Dropping the sender must still let this request negotiate and run.
+        let mut server = h3::server::builder()
+            .enable_extended_connect(true)
+            .build::<_, Bytes>(h3_quinn::Connection::new(server))
+            .await
+            .unwrap();
+        let peer = tokio::spawn(async move {
+            let (request, mut stream) = server
+                .accept()
+                .await
+                .unwrap()
+                .unwrap()
+                .resolve_request()
+                .await
+                .unwrap();
+            assert_eq!(request.method(), http::Method::CONNECT);
+            assert_eq!(request.uri().path(), "/connect-udp");
+            stream
+                .send_response(Response::builder().status(403).body(()).unwrap())
+                .await
+                .unwrap();
+            stream.finish().await.unwrap();
+            assert!(stream.recv_data().await.unwrap().is_none());
+            assert!(server.accept().await.err().unwrap().is_h3_no_error());
+        });
+        let response = waiting.await.unwrap();
+        assert_eq!(response.status(), 403);
+        assert!(response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty());
+        drive.await.unwrap();
+        peer.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn last_sender_drop_preserves_connect_permission_error() {
+    for polled in [false, true] {
+        bounded(async {
+            let (_, server_config, client_config) = tls::config();
+            let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
+            let (mut tx, driver) = Builder::new(Exec)
+                .handshake::<_, ClientBody>(native::Connection::new(client))
+                .await
+                .unwrap();
+            let mut request = Request::connect("https://localhost/connect-udp")
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(http3::ext::Protocol::CONNECT_UDP);
+            let mut waiting = tokio_test::task::spawn(tx.try_send_request(request));
+            if polled {
+                assert!(waiting.poll().is_pending());
+            }
+            drop(tx);
+            // Resolve SETTINGS only after the last sender has started draining.
+            let mut server = h3::server::builder()
+                .enable_extended_connect(false)
+                .build::<_, Bytes>(h3_quinn::Connection::new(server))
+                .await
+                .unwrap();
+            let peer = tokio::spawn(async move {
+                match server.accept().await {
+                    Ok(None) => {}
+                    Err(error) if error.is_h3_no_error() => {}
+                    _ => panic!("Extended CONNECT was sent without permission"),
+                }
+            });
+            let mut error = waiting.await.unwrap_err();
+            assert!(error.error().is_user(), "{error:?}");
+            assert!(!error.error().is_canceled());
+            assert_eq!(error.take_message().unwrap().uri().path(), "/connect-udp");
+            driver.await.unwrap();
+            peer.await.unwrap();
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn last_sender_drop_preserves_unpolled_requests() {
     for limit in [1, 128] {
         bounded(async {
             let Pair {
@@ -16,7 +207,7 @@ async fn last_sender_drop_dispatches_queued_requests() {
                     .build(),
             )
             .await;
-            // Queue more than one driver's poll budget before it can dispatch.
+            // Create requests before polling any, then release the last sender.
             let responses: Vec<_> = (0..35)
                 .map(|index| {
                     tx.try_send_request(
@@ -27,7 +218,7 @@ async fn last_sender_drop_dispatches_queued_requests() {
                 })
                 .collect();
             drop(tx);
-            let drive = tokio::spawn(driver);
+            let drive = Box::pin(driver);
             let peer = tokio::spawn(async move {
                 for _ in 0..35 {
                     let (request, mut stream) = server
@@ -59,11 +250,63 @@ async fn last_sender_drop_dispatches_queued_requests() {
                     .to_bytes();
                 assert_eq!(body, format!("/{index}"));
             }
-            drive.await.unwrap().unwrap();
+            drive.await.unwrap();
             peer.await.unwrap();
         })
         .await;
     }
+}
+
+#[tokio::test]
+async fn last_sender_drop_preserves_live_response() {
+    bounded(async {
+        let Pair {
+            mut tx,
+            driver,
+            mut server,
+            _endpoints,
+            ..
+        } = pair(Http3Options::default()).await;
+        let (resume, resumed) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let (_, mut stream) = server
+                .accept()
+                .await
+                .unwrap()
+                .unwrap()
+                .resolve_request()
+                .await
+                .unwrap();
+            assert!(stream.recv_data().await.unwrap().is_none());
+            stream.send_response(Response::new(())).await.unwrap();
+            resumed.await.unwrap();
+            stream
+                .send_data(Bytes::from_static(b"response after pool eviction"))
+                .await
+                .unwrap();
+            stream.finish().await.unwrap();
+            assert!(server.accept().await.err().unwrap().is_h3_no_error());
+        });
+        let response = tx
+            .try_send_request(
+                Request::get("https://localhost/evicted")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Pool eviction releases its sender after headers, while the caller
+        // still owns the body. The executor must retain the connection.
+        drop(tx);
+        let mut drive = Box::pin(driver);
+        assert!(timeout(Duration::ZERO, drive.as_mut()).await.is_err());
+        resume.send(()).unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, "response after pool eviction");
+        drive.await.unwrap();
+        peer.await.unwrap();
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -76,18 +319,55 @@ async fn last_sender_drop_closes_idle_connection() {
             _endpoints,
             ..
         } = pair(Http3Options::default()).await;
+        let clone = tx.clone();
         drop(tx);
-        let drive = tokio::spawn(driver);
-        let _ = server.accept().await;
-        drive.await.unwrap().unwrap();
+        let mut driver = Box::pin(driver);
+        assert!(
+            timeout(Duration::from_millis(50), server.accept())
+                .await
+                .is_err(),
+            "a remaining sender must keep the connection open"
+        );
+        assert!(timeout(Duration::ZERO, driver.as_mut()).await.is_err());
+        drop(clone);
+        driver.await.unwrap();
+        assert!(server.accept().await.err().unwrap().is_h3_no_error());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn last_sender_drop_waits_for_unpolled_request_cancellation() {
+    bounded(async {
+        let Pair {
+            mut tx,
+            driver,
+            mut server,
+            _endpoints,
+            ..
+        } = pair(Http3Options::default()).await;
+        let request = tx.try_send_request(
+            Request::get("https://localhost/unsent")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        );
+        drop(tx);
+        let mut driver = Box::pin(driver);
+        assert!(
+            timeout(Duration::from_millis(50), driver.as_mut())
+                .await
+                .is_err(),
+            "the created request must keep the drain alive"
+        );
+        drop(request);
+        driver.await.unwrap();
+        assert!(server.accept().await.err().unwrap().is_h3_no_error());
     })
     .await;
 }
 
 #[tokio::test]
 async fn upload_failure_cancels_unread_response_and_releases_request() {
-    type Body = http_body_util::combinators::BoxBody<Bytes, std::io::Error>;
-
     for poll_body in [false, true] {
         bounded(async {
             let Pair {
@@ -96,12 +376,12 @@ async fn upload_failure_cancels_unread_response_and_releases_request() {
                 mut server,
                 _endpoints,
                 ..
-            } = pair_with::<Body, _>(
+            } = pair_with(
                 Http3Options::builder().max_concurrent_requests(1).build(),
                 Exec,
             )
             .await;
-            let drive = tokio::spawn(driver);
+            let mut drive = Box::pin(driver);
             let (canceled, cancellation_seen) = oneshot::channel();
             let peer = tokio::spawn(async move {
                 let resolver = server.accept().await.unwrap().unwrap();
@@ -166,7 +446,7 @@ async fn upload_failure_cancels_unread_response_and_releases_request() {
                     Request::get("https://localhost/healthy")
                         .body(
                             Full::new(Bytes::new())
-                                .map_err(|never| match never {})
+                                .map_err(|never| -> std::io::Error { match never {} })
                                 .boxed(),
                         )
                         .unwrap(),
@@ -197,7 +477,8 @@ async fn upload_failure_cancels_unread_response_and_releases_request() {
             drop(frame);
             assert!(body.frame().await.is_none());
             drop(tx);
-            drive.await.unwrap().unwrap();
+            drive.as_mut().graceful_shutdown();
+            drive.await.unwrap();
             peer.await.unwrap();
         })
         .await;
@@ -219,7 +500,7 @@ async fn dropping_response_body_preserves_pending_upload() {
             _endpoints,
             ..
         } = pair_with(Http3Options::default(), Exec).await;
-        let drive = tokio::spawn(driver);
+        let mut drive = Box::pin(driver);
         let (dropped, body_dropped) = oneshot::channel();
         let (stopped, receive_stopped) = oneshot::channel();
         let (finished, upload_received) = oneshot::channel();
@@ -266,7 +547,8 @@ async fn dropping_response_body_preserves_pending_upload() {
         upload.send(()).expect("response drop must preserve upload");
         upload_received.await.unwrap();
         drop(tx);
-        drive.await.unwrap().unwrap();
+        drive.as_mut().graceful_shutdown();
+        drive.await.unwrap();
         peer.await.unwrap();
     })
     .await;
@@ -397,7 +679,7 @@ async fn no_error_abort_does_not_complete_unfinished_response() {
                     server_quic,
                     _endpoints,
                 } = pair(Http3Options::default()).await;
-                let drive = tokio::spawn(driver);
+                let mut drive = Box::pin(driver);
                 let (abort, ready) = oneshot::channel();
                 let peer = tokio::spawn(async move {
                     let (_, mut stream) = server
@@ -476,7 +758,7 @@ async fn no_error_abort_does_not_complete_unfinished_response() {
                 assert!(body.frame().await.is_none());
                 assert!(http_body::Body::is_end_stream(&body));
                 if close_connection {
-                    drive.await.unwrap().unwrap();
+                    drive.await.unwrap();
                     assert!(tx.is_closed());
                     let error = tx
                         .try_send_request(
@@ -501,7 +783,8 @@ async fn no_error_abort_does_not_complete_unfinished_response() {
                         "healthy"
                     );
                     drop(tx);
-                    drive.await.unwrap().unwrap();
+                    drive.as_mut().graceful_shutdown();
+                    drive.await.unwrap();
                 }
                 peer.await.unwrap();
             })
@@ -521,7 +804,7 @@ async fn zero_length_headers_do_not_wait_for_fin_or_discard_trailers() {
                 _endpoints,
                 ..
             } = pair(Http3Options::default()).await;
-            let drive = tokio::spawn(driver);
+            let mut drive = Box::pin(driver);
             let (finish, ready) = oneshot::channel();
             let peer = tokio::spawn(async move {
                 let (_, mut stream) = server
@@ -577,7 +860,8 @@ async fn zero_length_headers_do_not_wait_for_fin_or_discard_trailers() {
             }
             assert!(body.to_bytes().is_empty());
             drop(tx);
-            drive.await.unwrap().unwrap();
+            drive.as_mut().graceful_shutdown();
+            drive.await.unwrap();
             peer.await.unwrap();
         })
         .await;
@@ -594,7 +878,7 @@ async fn empty_data_frames_do_not_end_response() {
             _endpoints,
             ..
         } = pair(Http3Options::default()).await;
-        let drive = tokio::spawn(driver);
+        let mut drive = Box::pin(driver);
         let peer = tokio::spawn(async move {
             let (_, mut stream) = server
                 .accept()
@@ -636,7 +920,8 @@ async fn empty_data_frames_do_not_end_response() {
         assert_eq!(body.trailers().unwrap()["x-finished"], "yes");
         assert_eq!(body.to_bytes(), "abc");
         drop(tx);
-        drive.await.unwrap().unwrap();
+        drive.as_mut().graceful_shutdown();
+        drive.await.unwrap();
         peer.await.unwrap();
     })
     .await;
@@ -652,7 +937,7 @@ async fn small_response_data_is_delivered_before_peer_sends_more() {
             _endpoints,
             ..
         } = pair(Http3Options::default()).await;
-        let drive = tokio::spawn(driver);
+        let mut drive = Box::pin(driver);
         let (consumed, ready) = oneshot::channel();
         let peer = tokio::spawn(async move {
             let (_, mut stream) = server
@@ -700,7 +985,266 @@ async fn small_response_data_is_delivered_before_peer_sends_more() {
         assert_eq!(rest.trailers().unwrap()["x-finished"], "yes");
         assert_eq!(rest.to_bytes(), "second");
         drop(tx);
-        drive.await.unwrap().unwrap();
+        drive.as_mut().graceful_shutdown();
+        drive.await.unwrap();
+        peer.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn response_failure_cancels_pending_upload() {
+    bounded(async {
+        let Pair {
+            mut tx,
+            driver,
+            mut server,
+            _endpoints,
+            ..
+        } = pair_with::<UnfinishedBody, _>(Http3Options::default(), Exec).await;
+        let mut drive = Box::pin(driver);
+        let (reset_seen, reset_observed) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let (_, mut stream) = server
+                .accept()
+                .await
+                .unwrap()
+                .unwrap()
+                .resolve_request()
+                .await
+                .unwrap();
+            // Respond before the upload arrives, with a body shorter than the
+            // declared length.
+            stream
+                .send_response(
+                    Response::builder()
+                        .header("content-length", 10)
+                        .body(())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            stream
+                .send_data(Bytes::from_static(b"short"))
+                .await
+                .unwrap();
+            stream.finish().await.unwrap();
+            // The failed response resets the upload that was still pending.
+            assert!(matches!(stream.recv_data().await,
+                Err(h3::error::StreamError::RemoteTerminate { code, .. })
+                    if code == h3::error::Code::H3_REQUEST_CANCELLED));
+            reset_seen.send(()).unwrap();
+            let _ = server.accept().await;
+        });
+        let (dropped, body_dropped) = oneshot::channel();
+        let response = tx
+            .try_send_request(
+                Request::post("https://localhost/short")
+                    .body(UnfinishedBody {
+                        ready_empty: false,
+                        polled: None,
+                        dropped: Some(dropped),
+                    })
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_body();
+        let error = loop {
+            match body
+                .frame()
+                .await
+                .expect("truncated response ended without an error")
+            {
+                Ok(_) => {}
+                Err(error) => break error,
+            }
+        };
+        assert!(!error.is_user());
+        body_dropped.await.unwrap();
+        reset_observed.await.unwrap();
+        // No task is left behind to block the drain.
+        drop(tx);
+        drive.as_mut().graceful_shutdown();
+        drive.await.unwrap();
+        peer.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn upload_holds_admission_until_finished() {
+    type Body = http_body_util::combinators::BoxBody<Bytes, std::convert::Infallible>;
+
+    bounded(async {
+        let (upload, ready) = oneshot::channel();
+        let body = http_body_util::StreamBody::new(futures_util::stream::once(async move {
+            ready.await.unwrap();
+            Ok::<_, std::convert::Infallible>(http_body::Frame::data(Bytes::from_static(b"upload")))
+        }))
+        .boxed();
+        let Pair {
+            mut tx,
+            driver,
+            mut server,
+            _endpoints,
+            ..
+        } = pair_with::<Body, _>(
+            Http3Options::builder().max_concurrent_requests(1).build(),
+            Exec,
+        )
+        .await;
+        let mut drive = Box::pin(driver);
+        let peer = tokio::spawn(async move {
+            let resolver = server.accept().await.unwrap().unwrap();
+            let first = tokio::spawn(async move {
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                // Complete the response before the upload arrives.
+                stream.send_response(Response::new(())).await.unwrap();
+                stream.finish().await.unwrap();
+                let mut received = BytesMut::new();
+                while let Some(mut data) = stream.recv_data().await.unwrap() {
+                    received.extend_from_slice(&data.copy_to_bytes(data.remaining()));
+                }
+                assert_eq!(received, "upload");
+            });
+            let (_, mut stream) = server
+                .accept()
+                .await
+                .unwrap()
+                .unwrap()
+                .resolve_request()
+                .await
+                .unwrap();
+            stream.send_response(Response::new(())).await.unwrap();
+            stream.finish().await.unwrap();
+            first.await.unwrap();
+            let _ = server.accept().await;
+        });
+        let response = tx
+            .try_send_request(
+                Request::post("https://localhost/slow-upload")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // The response is read to its end while the upload is still pending.
+        assert!(response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty());
+        let mut second = tokio_test::task::spawn(
+            tx.try_send_request(
+                Request::get("https://localhost/queued")
+                    .body(Full::new(Bytes::new()).boxed())
+                    .unwrap(),
+            ),
+        );
+        // The stream still holds its admission slot.
+        assert!(second.poll().is_pending());
+        upload.send(()).unwrap();
+        let response = second.await.unwrap();
+        assert!(response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty());
+        drop(tx);
+        drive.as_mut().graceful_shutdown();
+        drive.await.unwrap();
+        peer.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn unpolled_request_does_not_block_graceful_shutdown() {
+    bounded(async {
+        let Pair {
+            mut tx,
+            driver,
+            mut server,
+            _endpoints,
+            ..
+        } = pair(Http3Options::default()).await;
+        let peer = tokio::spawn(async move {
+            let _ = server.accept().await;
+        });
+        // Created but never polled: nothing has reached the connection.
+        let unpolled = tx.try_send_request(
+            Request::get("https://localhost/unpolled")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        );
+        drop(tx);
+        let mut driver = Box::pin(driver);
+        // Let the automatic drain park on the unpolled reservation first.
+        assert!(timeout(Duration::from_millis(50), driver.as_mut())
+            .await
+            .is_err());
+        driver.as_mut().graceful_shutdown();
+        driver.await.unwrap();
+        let returned = unpolled.await.unwrap_err().take_message().unwrap();
+        assert_eq!(returned.uri().path(), "/unpolled");
+        peer.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn graceful_shutdown_completes_with_an_unpolled_request_holding_an_assigned_permit() {
+    bounded(async {
+        let Pair {
+            mut tx,
+            driver,
+            mut server,
+            _endpoints,
+            ..
+        } = pair(Http3Options::builder().max_concurrent_requests(1).build()).await;
+        let peer = tokio::spawn(async move {
+            let (_, mut stream) = server
+                .accept()
+                .await
+                .unwrap()
+                .unwrap()
+                .resolve_request()
+                .await
+                .unwrap();
+            stream.send_response(Response::new(())).await.unwrap();
+            stream.finish().await.unwrap();
+            let _ = server.accept().await;
+        });
+        let mut driver = Box::pin(driver);
+        let response = tx
+            .try_send_request(
+                Request::get("https://localhost/slot")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut queued = tokio_test::task::spawn(
+            tx.try_send_request(
+                Request::get("https://localhost/queued")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            ),
+        );
+        assert!(queued.poll().is_pending());
+        // Releasing the slot hands its permit to the queued request, which is
+        // not polled again; the shutdown must not wait for it.
+        drop(response);
+        driver.as_mut().graceful_shutdown();
+        driver.await.unwrap();
+        let returned = queued.await.unwrap_err().take_message().unwrap();
+        assert_eq!(returned.uri().path(), "/queued");
+        drop(tx);
         peer.await.unwrap();
     })
     .await;

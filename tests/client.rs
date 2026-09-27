@@ -64,7 +64,7 @@ struct HttpInfo {
 #[derive(Debug)]
 enum Error {
     Io(std::io::Error),
-    Proto(hwire::Error),
+    Proto(netty::Error),
     AbsoluteUriRequired,
     UnsupportedVersion,
 }
@@ -109,8 +109,8 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<hwire::Error> for Error {
-    fn from(err: hwire::Error) -> Self {
+impl From<netty::Error> for Error {
+    fn from(err: netty::Error) -> Self {
         Self::Proto(err)
     }
 }
@@ -262,7 +262,7 @@ macro_rules! test {
             // Wrapper around hyper::client::conn::Builder with set_host field to mimic
             // hyper::client::Builder.
             struct Builder {
-                inner: hwire::http1::Http1OptionsBuilder,
+                inner: netty::http1::Http1OptionsBuilder,
                 set_host: bool,
                 http09_responses: bool,
             }
@@ -270,7 +270,7 @@ macro_rules! test {
             impl Builder {
                 fn new() -> Self {
                     Self {
-                        inner: hwire::http1::Http1Options::builder(),
+                        inner: netty::http1::Http1Options::builder(),
                         set_host: true,
                         http09_responses: false,
                     }
@@ -291,7 +291,7 @@ macro_rules! test {
             }
 
             impl std::ops::Deref for Builder {
-                type Target = hwire::http1::Http1OptionsBuilder;
+                type Target = netty::http1::Http1OptionsBuilder;
 
                 fn deref(&self) -> &Self::Target {
                     &self.inner
@@ -334,7 +334,7 @@ macro_rules! test {
                 req.headers_mut().append("Host", HeaderValue::from_str(&host).unwrap());
             }
 
-            let (mut sender, conn) = hwire::conn::http1::Builder::default()
+            let (mut sender, conn) = netty::conn::http1::Builder::default()
                 .options(builder.inner.build())
                 .handshake(stream)
                 .await
@@ -1518,16 +1518,16 @@ mod conn {
     use futures_util::future::{self, poll_fn, FutureExt, TryFutureExt};
     use http::{HeaderMap, HeaderName};
     use http_body_util::{BodyExt, Empty, Full, StreamBody};
-    use hwire::{
-        conn::{self},
-        http1::Http1Options,
-        http2::Http2Options,
-    };
     use hyper::{
         body::{Body, Frame},
         rt::Timer,
         upgrade::OnUpgrade,
         Method, Request, Response, StatusCode,
+    };
+    use netty::{
+        conn::{self},
+        http1::Http1Options,
+        http2::Http2Options,
     };
     use support::{TokioExecutor, TokioIo, TokioTimer};
     use tokio::{
@@ -1699,7 +1699,7 @@ mod conn {
         /// Yields one data frame, then pends once, then ends the stream.
         ///
         /// The `Pending` deliberately arranges no wake-up: it stands in for a body
-        /// whose readiness changes between hwire's two write polls of the same
+        /// whose readiness changes between netty's two write polls of the same
         /// `poll_loop` iteration, which is what leaves the end of the message buffered
         /// by the re-check write.
         #[derive(Debug, Default)]
@@ -2404,7 +2404,7 @@ mod conn {
             assert_eq!(res.status(), hyper::StatusCode::OK);
             assert_eq!(
                 res.extensions()
-                    .get::<hwire::ext::ReasonPhrase>()
+                    .get::<netty::ext::ReasonPhrase>()
                     .expect("custom reason phrase is present")
                     .as_ref(),
                 &b"Alright"[..]
@@ -3018,7 +3018,7 @@ mod conn {
             .unwrap();
         let cnt = Arc::new(AtomicUsize::new(0));
         let cnt2 = cnt.clone();
-        hwire::ext::on_informational(&mut req, move |res| {
+        netty::ext::on_informational(&mut req, move |res| {
             assert_eq!(res.status(), 100);
             cnt2.fetch_add(1, Ordering::Relaxed);
         });
@@ -3071,7 +3071,7 @@ mod conn {
         orig_headers.insert("X-ZZZ");
         orig_headers.insert("X-AAA");
 
-        hwire::ext::on_preserve_header(&mut req, orig_headers);
+        netty::ext::on_preserve_header(&mut req, orig_headers);
 
         let _res = client.try_send_request(req).await.expect("send_request");
     }
@@ -3353,7 +3353,7 @@ mod conn {
 
             let resp = client.try_send_request(req).await.expect("req1 send");
             assert_eq!(resp.status(), 200);
-            let upgrade = hwire::upgrade::on(resp).await.unwrap();
+            let upgrade = netty::upgrade::on(resp).await.unwrap();
             tokio::task::spawn(async move {
                 let _ = rx.await;
                 drop(upgrade);
@@ -3815,7 +3815,7 @@ mod conn {
         let res = client.try_send_request(req).await.expect("send_request");
         assert_eq!(res.status(), StatusCode::OK);
 
-        let mut upgraded = hwire::upgrade::on(res).await.unwrap();
+        let mut upgraded = netty::upgrade::on(res).await.unwrap();
 
         let mut vec = vec![];
         upgraded.read_to_end(&mut vec).await.unwrap();

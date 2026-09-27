@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 
 use ::quic as backend;
 use bytes::Buf;
-use hwire::rt::quic::{self as rt, Compat, ConnectionError, StreamError};
+use netty::rt::quic::{self as rt, Compat, ConnectionError, StreamError};
 #[cfg(feature = "http3-datagram")]
 #[path = "quic/datagram.rs"]
 mod datagram;

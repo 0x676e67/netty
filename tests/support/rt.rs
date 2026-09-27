@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use hwire::rt::{Executor, Sleep, Timer};
+use netty::rt::{Executor, Sleep, Timer};
 use pin_project_lite::pin_project;
 
 /// Future executor that utilises `tokio` threads.

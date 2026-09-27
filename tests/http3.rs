@@ -3,6 +3,8 @@ mod native;
 
 #[path = "http3/body.rs"]
 mod body;
+#[path = "http3/bounds.rs"]
+mod bounds;
 #[path = "http3/capture.rs"]
 mod capture;
 #[path = "http3/credit.rs"]
@@ -24,16 +26,22 @@ mod soak;
 #[path = "http3/tls.rs"]
 mod tls;
 
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use bytes::{Buf, Bytes, BytesMut};
-use futures_util::future::BoxFuture;
 use http::{HeaderMap, Request, Response, Version};
 use http_body_util::{BodyExt, Full};
-use hwire::{
+use netty::{
     conn::http3::{Builder, Connection, SendRequest},
     http3::Http3Options,
-    rt::Executor,
+    rt::{bounds::Http3ClientConnExec, Executor},
 };
 use tokio::{sync::oneshot, time::timeout};
 
@@ -46,11 +54,34 @@ impl<F: Future<Output = ()> + Send + 'static> Executor<F> for Exec {
     }
 }
 
-type ClientBody = Full<Bytes>;
+/// Spawns like `Exec` and counts the polls of every future it runs.
+#[derive(Clone)]
+struct Counting(Arc<AtomicUsize>);
+
+impl<F: Future<Output = ()> + Send + 'static> Executor<F> for Counting {
+    fn execute(&self, future: F) {
+        let polls = self.0.clone();
+        tokio::spawn(async move {
+            let mut future = Box::pin(future);
+            std::future::poll_fn(|cx| {
+                polls.fetch_add(1, Ordering::Relaxed);
+                future.as_mut().poll(cx)
+            })
+            .await
+        });
+    }
+}
 
 type Server = h3::server::Connection<h3_quinn::Connection, Bytes>;
 
-struct Pair<B = ClientBody, E = Exec> {
+type ClientBody = Full<Bytes>;
+
+struct Pair<B = ClientBody, E = Exec>
+where
+    B: http_body::Body + 'static,
+    E: Http3ClientConnExec<crate::native::Connection>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
     tx: SendRequest<B>,
     driver: Connection<crate::native::Connection, B, E>,
     server: Server,
@@ -67,7 +98,7 @@ where
     B: http_body::Body + Send + 'static,
     B::Data: Send,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-    E: Executor<BoxFuture<'static, ()>>,
+    E: Http3ClientConnExec<crate::native::Connection> + Send + 'static,
 {
     pair_config(options, exec, false, false, false, None).await
 }
@@ -84,7 +115,7 @@ where
     B: http_body::Body + Send + 'static,
     B::Data: Send,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-    E: Executor<BoxFuture<'static, ()>>,
+    E: Http3ClientConnExec<crate::native::Connection> + Send + 'static,
 {
     let (_, mut server_config, client_config) = tls::config();
     if let Some(bidi) = bidi {
@@ -157,19 +188,22 @@ async fn canceling_partially_written_headers_resets_stream_and_releases_slot() {
         let pause = pause::Pause::default();
         let (mut tx, driver) = Builder::new(Exec)
             .options(Http3Options::builder().max_concurrent_requests(1).build())
-            .handshake::<_, ClientBody>(pause.wrap(crate::native::Connection::new(client)))
+            .handshake(pause.wrap(crate::native::Connection::new(client)))
             .await
             .unwrap();
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let mut server = h3::server::builder()
             .build::<_, Bytes>(h3_quinn::Connection::new(server))
             .await
             .unwrap();
-        let request = tx.try_send_request(
-            Request::get("https://localhost/canceled")
-                .body(Full::new(Bytes::new()))
-                .unwrap(),
+        let mut request = tokio_test::task::spawn(
+            tx.try_send_request(
+                Request::get("https://localhost/canceled")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            ),
         );
+        assert!(request.poll().is_pending());
         pause.blocked().await;
         // Accept while the stream is still open so the reset cannot race the
         // server's initial stream discovery.
@@ -213,7 +247,8 @@ async fn canceling_partially_written_headers_resets_stream_and_releases_slot() {
             .to_bytes()
             .is_empty());
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -240,7 +275,7 @@ async fn response_header_budgets_have_distinct_failure_scopes() {
                 server_quic,
                 _endpoints,
             } = pair(options.build()).await;
-            let client_driver = tokio::spawn(driver);
+            let mut client_driver = Box::pin(driver);
             let (rejected, notified) = oneshot::channel();
             let server_task = tokio::spawn(async move {
                 let resolver = server.accept().await.unwrap().unwrap();
@@ -295,7 +330,7 @@ async fn response_header_budgets_have_distinct_failure_scopes() {
             assert!(!error.error().is_user());
             rejected.send(()).unwrap();
             if compressed {
-                assert!(client_driver.await.unwrap().is_err());
+                assert!(client_driver.await.is_err());
                 assert!(tx.ready().await.is_err());
             } else {
                 let response = tx
@@ -308,7 +343,8 @@ async fn response_header_budgets_have_distinct_failure_scopes() {
                     .unwrap();
                 assert!(response.into_body().collect().await.unwrap().to_bytes().is_empty());
                 drop(tx);
-                client_driver.await.unwrap().unwrap();
+                client_driver.as_mut().graceful_shutdown();
+                client_driver.await.unwrap();
             }
             server_task.await.unwrap();
         }
@@ -326,7 +362,7 @@ async fn streaming_post_trailers_and_last_sender_drop() {
             _endpoints,
             ..
         } = pair(Http3Options::default()).await;
-        let client_driver = tokio::spawn(driver);
+        let client_driver = Box::pin(driver);
         let (received, ready) = oneshot::channel();
         let server_task = tokio::spawn(async move {
             let resolver = server.accept().await.unwrap().unwrap();
@@ -376,7 +412,7 @@ async fn streaming_post_trailers_and_last_sender_drop() {
         let body = response.into_body().collect().await.unwrap();
         assert_eq!(body.trailers().unwrap()["x-complete"], "yes");
         assert_eq!(body.to_bytes(), "hello");
-        client_driver.await.unwrap().unwrap();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -392,7 +428,7 @@ async fn conflicting_host_returns_request_without_closing_connection() {
             _endpoints,
             ..
         } = pair(Http3Options::builder().max_concurrent_requests(1).build()).await;
-        let drive = tokio::spawn(driver);
+        let mut drive = Box::pin(driver);
         let peer = tokio::spawn(async move {
             let (request, mut stream) = server
                 .accept()
@@ -436,7 +472,8 @@ async fn conflicting_host_returns_request_without_closing_connection() {
             "unconsumed"
         );
         drop(tx);
-        drive.await.unwrap().unwrap();
+        drive.as_mut().graceful_shutdown();
+        drive.await.unwrap();
         peer.await.unwrap();
     })
     .await;
@@ -498,7 +535,7 @@ async fn unbounded_queue_returns_unattempted_requests_on_close() {
 async fn dropped_response_body_cancels_a_pending_receive() {
     bounded(async {
         let Pair { mut tx, driver, mut server, _endpoints, .. } = pair(Http3Options::default()).await;
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let (dropped, wait_drop) = oneshot::channel();
         let (observed, wait_observed) = oneshot::channel();
         let server_task = tokio::spawn(async move {
@@ -534,7 +571,8 @@ async fn dropped_response_body_cancels_a_pending_receive() {
         let next = tx.try_send_request(Request::get("https://localhost/after-cancel").body(Full::new(Bytes::new())).unwrap()).await.unwrap();
         next.into_body().collect().await.unwrap();
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     }).await;
 }
@@ -590,7 +628,7 @@ async fn short_response_is_an_error_and_informationals_are_skipped() {
             _endpoints,
             ..
         } = pair(Http3Options::default()).await;
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let server_task = tokio::spawn(async move {
             let resolver = server.accept().await.unwrap().unwrap();
             let stream_task = tokio::spawn(async move {
@@ -642,7 +680,8 @@ async fn short_response_is_an_error_and_informationals_are_skipped() {
         assert!(!error.is_user());
         assert!(body.frame().await.is_none());
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -659,7 +698,8 @@ async fn connect_flush_and_half_close_preserve_incoming_bytes() {
             _endpoints,
             ..
         } = pair(Http3Options::default()).await;
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
+        let (first, received_first) = oneshot::channel();
         let server_task = tokio::spawn(async move {
             let resolver = server.accept().await.unwrap().unwrap();
             let stream_task = tokio::spawn(async move {
@@ -667,15 +707,19 @@ async fn connect_flush_and_half_close_preserve_incoming_bytes() {
                 assert_eq!(request.method(), http::Method::CONNECT);
                 stream.send_response(Response::new(())).await.unwrap();
                 let mut size = 0;
+                let mut first = Some(first);
                 while let Some(mut chunk) = stream.recv_data().await.unwrap() {
                     size += chunk.remaining();
+                    if let Some(first) = first.take() {
+                        first.send(()).unwrap();
+                    }
                     while chunk.has_remaining() {
                         assert_eq!(chunk.get_u8(), 9);
                     }
                 }
                 assert_eq!(size, 128 * 1024);
                 stream
-                    .send_data(Bytes::from_static(b"received FIN"))
+                    .send_data(Bytes::from(vec![7; 128 * 1024]))
                     .await
                     .unwrap();
                 stream.finish().await.unwrap();
@@ -692,15 +736,19 @@ async fn connect_flush_and_half_close_preserve_incoming_bytes() {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
-        let mut tunnel = hwire::upgrade::on(&mut response).await.unwrap();
+        let mut tunnel = netty::upgrade::on(&mut response).await.unwrap();
         drop(tx);
-        tunnel.write_all(&vec![9; 128 * 1024]).await.unwrap();
+        tunnel.write_all(&vec![9; 1024]).await.unwrap();
+        // Accepted DATA must progress while no further write/flush command exists.
+        received_first.await.unwrap();
+        tunnel.write_all(&vec![9; 127 * 1024]).await.unwrap();
         tunnel.flush().await.unwrap();
         tunnel.shutdown().await.unwrap();
         let mut bytes = Vec::new();
         tunnel.read_to_end(&mut bytes).await.unwrap();
-        assert_eq!(bytes, b"received FIN");
-        client_driver.await.unwrap().unwrap();
+        assert_eq!(bytes, vec![7; 128 * 1024]);
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -716,7 +764,7 @@ async fn extended_connect_requires_peer_permission() {
             _endpoints,
             ..
         } = pair(Http3Options::default()).await;
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let server_task = tokio::spawn(async move {
             match server.accept().await {
                 Ok(None) => {}
@@ -734,23 +782,72 @@ async fn extended_connect_requires_peer_permission() {
         assert!(error.error().is_user());
         assert!(error.message().is_some());
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
 }
 
-#[derive(Clone, Copy)]
-struct Discard;
+/// One connection: handshake submits the first task; later tasks are discarded.
+#[derive(Clone, Default)]
+struct Discard(Arc<AtomicBool>);
 
-impl<F> Executor<F> for Discard {
+impl<F: Future<Output = ()> + Send + 'static> Executor<F> for Discard {
     fn execute(&self, future: F) {
-        drop(future);
+        if self.0.swap(true, Ordering::Relaxed) {
+            drop(future);
+        } else {
+            tokio::spawn(future);
+        }
+    }
+}
+
+/// Runs everything but keeps the upload and tunnel tasks so a test can abort
+/// them after they ran.
+#[derive(Clone, Default)]
+struct Aborting {
+    connection_submitted: Arc<AtomicBool>,
+    tasks: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl<F: Future<Output = ()> + Send + 'static> Executor<F> for Aborting {
+    fn execute(&self, future: F) {
+        // Each fixture serves one connection, submitted by handshake first.
+        let is_exchange = self.connection_submitted.swap(true, Ordering::Relaxed);
+        let task = tokio::spawn(future);
+        if is_exchange {
+            self.tasks.lock().unwrap().push(task);
+        }
     }
 }
 
 #[tokio::test]
-async fn executor_discard_returns_request_and_releases_active_slot() {
+async fn executor_discard_resets_pending_upload_and_releases_slot() {
+    dropped_upload_task_releases_slot(Discard::default(), |_| {}).await;
+}
+
+#[tokio::test]
+async fn aborted_upload_task_resets_upload_and_releases_slot() {
+    let aborting = Aborting::default();
+    let tasks = aborting.tasks.clone();
+    dropped_upload_task_releases_slot(aborting, move |_| {
+        let tasks = tasks.lock().unwrap();
+        assert_eq!(tasks.len(), 1);
+        tasks[0].abort();
+    })
+    .await;
+}
+
+/// An upload that outlived the response head is dropped by the executor;
+/// the peer sees a reset and the admission slot returns once the response
+/// is read, even while its handle is still alive.
+async fn dropped_upload_task_releases_slot<E>(exec: E, drop_task: impl FnOnce(&E))
+where
+    E: Http3ClientConnExec<crate::native::Connection> + Send + 'static,
+{
+    type Boxed = http_body_util::combinators::BoxBody<Bytes, std::convert::Infallible>;
+
     bounded(async {
         let Pair {
             mut tx,
@@ -758,28 +855,82 @@ async fn executor_discard_returns_request_and_releases_active_slot() {
             mut server,
             _endpoints,
             ..
-        } = pair_with::<ClientBody, _>(
+        } = pair_with::<Boxed, _>(
             Http3Options::builder().max_concurrent_requests(1).build(),
-            Discard,
+            exec.clone(),
         )
         .await;
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let server_task = tokio::spawn(async move {
+            let resolver = server.accept().await.unwrap().unwrap();
+            let first = tokio::spawn(async move {
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                stream.send_response(Response::new(())).await.unwrap();
+                stream.finish().await.unwrap();
+                // The executor dropped the upload that outlived the head.
+                assert!(matches!(stream.recv_data().await,
+                    Err(h3::error::StreamError::RemoteTerminate { code, .. })
+                        if code == h3::error::Code::H3_REQUEST_CANCELLED));
+            });
+            let (_, mut stream) = server
+                .accept()
+                .await
+                .unwrap()
+                .unwrap()
+                .resolve_request()
+                .await
+                .unwrap();
+            stream.send_response(Response::new(())).await.unwrap();
+            stream.finish().await.unwrap();
+            first.await.unwrap();
             let _ = server.accept().await;
         });
-        for _ in 0..2 {
-            let error = tx
-                .try_send_request(
-                    Request::get("https://localhost/discard")
-                        .body(Full::new(Bytes::new()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap_err();
-            assert!(error.message().is_some());
+        let (polled, body_polled) = oneshot::channel();
+        let (dropped, body_dropped) = oneshot::channel();
+        let response = tx
+            .try_send_request(
+                Request::post("https://localhost/discard")
+                    .body(
+                        UnfinishedBody {
+                            ready_empty: false,
+                            polled: Some(polled),
+                            dropped: Some(dropped),
+                        }
+                        .boxed(),
+                    )
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        body_polled.await.unwrap();
+        tokio::task::yield_now().await;
+        drop_task(&exec);
+        body_dropped.await.unwrap();
+        // Read the response to its end but keep the handle: the dropped
+        // upload must not keep the slot with it.
+        let mut body = response.into_body();
+        while let Some(frame) = body.frame().await {
+            frame.unwrap();
         }
+        let response = tx
+            .try_send_request(
+                Request::get("https://localhost/survivor")
+                    .body(Full::new(Bytes::new()).boxed())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        drop(body);
+        assert!(response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty());
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -793,7 +944,6 @@ async fn user_body_error_keeps_its_classification() {
 async fn assert_user_body_error(cause: Box<dyn std::error::Error + Send + Sync>) {
     type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-    type Body = http_body_util::combinators::BoxBody<Bytes, BoxError>;
     bounded(async {
         let Pair {
             mut tx,
@@ -801,8 +951,8 @@ async fn assert_user_body_error(cause: Box<dyn std::error::Error + Send + Sync>)
             mut server,
             _endpoints,
             ..
-        } = pair_with::<Body, _>(Http3Options::default(), Exec).await;
-        let client_driver = tokio::spawn(driver);
+        } = pair_with(Http3Options::default(), Exec).await;
+        let mut client_driver = Box::pin(driver);
         let server_task = tokio::spawn(async move {
             let mut tasks = tokio::task::JoinSet::new();
             while let Ok(Some(resolver)) = server.accept().await {
@@ -829,7 +979,8 @@ async fn assert_user_body_error(cause: Box<dyn std::error::Error + Send + Sync>)
         assert!(!error.error().is_h3_request_rejected());
         assert!(error.message().is_none());
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -845,14 +996,14 @@ fn datagram_request() -> Request<ClientBody> {
         .insert(http3::ext::Protocol::CONNECT_UDP);
     request
         .extensions_mut()
-        .insert(hwire::conn::http3::datagram::DatagramRequest);
+        .insert(netty::conn::http3::datagram::DatagramRequest);
     request
 }
 
 #[cfg(feature = "http3-datagram")]
 #[tokio::test]
 async fn datagram_sessions_route_by_stream_and_close_with_control() {
-    use hwire::conn::http3::datagram::{self, SendErrorKind};
+    use netty::conn::http3::datagram::{self, SendErrorKind};
     use tokio::io::AsyncWriteExt;
     bounded(async {
         let Pair {
@@ -861,9 +1012,8 @@ async fn datagram_sessions_route_by_stream_and_close_with_control() {
             mut server,
             server_quic,
             _endpoints,
-        } = pair_config::<ClientBody, _>(Http3Options::default(), Exec, true, true, true, None)
-            .await;
-        let client_driver = tokio::spawn(driver);
+        } = pair_config(Http3Options::default(), Exec, true, true, true, None).await;
+        let mut client_driver = Box::pin(driver);
         let server_task = tokio::spawn(async move {
             let mut tasks = tokio::task::JoinSet::new();
             for _ in 0..2 {
@@ -926,7 +1076,8 @@ async fn datagram_sessions_route_by_stream_and_close_with_control() {
             SendErrorKind::Closed
         );
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -935,6 +1086,19 @@ async fn datagram_sessions_route_by_stream_and_close_with_control() {
 #[cfg(feature = "http3-datagram")]
 #[tokio::test]
 async fn datagram_on_ordinary_request_resets_only_that_stream() {
+    invalid_datagram_on_ordinary_request(false).await;
+}
+
+#[cfg(feature = "http3-datagram")]
+#[tokio::test]
+async fn datagram_on_ordinary_connect_resets_only_that_stream() {
+    invalid_datagram_on_ordinary_request(true).await;
+}
+
+#[cfg(feature = "http3-datagram")]
+async fn invalid_datagram_on_ordinary_request(connect: bool) {
+    use tokio::io::AsyncReadExt;
+
     bounded(async {
         let Pair {
             mut tx,
@@ -942,7 +1106,7 @@ async fn datagram_on_ordinary_request_resets_only_that_stream() {
             mut server,
             server_quic,
             _endpoints,
-        } = pair_config::<ClientBody, _>(
+        } = pair_config(
             Http3Options::builder().max_concurrent_requests(1).build(),
             Exec,
             true,
@@ -951,7 +1115,7 @@ async fn datagram_on_ordinary_request_resets_only_that_stream() {
             None,
         )
         .await;
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let (send_packet, ready) = oneshot::channel();
         let (reset, reset_seen) = oneshot::channel();
         let server_task = tokio::spawn(async move {
@@ -990,17 +1154,24 @@ async fn datagram_on_ordinary_request_resets_only_that_stream() {
             first.await.unwrap();
             second.await.unwrap();
         });
-        let canceled_response = tx
-            .try_send_request(
-                Request::get("https://localhost/ordinary")
-                    .body(Full::new(Bytes::new()))
-                    .unwrap(),
-            )
+        let request = if connect {
+            Request::connect("localhost:443")
+        } else {
+            Request::get("https://localhost/ordinary")
+        };
+        let mut canceled_response = tx
+            .try_send_request(request.body(Full::new(Bytes::new())).unwrap())
             .await
             .unwrap();
+        assert!(netty::conn::http3::datagram::on(&mut canceled_response).is_none());
+        let tunnel = if connect {
+            Some(netty::upgrade::on(&mut canceled_response).await.unwrap())
+        } else {
+            None
+        };
         send_packet.send(()).unwrap();
         // Cancellation must reach the peer and release admission even when
-        // the application retains the response without ever polling its Body.
+        // the application retains the response body or tunnel without reading it.
         reset_seen.await.unwrap();
         let response = tx
             .try_send_request(
@@ -1017,9 +1188,103 @@ async fn datagram_on_ordinary_request_resets_only_that_stream() {
             .unwrap()
             .to_bytes()
             .is_empty());
-        assert!(canceled_response.into_body().collect().await.is_err());
+        if let Some(mut tunnel) = tunnel {
+            assert!(tunnel.read_to_end(&mut Vec::new()).await.is_err());
+        } else {
+            assert!(canceled_response.into_body().collect().await.is_err());
+        }
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
+        server_task.await.unwrap();
+    })
+    .await;
+}
+
+#[cfg(feature = "http3-datagram")]
+#[tokio::test]
+async fn datagram_before_response_head_fails_request_and_releases_slot() {
+    bounded(async {
+        let Pair {
+            mut tx,
+            driver,
+            mut server,
+            server_quic,
+            _endpoints,
+        } = pair_config(
+            Http3Options::builder().max_concurrent_requests(1).build(),
+            Exec,
+            true,
+            true,
+            false,
+            None,
+        )
+        .await;
+        let mut client_driver = Box::pin(driver);
+        let server_task = tokio::spawn(async move {
+            let resolver = server.accept().await.unwrap().unwrap();
+            let first = tokio::spawn(async move {
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                let id = stream.id().into_inner();
+                server_quic
+                    .send_datagram(Bytes::from(vec![(id / 4) as u8, 7]))
+                    .unwrap();
+                // The request fails before any response; the peer sees
+                // STOP_SENDING with H3_DATAGRAM_ERROR on its write half.
+                let mut stopped = false;
+                let mut result = stream.send_response(Response::new(())).await;
+                for _ in 0..1024 {
+                    match result {
+                        Err(h3::error::StreamError::RemoteTerminate { code, .. }) => {
+                            assert_eq!(code.value(), 0x33);
+                            stopped = true;
+                            break;
+                        }
+                        other => other.unwrap(),
+                    }
+                    tokio::task::yield_now().await;
+                    result = stream.send_data(Bytes::from(vec![1; 16384])).await;
+                }
+                assert!(stopped);
+            });
+            let resolver = server.accept().await.unwrap().unwrap();
+            let second = tokio::spawn(async move {
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                stream.send_response(Response::new(())).await.unwrap();
+                stream.finish().await.unwrap();
+            });
+            let _ = server.accept().await;
+            first.await.unwrap();
+            second.await.unwrap();
+        });
+        let error = tx
+            .try_send_request(
+                Request::get("https://localhost/early")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert!(!error.error().is_user());
+        assert!(error.message().is_none());
+        let response = tx
+            .try_send_request(
+                Request::get("https://localhost/healthy")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty());
+        drop(tx);
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -1028,7 +1293,7 @@ async fn datagram_on_ordinary_request_resets_only_that_stream() {
 #[cfg(feature = "http3-datagram")]
 #[tokio::test]
 async fn datagram_unavailable_preserves_reliable_control_stream() {
-    use hwire::conn::http3::datagram::{self, SendErrorKind};
+    use netty::conn::http3::datagram::{self, SendErrorKind};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     bounded(async {
         let Pair {
@@ -1037,9 +1302,8 @@ async fn datagram_unavailable_preserves_reliable_control_stream() {
             mut server,
             _endpoints,
             ..
-        } = pair_config::<ClientBody, _>(Http3Options::default(), Exec, true, false, true, None)
-            .await;
-        let client_driver = tokio::spawn(driver);
+        } = pair_config(Http3Options::default(), Exec, true, false, true, None).await;
+        let mut client_driver = Box::pin(driver);
         let server_task = tokio::spawn(async move {
             let resolver = server.accept().await.unwrap().unwrap();
             let stream_task = tokio::spawn(async move {
@@ -1069,7 +1333,8 @@ async fn datagram_unavailable_preserves_reliable_control_stream() {
         assert_eq!(echo, [0, 2, 0, 42]);
         drop(control);
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -1085,7 +1350,7 @@ async fn forbidden_response_fields_fail_the_request_without_closing_connection()
             _endpoints,
             ..
         } = pair(Http3Options::default()).await;
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let server_task = tokio::spawn(async move {
             let mut tasks = tokio::task::JoinSet::new();
             for header in [
@@ -1134,7 +1399,8 @@ async fn forbidden_response_fields_fail_the_request_without_closing_connection()
             .unwrap();
         response.into_body().collect().await.unwrap();
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -1193,12 +1459,12 @@ async fn peer_stop_cancels_upload(ready_empty: bool) {
             mut server,
             _endpoints,
             ..
-        } = pair_with::<UnfinishedBody, _>(
+        } = pair_with(
             Http3Options::builder().max_concurrent_requests(1).build(),
             Exec,
         )
         .await;
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let (polled, body_polled) = oneshot::channel();
         let server_task = tokio::spawn(async move {
             let mut first_body = Some(body_polled);
@@ -1258,14 +1524,15 @@ async fn peer_stop_cancels_upload(ready_empty: bool) {
                 .unwrap();
         }
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
 }
 
 #[tokio::test]
-async fn dropped_unpolled_response_after_fin_cancels_pending_upload() {
+async fn dropped_unpolled_request_after_response_cancels_pending_upload() {
     bounded(async {
         let (_, server_config, client_config) = tls::config();
         let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
@@ -1273,10 +1540,10 @@ async fn dropped_unpolled_response_after_fin_cancels_pending_upload() {
         pause.resume();
         let (mut tx, driver) = Builder::new(Exec)
             .options(Http3Options::builder().max_concurrent_requests(1).build())
-            .handshake::<_, UnfinishedBody>(pause.wrap(crate::native::Connection::new(client)))
+            .handshake(pause.wrap(crate::native::Connection::new(client)))
             .await
             .unwrap();
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let mut server = h3::server::builder()
             .build::<_, Bytes>(h3_quinn::Connection::new(server))
             .await
@@ -1284,6 +1551,7 @@ async fn dropped_unpolled_response_after_fin_cancels_pending_upload() {
         let (polled, body_pending) = oneshot::channel();
         let (dropped, body_dropped) = oneshot::channel();
         let (reset_seen, reset_observed) = oneshot::channel();
+        let (responded, response_sent) = oneshot::channel();
         let server_task = tokio::spawn(async move {
             let resolver = server.accept().await.unwrap().unwrap();
             let stream_task = tokio::spawn(async move {
@@ -1291,6 +1559,7 @@ async fn dropped_unpolled_response_after_fin_cancels_pending_upload() {
                 body_pending.await.unwrap();
                 stream.send_response(Response::new(())).await.unwrap();
                 stream.finish().await.unwrap();
+                responded.send(()).unwrap();
                 let result = stream.recv_data().await;
                 assert!(matches!(result,
                     Err(h3::error::StreamError::RemoteTerminate { code, .. })
@@ -1300,24 +1569,28 @@ async fn dropped_unpolled_response_after_fin_cancels_pending_upload() {
             let _ = server.accept().await;
             stream_task.await.unwrap();
         });
-        let response = tx.try_send_request(
-            Request::post("https://localhost/response-before-upload")
-                .body(UnfinishedBody {
-                    ready_empty: false,
-                    polled: Some(polled),
-                    dropped: Some(dropped),
-                })
-                .unwrap(),
+        let mut response = tokio_test::task::spawn(
+            tx.try_send_request(
+                Request::post("https://localhost/response-before-upload")
+                    .body(UnfinishedBody {
+                        ready_empty: false,
+                        polled: Some(polled),
+                        dropped: Some(dropped),
+                    })
+                    .unwrap(),
+            ),
         );
-        // The response has entered the callback and its receive side reached
-        // FIN, but the caller has never polled the response future. Dropping
-        // that future must still cancel the independently pending upload.
-        pause.received_fin().await;
+        // The request is on the wire and the complete response is queued at
+        // the transport, but the caller stopped polling the request future.
+        // Dropping it must still cancel the independently pending upload.
+        assert!(response.poll().is_pending());
+        response_sent.await.unwrap();
         drop(response);
         body_dropped.await.unwrap();
         reset_observed.await.unwrap();
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -1336,28 +1609,34 @@ async fn canceled_request_waiting_for_quic_credit_releases_active_slot() {
         pause.resume();
         let (mut tx, driver) = Builder::new(Exec)
             .options(Http3Options::builder().max_concurrent_requests(1).build())
-            .handshake::<_, ClientBody>(pause.wrap(crate::native::Connection::new(client)))
+            .handshake(pause.wrap(crate::native::Connection::new(client)))
             .await
             .unwrap();
         let mut server = h3::server::builder()
             .build::<_, Bytes>(h3_quinn::Connection::new(server))
             .await
             .unwrap();
-        let client_driver = tokio::spawn(driver);
-        let canceled = tx.try_send_request(
-            Request::get("https://localhost/canceled")
-                .body(Full::new(Bytes::new()))
-                .unwrap(),
+        let mut client_driver = Box::pin(driver);
+        let mut canceled = tokio_test::task::spawn(
+            tx.try_send_request(
+                Request::get("https://localhost/canceled")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            ),
         );
         // Observe the actual open attempt: readiness no longer reserves a slot
-        // or implies that the queued request has entered the active set.
+        // or implies that the request has entered the active set.
+        assert!(canceled.poll().is_pending());
         pause.waiting_for_credit().await;
         drop(canceled);
-        let response = tx.try_send_request(
-            Request::get("https://localhost/survivor")
-                .body(Full::new(Bytes::new()))
-                .unwrap(),
+        let mut response = tokio_test::task::spawn(
+            tx.try_send_request(
+                Request::get("https://localhost/survivor")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            ),
         );
+        assert!(response.poll().is_pending());
         pause.waiting_for_credit().await;
         server_quic.set_max_concurrent_bi_streams(1_u32.into());
         let server_task = tokio::spawn(async move {
@@ -1383,7 +1662,8 @@ async fn canceled_request_waiting_for_quic_credit_releases_active_slot() {
             .to_bytes()
             .is_empty());
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -1392,29 +1672,16 @@ async fn canceled_request_waiting_for_quic_credit_releases_active_slot() {
 #[tokio::test]
 async fn goaway_rejects_new_requests_but_drains_existing_response() {
     bounded(async {
+        let polls = Arc::new(AtomicUsize::new(0));
         let Pair {
             mut tx,
             driver,
             mut server,
             _endpoints,
             ..
-        } = pair(Http3Options::default()).await;
+        } = pair_with(Http3Options::default(), Counting(polls.clone())).await;
         let observer = tx.clone();
-        let (draining, drained) = oneshot::channel();
-        let client_driver = tokio::spawn(async move {
-            let mut driver = Box::pin(driver);
-            let mut draining = Some(draining);
-            std::future::poll_fn(|cx| {
-                let result = driver.as_mut().poll(cx);
-                if observer.is_closed() {
-                    if let Some(draining) = draining.take() {
-                        draining.send(()).unwrap();
-                    }
-                }
-                result
-            })
-            .await
-        });
+        let client_driver = tokio::spawn(driver);
         let (goaway, requested) = oneshot::channel();
         let (finish, permitted) = oneshot::channel();
         let server_task = tokio::spawn(async move {
@@ -1458,7 +1725,13 @@ async fn goaway_rejects_new_requests_but_drains_existing_response() {
         let mut blocked = tx.clone();
         assert!(blocked.is_ready());
         goaway.send(()).unwrap();
-        drained.await.unwrap();
+        while !observer.is_closed() {
+            tokio::task::yield_now().await;
+        }
+        // Closing must not become a self-wake loop while the response drains.
+        let settled = polls.load(Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(polls.load(Ordering::Relaxed) - settled < 50);
         assert!(blocked.ready().await.is_err());
         assert!(tx.is_closed());
         let rejected = tx
@@ -1524,7 +1797,7 @@ async fn canceling_handshake_waiting_for_control_stream_closes_quic() {
 
 #[tokio::test]
 async fn settings_order_and_configured_values_reach_upstream_server() {
-    use hwire::http3::SettingId;
+    use netty::http3::SettingId;
     bounded(async {
         for &native in &[
             false,
@@ -1550,21 +1823,19 @@ async fn settings_order_and_configured_values_reach_upstream_server() {
             let transport = crate::native::Connection::new(client);
             #[cfg(feature = "http3-datagram")]
             let (mut tx, driver) = if native {
-                builder
-                    .handshake_with_datagrams::<_, ClientBody>(transport)
-                    .await
+                builder.handshake_with_datagrams(transport).await
             } else {
-                builder.handshake::<_, ClientBody>(transport).await
+                builder.handshake(transport).await
             }
             .unwrap();
             #[cfg(not(feature = "http3-datagram"))]
-            let (mut tx, driver) = builder.handshake::<_, ClientBody>(transport).await.unwrap();
+            let (mut tx, driver) = builder.handshake(transport).await.unwrap();
             let mut server = h3::server::builder()
                 .enable_datagram(native)
                 .build::<_, Bytes>(capture.connection(server))
                 .await
                 .unwrap();
-            let client_driver = tokio::spawn(driver);
+            let mut client_driver = Box::pin(driver);
             let server_task = tokio::spawn(async move {
                 let resolver = server.accept().await.unwrap().unwrap();
                 let (_, mut stream) = resolver.resolve_request().await.unwrap();
@@ -1587,7 +1858,8 @@ async fn settings_order_and_configured_values_reach_upstream_server() {
                 vec![(7, 0), (6, 32100), (0x33, u64::from(native))]
             );
             drop(tx);
-            client_driver.await.unwrap().unwrap();
+            client_driver.as_mut().graceful_shutdown();
+            client_driver.await.unwrap();
             server_task.await.unwrap();
         }
     })
@@ -1610,14 +1882,14 @@ async fn datagram_handshake_rejects_order_omitting_its_setting() {
 }
 
 #[tokio::test]
-async fn invalid_response_lengths_signal_message_error_and_preserve_connection() {
+async fn invalid_response_heads_signal_message_error_and_preserve_connection() {
     bounded(async {
         let Pair { mut tx, driver, mut server, _endpoints, .. } = pair(Http3Options::default()).await;
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let (rejected, mut notified) = tokio::sync::mpsc::channel(1);
         let (observed, mut confirmed) = tokio::sync::mpsc::channel(1);
         let server_task = tokio::spawn(async move {
-            for (status, length) in [(200, "invalid"), (200, "1, 2"), (103, "invalid"), (204, "invalid")] {
+            for (status, length) in [(200, "invalid"), (200, "1, 2"), (103, "invalid"), (204, "invalid"), (101, "0")] {
                 let resolver = server.accept().await.unwrap().unwrap();
                 let (_, mut stream) = resolver.resolve_request().await.unwrap();
                 while stream.recv_data().await.unwrap().is_some() {}
@@ -1645,7 +1917,7 @@ async fn invalid_response_lengths_signal_message_error_and_preserve_connection()
             drop(stream);
             let _ = server.accept().await;
         });
-        for _ in 0..4 {
+        for _ in 0..5 {
             let error = tx.try_send_request(Request::get("https://localhost/invalid")
                 .body(Full::new(Bytes::new())).unwrap()).await.unwrap_err();
             assert!(!error.error().is_user());
@@ -1656,7 +1928,8 @@ async fn invalid_response_lengths_signal_message_error_and_preserve_connection()
             .body(Full::new(Bytes::new())).unwrap()).await.unwrap();
         response.into_body().collect().await.unwrap();
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     }).await;
 }
@@ -1671,7 +1944,7 @@ async fn head_204_and_304_end_without_content() {
             _endpoints,
             ..
         } = pair(Http3Options::default()).await;
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let server_task = tokio::spawn(async move {
             for (status, length) in [
                 (200, Some("123")),
@@ -1718,7 +1991,8 @@ async fn head_204_and_304_end_without_content() {
             assert!(http_body::Body::is_end_stream(&body));
         }
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;
@@ -1742,7 +2016,7 @@ async fn unknown_length_upload_and_response_preserve_trailers() {
             _endpoints,
             ..
         } = pair_with(Http3Options::default(), Exec).await;
-        let client_driver = tokio::spawn(driver);
+        let mut client_driver = Box::pin(driver);
         let server_task = tokio::spawn(async move {
             let resolver = server.accept().await.unwrap().unwrap();
             let (_, mut stream) = resolver.resolve_request().await.unwrap();
@@ -1770,7 +2044,8 @@ async fn unknown_length_upload_and_response_preserve_trailers() {
         assert_eq!(body.trailers().unwrap()["x-upload-complete"], "yes");
         assert_eq!(body.to_bytes(), "onetwo");
         drop(tx);
-        client_driver.await.unwrap().unwrap();
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
         server_task.await.unwrap();
     })
     .await;

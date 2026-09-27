@@ -7,7 +7,7 @@ use http::{HeaderMap, HeaderValue};
 /// # Example
 /// ```
 /// use http::header::{HeaderMap, HeaderValue};
-/// use hwire::ext::{on_preserve_header, OnPreserveHeaderCallback};
+/// use netty::ext::{on_preserve_header, OnPreserveHeaderCallback};
 ///
 /// struct HeaderPreserver;
 ///

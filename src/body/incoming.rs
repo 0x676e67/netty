@@ -6,6 +6,8 @@ use std::{
 
 use bytes::Bytes;
 use http_body::{Body, Frame, SizeHint};
+#[cfg(feature = "http3")]
+use http_body_util::combinators::BoxBody;
 
 use super::{chan, DecodedLength};
 use crate::{proto::http2::ping, Error, Result};
@@ -31,11 +33,7 @@ enum Kind {
         data_done: bool,
     },
     #[cfg(feature = "http3")]
-    H3 {
-        rx: chan::Receiver,
-        content_length: DecodedLength,
-        done: bool,
-    },
+    H3(BoxBody<Bytes, Error>),
     Empty,
 }
 
@@ -73,19 +71,12 @@ impl Incoming {
         )
     }
 
+    /// Wraps an HTTP/3 response body read directly from its QUIC stream.
     #[cfg(feature = "http3")]
-    pub(crate) fn h3(content_length: DecodedLength) -> (Sender, Self) {
-        let (tx, rx) = chan::channel(false);
-        (
-            tx,
-            Self {
-                kind: Kind::H3 {
-                    rx,
-                    content_length,
-                    done: false,
-                },
-            },
-        )
+    pub(crate) fn h3(body: BoxBody<Bytes, Error>) -> Self {
+        Self {
+            kind: Kind::H3(body),
+        }
     }
 
     pub(crate) fn h2(
@@ -180,29 +171,7 @@ impl Body for Incoming {
                 }
             }
             #[cfg(feature = "http3")]
-            Kind::H3 {
-                ref mut rx,
-                ref mut content_length,
-                ref mut done,
-            } => {
-                if *done {
-                    return Poll::Ready(None);
-                }
-                match ready!(rx.poll_next(cx)) {
-                    Some(Ok(data)) => {
-                        content_length.sub_if(data.len() as u64);
-                        Poll::Ready(Some(Ok(Frame::data(data))))
-                    }
-                    Some(Err(error)) => {
-                        *done = true;
-                        Poll::Ready(Some(Err(error)))
-                    }
-                    None => {
-                        *done = true;
-                        Poll::Ready(rx.take_trailers().map(Frame::trailers).map(Ok))
-                    }
-                }
-            }
+            Kind::H3(ref mut body) => Pin::new(body).poll_frame(cx),
             Kind::Empty => Poll::Ready(None),
         }
     }
@@ -213,7 +182,7 @@ impl Body for Incoming {
             Kind::H1 { content_length, .. } => content_length == DecodedLength::ZERO,
             Kind::H2 { recv: ref h2, .. } => h2.is_end_stream(),
             #[cfg(feature = "http3")]
-            Kind::H3 { done, .. } => done,
+            Kind::H3(ref body) => body.is_end_stream(),
             Kind::Empty => true,
         }
     }
@@ -225,19 +194,7 @@ impl Body for Incoming {
                 .into_opt()
                 .map_or_else(SizeHint::default, SizeHint::with_exact),
             #[cfg(feature = "http3")]
-            Kind::H3 {
-                content_length,
-                done,
-                ..
-            } => {
-                if done {
-                    SizeHint::with_exact(0)
-                } else {
-                    content_length
-                        .into_opt()
-                        .map_or_else(SizeHint::default, SizeHint::with_exact)
-                }
-            }
+            Kind::H3(ref body) => body.size_hint(),
             Kind::Empty => SizeHint::with_exact(0),
         }
     }

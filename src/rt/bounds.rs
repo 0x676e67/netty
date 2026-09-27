@@ -5,6 +5,8 @@
 
 pub use self::h2_client::Http2ClientConnExec;
 pub(crate) use self::h2_common::Http2UpgradedExec;
+#[cfg(feature = "http3")]
+pub use self::h3_client::Http3ClientConnExec;
 
 mod h2_common {
     use crate::{proto::http2::upgrade::UpgradedSendStreamTask, rt::Executor};
@@ -68,6 +70,75 @@ mod h2_client {
         B::Error: Into<BoxError>,
         H2ClientFuture<B, T, E>: Future<Output = ()>,
         T: AsyncRead + AsyncWrite + Unpin,
+    {
+    }
+
+    mod sealed_client {
+        pub trait Sealed<X> {}
+    }
+}
+
+#[cfg(feature = "http3")]
+mod h3_client {
+    use bytes::Bytes;
+
+    use crate::{
+        proto::http3::client::H3ClientFuture,
+        rt::{quic, Executor},
+    };
+
+    /// An executor to spawn HTTP/3 futures for the client: the connection
+    /// task, body pipes and CONNECT tunnels that outlive their
+    /// request future. Body pipes include FIN acknowledgment; request futures
+    /// each carry an executor clone.
+    ///
+    /// Implement [`Executor`] generically for the futures your runtime supports;
+    /// the task enum is internal and does not need to be named.
+    /// Compatible executors implement this trait automatically.
+    ///
+    /// This trait is sealed and cannot be implemented for types outside this crate.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::future::Future;
+    /// use netty::rt::Executor;
+    ///
+    /// #[derive(Clone)]
+    /// struct TokioExecutor;
+    ///
+    /// impl<F> Executor<F> for TokioExecutor
+    /// where
+    ///     F: Future<Output = ()> + Send + 'static,
+    /// {
+    ///     fn execute(&self, future: F) {
+    ///         tokio::spawn(future);
+    ///     }
+    /// }
+    /// ```
+    pub trait Http3ClientConnExec<Q>: Clone + sealed_client::Sealed<Q>
+    where
+        Q: quic::Connection<Bytes>,
+    {
+        #[doc(hidden)]
+        fn execute_h3_future(&self, future: H3ClientFuture<Q>);
+    }
+
+    impl<E, Q> Http3ClientConnExec<Q> for E
+    where
+        E: Executor<H3ClientFuture<Q>> + Clone,
+        Q: quic::Connection<Bytes>,
+    {
+        #[inline]
+        fn execute_h3_future(&self, future: H3ClientFuture<Q>) {
+            self.execute(future)
+        }
+    }
+
+    impl<E, Q> sealed_client::Sealed<Q> for E
+    where
+        E: Executor<H3ClientFuture<Q>> + Clone,
+        Q: quic::Connection<Bytes>,
     {
     }
 

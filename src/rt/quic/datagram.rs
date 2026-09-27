@@ -1,3 +1,6 @@
+//! QUIC Datagram transport contracts used by HTTP Datagram sessions.
+//! <https://www.rfc-editor.org/rfc/rfc9221.html>
+
 use std::{
     fmt,
     task::{Context, Poll},

@@ -10,7 +10,7 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use futures_util::task::AtomicWaker;
-use hwire::rt::quic::{self, BidiStream, Connection, OpenStreams, RecvStream, SendStream};
+use netty::rt::quic::{self, BidiStream, Connection, OpenStreams, RecvStream, SendStream};
 use tokio::sync::Notify;
 
 #[derive(Clone, Default)]
@@ -22,9 +22,9 @@ struct State {
     resumed: AtomicBool,
     blocked: Notify,
     credit: Notify,
-    received_fin: Notify,
     writer: AtomicWaker,
     hold_finish_ack: AtomicBool,
+    fail_finish_ack: AtomicBool,
     waiting_for_ack: Notify,
     ack_released: AtomicBool,
     ack_waker: AtomicWaker,
@@ -58,10 +58,6 @@ impl Pause {
         self.0.credit.notified().await;
     }
 
-    pub async fn received_fin(&self) {
-        self.0.received_fin.notified().await;
-    }
-
     pub fn resume(&self) {
         self.0.resumed.store(true, Ordering::Release);
         self.0.writer.wake();
@@ -70,6 +66,12 @@ impl Pause {
     pub fn hold_finish_ack(&self) {
         self.resume();
         self.0.hold_finish_ack.store(true, Ordering::Release);
+    }
+
+    /// Reports a stream error instead of the FIN acknowledgment.
+    pub fn fail_finish_ack(&self) {
+        self.resume();
+        self.0.fail_finish_ack.store(true, Ordering::Release);
     }
 
     pub async fn waiting_for_finish_ack(&self) {
@@ -168,6 +170,11 @@ impl<T: SendStream<Bytes>> SendStream<Bytes> for Transport<T> {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<u64>, quic::StreamError>> {
+        if self.pause.0.fail_finish_ack.load(Ordering::Acquire) {
+            return Poll::Ready(Err(quic::StreamError::Unknown(Box::new(
+                std::io::Error::other("FIN acknowledgment failed"),
+            ))));
+        }
         if !self.holding_ack {
             let result = ready!(self.inner.poll_stopped(cx));
             if !matches!(result, Ok(None)) || !self.pause.0.hold_finish_ack.load(Ordering::Acquire)
@@ -206,11 +213,7 @@ impl<T: RecvStream> RecvStream for Transport<T> {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<Self::Buf>, quic::StreamError>> {
-        let result = self.inner.poll_data(cx);
-        if matches!(&result, Poll::Ready(Ok(None))) {
-            self.pause.0.received_fin.notify_one();
-        }
-        result
+        self.inner.poll_data(cx)
     }
 
     fn stop_sending(&mut self, code: u64) {

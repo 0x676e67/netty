@@ -1,152 +1,466 @@
+//! HTTP/3 client connections and request exchanges. The connection task drives
+//! control streams, SETTINGS, Datagram routing and graceful shutdown. Requests
+//! run in the caller's future; body pipes that outlive the response head and
+//! CONNECT tunnels move to the executor.
+
 use std::{
-    future::poll_fn,
-    pin::pin,
-    sync::{Arc, OnceLock},
-    task::Poll,
+    borrow::Cow,
+    future::{pending, poll_fn, Future},
+    pin::{pin, Pin},
+    sync::Arc,
+    task::{ready, Context, Poll, Waker},
 };
 
 use bytes::{Buf, Bytes};
-use futures_util::{
-    future::{select, try_join, Either},
-    TryFutureExt,
-};
+use futures_util::future::BoxFuture;
 use http::{header, HeaderMap, Method, Request, Response, StatusCode};
 use http3::{
     client::{RequestStream, SendRequest},
-    error::Code,
-    quic,
+    error::{Code, StreamError},
+    ext::Protocol,
+    quic, ConnectionState,
 };
 use http_body::Body;
+use http_body_util::combinators::BoxBody;
+use pin_project_lite::pin_project;
+use tokio::sync::oneshot;
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
-use super::dispatch::{Active, Callback, Shared};
+use super::{
+    body::{PipeGuard, RecvBody},
+    shared::{Active, Shared},
+    transport::{Stream, Transport},
+    upgrade::{self, UpgradeTask},
+};
 use crate::{
-    body::{Incoming, Sender},
-    dispatch::{Envelope, TrySendError},
+    body::Incoming,
+    dispatch::TrySendError,
     error::BoxError,
     ext::OnPreserveHeader,
     proto::headers,
+    rt::{self, bounds::Http3ClientConnExec},
     Error, Result,
 };
+#[cfg(feature = "http3-datagram")]
+use crate::{
+    conn::http3::datagram::DatagramRequest,
+    proto::http3::datagram::{Drive, RequestState},
+};
 
+/// Protocol adapter for the send half of a bidirectional QUIC stream.
+pub(super) type SendStream<S> = Stream<<S as rt::quic::BidiStream<Bytes>>::SendStream, Bytes>;
+
+/// Protocol adapter for the receive half of a bidirectional QUIC stream.
+pub(super) type RecvStream<S> = Stream<<S as rt::quic::BidiStream<Bytes>>::RecvStream, Bytes>;
+
+/// Largest chunk handed to the QUIC send half at once.
 pub(super) const CHUNK: usize = 16 * 1024;
 
-pub(super) struct Failure {
-    error: OnceLock<Arc<Error>>,
-    connection: Arc<Shared>,
-}
-
-pub(super) struct ResponseGuard<'a, B> {
-    pub(super) callback: Option<Callback<B>>,
-    pub(super) failure: &'a Failure,
-}
-
-pub(super) struct BodyGuard<'a> {
-    pub(super) sender: Option<Sender>,
-    pub(super) failure: &'a Failure,
-}
-
-pub(super) struct SendGuard<S: quic::SendStream<Bytes>> {
+/// Send half of a request stream. Dropping it before `finished` resets the
+/// send direction, so a completed FIN must set the flag first.
+pub(super) struct SendGuard<S>
+where
+    S: quic::SendStream<Bytes>,
+{
     #[cfg(feature = "http3-datagram")]
-    pub(super) datagrams: Option<Arc<super::datagram::RequestState>>,
+    pub(super) datagrams: Option<Arc<RequestState>>,
     pub(super) stream: RequestStream<S, Bytes>,
     pub(super) finished: bool,
 }
 
-pub(super) struct RecvGuard<S: quic::RecvStream> {
+/// Receive half of a request stream. Dropping it before `finished` sends
+/// STOP_SENDING with `code`, which defaults to a local cancellation.
+pub(super) struct RecvGuard<S>
+where
+    S: quic::RecvStream,
+{
     #[cfg(feature = "http3-datagram")]
-    pub(super) datagrams: Option<Arc<super::datagram::RequestState>>,
+    pub(super) datagrams: Option<Arc<RequestState>>,
     pub(super) stream: RequestStream<S, Bytes>,
     pub(super) finished: bool,
     pub(super) code: Code,
 }
 
-pub(crate) async fn exchange<O, B>(
-    mut sender: SendRequest<O, Bytes>,
-    envelope: Envelope<Request<B>, Response<Incoming>>,
-    active: Active,
-) where
-    O: quic::OpenStreams<Bytes>,
-    O::BidiStream: quic::BidiStream<Bytes>,
-    B: Body,
-    B::Error: Into<BoxError>,
+/// The connection task the executor runs: drives control streams until the
+/// connection closes, then reports the outcome to the handle. Dropping it
+/// unfinished terminates the connection, so an executor that discards it
+/// cannot leave requests waiting.
+pub struct ConnTask<Q>
+where
+    Q: rt::quic::Connection<Bytes>,
 {
-    let (mut request, mut callback) = envelope.into_parts();
-    let shared = active.0.clone();
-    let failure = Failure {
-        error: OnceLock::new(),
-        connection: shared.clone(),
-    };
-    let cancel = callback.take_cancellation();
-    let mut response = ResponseGuard {
-        callback: Some(callback),
-        failure: &failure,
-    };
     #[cfg(feature = "http3-datagram")]
-    let datagram_cancellation = shared
-        .datagrams
-        .as_ref()
-        .map(|registry| (registry, tokio_util::sync::CancellationToken::new()));
-    let work = async {
-        let connect = request.method() == Method::CONNECT;
+    datagrams: Option<Drive>,
+    driver: http3::client::Connection<Transport<Q>, Bytes>,
+    opener: Q::OpenStreams,
+    shared: Arc<Shared>,
+    done: Option<oneshot::Sender<Result<()>>>,
+}
+
+impl<Q> Unpin for ConnTask<Q> where Q: rt::quic::Connection<Bytes> {}
+
+pin_project! {
+    /// Background work accepted by the HTTP/3 client executor. Requests and
+    /// response heads remain in the caller's future.
+    #[project = H3ClientFutureProject]
+    pub enum H3ClientFuture<Q>
+    where
+        Q: rt::quic::Connection<Bytes>,
+    {
+        Task {
+            #[pin]
+            task: ConnTask<Q>,
+        },
+        Pipe {
+            #[pin]
+            pipe: PipeMap<RecvStream<Q::BidiStream>>,
+        },
+        Upgrade {
+            #[pin]
+            task: UpgradeTask<SendStream<Q::BidiStream>, RecvStream<Q::BidiStream>>,
+        },
+    }
+}
+
+pin_project! {
+    /// Completes a body pipe after response handoff, propagating errors to the
+    /// receive half. Dropping it releases sending's share of the admission slot.
+    pub struct PipeMap<S>
+    where
+        S: quic::RecvStream,
+    {
+        pipe: Option<BoxFuture<'static, Result<()>>>,
+        guard: Option<PipeGuard<S>>,
+        #[pin]
+        invalid: Option<WaitForCancellationFutureOwned>,
+    }
+}
+
+// ===== impl H3ClientFuture =====
+
+impl<Q> Future for H3ClientFuture<Q>
+where
+    Q: rt::quic::Connection<Bytes>,
+{
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        match self.project() {
+            H3ClientFutureProject::Task { task } => task.poll(cx),
+            H3ClientFutureProject::Pipe { pipe } => pipe.poll(cx),
+            H3ClientFutureProject::Upgrade { task } => task.poll(cx),
+        }
+    }
+}
+
+// ===== impl PipeMap =====
+
+impl<S: quic::RecvStream> PipeMap<S> {
+    fn new(
+        pipe: BoxFuture<'static, Result<()>>,
+        guard: PipeGuard<S>,
+        invalid: Option<CancellationToken>,
+    ) -> Self {
+        Self {
+            pipe: Some(pipe),
+            guard: Some(guard),
+            invalid: invalid.map(CancellationToken::cancelled_owned),
+        }
+    }
+}
+
+impl<S: quic::RecvStream> Future for PipeMap<S> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let mut this = self.project();
+        let (Some(pipe), Some(guard)) = (this.pipe.as_mut(), this.guard.as_mut()) else {
+            return Poll::Ready(());
+        };
+
+        let result = if this
+            .invalid
+            .as_mut()
+            .as_pin_mut()
+            .is_some_and(|invalid| invalid.poll(cx).is_ready())
+        {
+            Err(invalid_datagram_error())
+        } else if !guard.watch(cx) {
+            Err(Error::new_canceled())
+        } else {
+            ready!(pipe.as_mut().poll(cx))
+        };
+
+        this.invalid.set(None);
+
+        // Reset unfinished sending before the response learns why it failed.
+        this.pipe.take();
+        if let Err(error) = result {
+            guard.fail(error);
+        }
+
+        this.guard.take();
+        Poll::Ready(())
+    }
+}
+
+// ===== impl ConnTask =====
+
+impl<Q> ConnTask<Q>
+where
+    Q: rt::quic::Connection<Bytes>,
+{
+    /// Wraps the protocol driver and the Datagram driver; `done` reports the
+    /// outcome to the handle.
+    pub(crate) fn new(
+        driver: http3::client::Connection<Transport<Q>, Bytes>,
+        opener: Q::OpenStreams,
+        #[cfg(feature = "http3-datagram")] datagrams: Option<Drive>,
+        shared: Arc<Shared>,
+        done: oneshot::Sender<Result<()>>,
+    ) -> Self {
+        Self {
+            #[cfg(feature = "http3-datagram")]
+            datagrams,
+            driver,
+            opener,
+            shared,
+            done: Some(done),
+        }
+    }
+
+    /// Reports the outcome; the handle may already be gone.
+    fn finish(&mut self, result: Result<()>) -> Poll<()> {
+        if let Some(done) = self.done.take() {
+            let _ = done.send(result);
+        }
+        Poll::Ready(())
+    }
+}
+
+impl<Q> Future for ConnTask<Q>
+where
+    Q: rt::quic::Connection<Bytes>,
+{
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.get_mut();
+        if this.done.is_none() {
+            return Poll::Ready(());
+        }
+
+        this.shared.register(cx);
+        if let Poll::Ready(error) = this.driver.poll_close(cx) {
+            let normal = error.is_h3_no_error();
+            this.shared.terminate(Error::new_h3(error));
+            let result = if normal {
+                Ok(())
+            } else {
+                Err(this.shared.error())
+            };
+            return this.finish(result);
+        }
+
+        if this.shared.peer_extended_connect.get().is_none() {
+            // Borrowed settings come from the received SETTINGS frame; Owned
+            // values are protocol defaults before peer negotiation completes.
+            if let Cow::Borrowed(settings) = this.driver.settings() {
+                #[cfg(feature = "http3-datagram")]
+                if let Some(datagrams) = &this.shared.datagrams {
+                    datagrams.negotiated(settings.enable_datagram());
+                }
+                let _ = this
+                    .shared
+                    .peer_extended_connect
+                    .set(settings.enable_extended_connect());
+                this.shared.settings_ready.cancel();
+            }
+        }
+
         #[cfg(feature = "http3-datagram")]
-        let datagram_request = request
-            .extensions()
-            .get::<crate::conn::http3::datagram::DatagramRequest>()
-            .is_some();
+        if let Some(datagrams) = &mut this.datagrams {
+            if let Poll::Ready(result) = datagrams.as_mut().poll(cx) {
+                this.datagrams = None;
+                if let Err((code, error)) = result {
+                    // Publish the cause before transport close wakes exchanges.
+                    this.shared.terminate(error);
+                    rt::quic::OpenStreams::close(
+                        &mut this.opener,
+                        code.value(),
+                        b"HTTP Datagram driver failed",
+                    );
+                    let error = this.shared.error();
+                    return this.finish(Err(error));
+                }
+                if let Some(registry) = &this.shared.datagrams {
+                    registry.close();
+                }
+            }
+        }
+
+        if ConnectionState::is_closing(&this.driver) {
+            this.shared.shutdown();
+        }
+
+        // The waker is registered above, so a completion racing this check
+        // still wakes the task.
+        if this.shared.is_draining() && this.shared.is_idle() {
+            rt::quic::OpenStreams::close(&mut this.opener, Code::H3_NO_ERROR.value(), b"");
+            this.shared.terminate(Error::new_closed());
+            return this.finish(Ok(()));
+        }
+        Poll::Pending
+    }
+}
+
+impl<Q> Drop for ConnTask<Q>
+where
+    Q: rt::quic::Connection<Bytes>,
+{
+    fn drop(&mut self) {
+        if self.done.is_some() {
+            self.shared
+                .terminate(Error::new_canceled().with("HTTP/3 connection task dropped"));
+            rt::quic::OpenStreams::close(
+                &mut self.opener,
+                Code::H3_NO_ERROR.value(),
+                b"connection task dropped",
+            );
+            let error = self.shared.error();
+            let _ = self.finish(Err(error));
+        }
+    }
+}
+
+// ===== impl SendGuard =====
+
+impl<S> Drop for SendGuard<S>
+where
+    S: quic::SendStream<Bytes>,
+{
+    fn drop(&mut self) {
+        if !self.finished {
+            let code = Code::H3_REQUEST_CANCELLED;
+            #[cfg(feature = "http3-datagram")]
+            let code = if self
+                .datagrams
+                .as_ref()
+                .is_some_and(|d| d.invalid.is_cancelled())
+            {
+                Code::H3_DATAGRAM_ERROR
+            } else {
+                code
+            };
+            self.stream.stop_stream(code);
+        }
+    }
+}
+
+// ===== impl RecvGuard =====
+
+impl<S: quic::RecvStream> Drop for RecvGuard<S> {
+    fn drop(&mut self) {
+        if !self.finished {
+            // Late Datagrams after receive cancellation must be discarded,
+            // without canceling the task that still owns the send direction.
+            // https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1
+            #[cfg(feature = "http3-datagram")]
+            if let Some(datagrams) = &self.datagrams {
+                datagrams.close_recv();
+            }
+            let code = self.code;
+            #[cfg(feature = "http3-datagram")]
+            let code = if self
+                .datagrams
+                .as_ref()
+                .is_some_and(|d| d.invalid.is_cancelled())
+            {
+                Code::H3_DATAGRAM_ERROR
+            } else {
+                code
+            };
+            self.stream.stop_sending(code);
+        }
+    }
+}
+
+/// Runs one request. Errors before stream opening is attempted return it;
+/// dropping the future before it resolves cancels both directions. `exec`
+/// runs body sending that outlives the response head or a CONNECT tunnel.
+#[allow(clippy::result_large_err)]
+pub(crate) fn request<Q, B, E>(
+    mut sender: SendRequest<Transport<Q::OpenStreams>, Bytes>,
+    exec: E,
+    shared: Arc<Shared>,
+    mut request: Request<B>,
+    reservation: Option<Active>,
+) -> BoxFuture<'static, Result<Response<Incoming>, TrySendError<Request<B>>>>
+where
+    Q: rt::quic::Connection<Bytes>,
+    Q::OpenStreams: Send + 'static,
+    Q::BidiStream: rt::quic::BidiStream<Bytes> + Send + 'static,
+    <Q::BidiStream as rt::quic::BidiStream<Bytes>>::SendStream: Send + 'static,
+    <Q::BidiStream as rt::quic::BidiStream<Bytes>>::RecvStream: Send + 'static,
+    <<Q::BidiStream as rt::quic::BidiStream<Bytes>>::RecvStream as rt::quic::RecvStream>::Buf: Send,
+    B: Body + Send + 'static,
+    B::Data: Send,
+    B::Error: Into<BoxError>,
+    E: Http3ClientConnExec<Q> + Send + 'static,
+{
+    Box::pin(async move {
+        let Some(reservation) = reservation else {
+            return Err(rejected(
+                Error::new_canceled().with("connection closed"),
+                request,
+            ));
+        };
+
+        let connect = request.method() == Method::CONNECT;
+        let head = request.method() == Method::HEAD;
+
+        #[cfg(feature = "http3-datagram")]
+        let datagram_request = request.extensions().get::<DatagramRequest>().is_some();
         #[cfg(feature = "http3-datagram")]
         if datagram_request
             && (shared.datagrams.is_none()
                 || !connect
-                || request.extensions().get::<http3::ext::Protocol>().is_none())
+                || request.extensions().get::<Protocol>().is_none())
         {
-            if let Some(callback) = response.callback.take() {
-                callback.send(Err(TrySendError {
-                    error: Error::new_user_invalid_request("Datagram requests require an Extended CONNECT and a Datagram-enabled connection"),
-                    message: Some(request),
-                }));
-            }
-            return Ok(());
+            return Err(rejected(
+            Error::new_user_invalid_request(
+                "Datagram requests require an Extended CONNECT and a Datagram-enabled connection",
+            ),
+            request,
+        ));
         }
+
         if connect && !request.body().is_end_stream() {
-            if let Some(callback) = response.callback.take() {
-                callback.send(Err(TrySendError {
-                    error: Error::new_user_invalid_connect(),
-                    message: Some(request),
-                }));
-            }
-            return Ok(());
+            return Err(rejected(Error::new_user_invalid_connect(), request));
         }
+
         headers::strip_connection_headers(request.headers_mut(), true);
         let length = match validate_request(&request) {
             Ok(length) => length,
-            Err(error) => {
-                if let Some(callback) = response.callback.take() {
-                    callback.send(Err(TrySendError {
-                        error: Error::new_user_invalid_request(error),
-                        message: Some(request),
-                    }));
-                }
-                return Ok(());
-            }
+            Err(error) => return Err(rejected(Error::new_user_invalid_request(error), request)),
         };
-        if request.extensions().get::<http3::ext::Protocol>().is_some() {
+
+        if request.extensions().get::<Protocol>().is_some() {
             shared.settings_ready.cancelled().await;
             if !shared
                 .peer_extended_connect
                 .get()
                 .is_some_and(|enabled| *enabled)
             {
-                if let Some(callback) = response.callback.take() {
-                    callback.send(Err(TrySendError {
-                        error: Error::new_user_invalid_request(
-                            "peer did not enable Extended CONNECT",
-                        ),
-                        message: Some(request),
-                    }));
-                }
-                return Ok(());
+                let error = if shared.permits.is_closed() {
+                    shared.error()
+                } else {
+                    Error::new_user_invalid_request("peer did not enable Extended CONNECT")
+                };
+                return Err(rejected(error, request));
             }
         }
+
         let length = if length.is_none() && !connect {
             let size = request.body().size_hint().exact();
             if let Some(size) = size {
@@ -158,342 +472,454 @@ pub(crate) async fn exchange<O, B>(
         } else {
             length
         };
-        let head = request.method() == Method::HEAD;
+
+        if request.body().is_end_stream() && length.is_some_and(|n| n != 0) {
+            return Err(rejected(
+                Error::new_user_body("body shorter than content-length"),
+                request,
+            ));
+        }
+
+        let active = match reservation.admit().await {
+            Ok(active) => active,
+            Err(error) => return Err(rejected(error, request)),
+        };
+
         let (mut parts, body) = request.into_parts();
         if let Some(header_sort) = parts.extensions.remove::<OnPreserveHeader>() {
             header_sort.call(&mut parts.headers);
         }
+
+        // From here on the request has left the caller, so failures cannot return it.
         let stream = sender
             .send_request(Request::from_parts(parts, ()))
             .await
-            .map_err(Error::new_h3)?;
+            .map_err(|error| lost(shared.error_or(Error::new_h3(error))))?;
         if stream.id().into_inner() % 4 != 0 {
-            return Err(Error::new_h3(
+            return Err(lost(Error::new_h3(
                 "QUIC backend returned a non-client request stream ID",
-            ));
+            )));
         }
-        let transfer = async {
-            #[cfg(feature = "http3-datagram")]
-            let registration =
-                datagram_cancellation
-                    .as_ref()
-                    .map(|(registry, invalid_datagram)| {
-                        registry.register(stream.id(), datagram_request, invalid_datagram.clone())
-                    });
-            let (send, recv) = stream.split();
-            let send = SendGuard {
-                #[cfg(feature = "http3-datagram")]
-                datagrams: registration.as_ref().map(|r| r.0.clone()),
-                stream: send,
-                finished: false,
-            };
-            let mut recv = RecvGuard {
-                #[cfg(feature = "http3-datagram")]
-                datagrams: registration.as_ref().map(|r| r.0.clone()),
-                stream: recv,
-                finished: false,
-                code: Code::H3_REQUEST_CANCELLED,
-            };
-            let initial_response = if connect {
-                let headers = response_headers(&mut recv).await?;
-                if headers.status().is_success() {
-                    return super::upgrade::run(
-                        send,
-                        recv,
-                        headers,
-                        &mut response,
-                        &failure,
-                        #[cfg(feature = "http3-datagram")]
-                        if datagram_request {
-                            registration.as_ref().map(|r| r.0.clone())
-                        } else {
-                            None
-                        },
-                    )
-                    .await;
-                }
-                Some(headers)
-            } else {
-                None
-            };
-            let upload = upload(send, body, length).map_err(|error| {
-                failure.set(error);
-                failure.get()
-            });
-            let download =
-                download(recv, &mut response, head, initial_response, &failure).map_err(|error| {
-                    failure.set(error);
-                    failure.get()
-                });
-            try_join(upload, download).await.map(|_| ())
-        };
-        transfer.await
-    };
-    let stop = async {
-        let connection = pin!(shared.closed.cancelled());
-        let request = pin!(async {
-            if let Some(cancel) = cancel {
-                if cancel.await.is_err() {
-                    return;
-                }
-            }
-            // Successful response handoff disarms future-drop cancellation.
-            // Body and tunnel ownership now govern the remaining exchange.
-            std::future::pending::<()>().await;
-        });
-        let canceled = select(connection, request);
+
         #[cfg(feature = "http3-datagram")]
-        {
-            if let Some((_, invalid_datagram)) = &datagram_cancellation {
-                let canceled = pin!(canceled);
-                let invalid = pin!(invalid_datagram.cancelled());
-                let _ = select(canceled, invalid).await;
-            } else {
-                let _ = canceled.await;
-            }
-        }
+        let registration = shared.datagrams.as_ref().map(|registry| {
+            registry.register(stream.id(), datagram_request, CancellationToken::new())
+        });
+
+        #[cfg(feature = "http3-datagram")]
+        let datagrams = registration.as_ref().map(|registration| &registration.0);
+
+        #[cfg(feature = "http3-datagram")]
+        let invalid = datagrams.as_ref().map(|state| state.invalid.clone());
+
         #[cfg(not(feature = "http3-datagram"))]
-        let _ = canceled.await;
-    };
-    let result = {
-        let work = pin!(work);
-        let stop = pin!(stop);
-        match select(work, stop).await {
-            Either::Left((result, _)) => result,
-            Either::Right(_) => {
+        let invalid: Option<CancellationToken> = None;
+
+        let (send, recv) = stream.split();
+        let mut send = SendGuard {
+            #[cfg(feature = "http3-datagram")]
+            datagrams: datagrams.cloned(),
+            stream: send,
+            finished: false,
+        };
+
+        let mut recv = RecvGuard {
+            #[cfg(feature = "http3-datagram")]
+            datagrams: datagrams.cloned(),
+            stream: recv,
+            finished: false,
+            code: Code::H3_REQUEST_CANCELLED,
+        };
+
+        let mut invalid_watch = pin!(invalid_datagram(invalid.clone()));
+
+        // CONNECT keeps its send direction open for the tunnel, so its head is
+        // read before anything is finished.
+        let initial_response = if connect {
+            let headers = {
+                let mut response = pin!(ResponseFutMap { recv: &mut recv });
+                poll_fn(|cx| {
+                    if let Poll::Ready(error) = invalid_watch.as_mut().poll(cx) {
+                        return Poll::Ready(Err(error));
+                    }
+                    response.as_mut().poll(cx)
+                })
+                .await
+            }
+            .map_err(|error| lost(shared.error_or(error)))?;
+            if headers.status().is_success() {
                 #[cfg(feature = "http3-datagram")]
-                if datagram_cancellation
-                    .as_ref()
-                    .is_some_and(|(_, invalid_datagram)| invalid_datagram.is_cancelled())
+                let datagrams = match registration {
+                    None => upgrade::TunnelDatagrams::Disabled,
+                    Some(registration) if datagram_request => {
+                        upgrade::TunnelDatagrams::Datagram(registration)
+                    }
+                    Some(registration) => upgrade::TunnelDatagrams::Ordinary(registration),
+                };
+                return Ok(upgrade::tunnel::<Q, _>(
+                    send,
+                    recv,
+                    headers,
+                    active,
+                    #[cfg(feature = "http3-datagram")]
+                    datagrams,
+                    &exec,
+                ));
+            }
+            Some(headers)
+        } else {
+            None
+        };
+
+        // An empty body finishes inline; its FIN acknowledgment is checked once
+        // the head is in, so a drain cannot discard an unacknowledged FIN.
+        let mut finished = None;
+        let mut pipe = if body.is_end_stream() {
+            Finish { send: &mut send }
+                .await
+                .map_err(|error| lost(shared.error_or(error)))?;
+            finished = Some(send);
+            None
+        } else {
+            Some(Box::pin(PipeToSendStream::new(send, body, length))
+                as BoxFuture<'static, Result<()>>)
+        };
+
+        let mut headers = match initial_response {
+            Some(headers) => headers,
+            None => {
+                let mut response = pin!(ResponseFutMap { recv: &mut recv });
+                poll_fn(|cx| {
+                    if let Some(pending) = pipe.as_mut() {
+                        match pending.as_mut().poll(cx) {
+                            Poll::Ready(Ok(())) => pipe = None,
+                            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                            Poll::Pending => {}
+                        }
+                    }
+                    if let Poll::Ready(error) = invalid_watch.as_mut().poll(cx) {
+                        return Poll::Ready(Err(error));
+                    }
+                    response.as_mut().poll(cx)
+                })
+                .await
+                .map_err(|error| lost(shared.error_or(error)))?
+            }
+        };
+
+        let mut remaining = content_length(headers.headers()).map_err(|error| {
+            // A malformed response is a stream error, not a local cancellation.
+            // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1.2
+            recv.code = Code::H3_MESSAGE_ERROR;
+            lost(error)
+        })?;
+        if head
+            || matches!(
+                headers.status(),
+                StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED
+            )
+        {
+            remaining = Some(0);
+        }
+        *headers.version_mut() = http::Version::HTTP_3;
+
+        // The peer's response packet normally carries the acknowledgment of the
+        // packet that held HEADERS and FIN; only a late one needs a task.
+        if let Some(mut send) = finished.take() {
+            if send.finished {
+                match send
+                    .stream
+                    .poll_stopped(&mut Context::from_waker(Waker::noop()))
                 {
-                    failure.set(Error::new_h3(
-                        "HTTP Datagram on a request without Datagram semantics",
-                    ));
+                    Poll::Ready(Ok(_)) => {}
+                    Poll::Ready(Err(error)) => {
+                        return Err(lost(shared.error_or(Error::new_h3(error))));
+                    }
+                    Poll::Pending => {
+                        pipe = Some(Box::pin(async move {
+                            poll_fn(|cx| send.stream.poll_stopped(cx))
+                                .await
+                                .map(|_| ())
+                                .map_err(Error::new_h3)
+                        }));
+                    }
                 }
-                Err(failure.get())
             }
         }
-    };
-    if let Err(error) = result {
-        failure.set(error);
-    }
-    // Envelope returns unstarted requests; ResponseGuard covers started tasks.
-    drop(response);
-    drop(active);
+
+        #[cfg(feature = "http3-datagram")]
+        let datagrams = datagrams.cloned();
+        let body = RecvBody::new(
+            recv,
+            remaining,
+            active,
+            #[cfg(feature = "http3-datagram")]
+            registration,
+            pipe.is_some(),
+        );
+
+        #[cfg(feature = "http3-datagram")]
+        if let Some(datagrams) = &datagrams {
+            body.attach(datagrams);
+        }
+
+        if let Some(pipe) = pipe {
+            exec.execute_h3_future(H3ClientFuture::Pipe {
+                pipe: PipeMap::new(pipe, body.pipe_guard(), invalid),
+            });
+        }
+
+        Ok(headers.map(|()| Incoming::h3(BoxBody::new(body))))
+    })
 }
 
-async fn upload<S, B>(mut send: SendGuard<S>, body: B, mut remaining: Option<u64>) -> Result<()>
+/// Resolves when a Datagram arrives for a request without Datagram semantics.
+pub(super) async fn invalid_datagram(invalid: Option<CancellationToken>) -> Error {
+    match invalid {
+        Some(invalid) => invalid.cancelled().await,
+        None => pending().await,
+    }
+    invalid_datagram_error()
+}
+
+/// A Datagram on a request without Datagram semantics is a stream error.
+/// https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1
+pub(super) fn invalid_datagram_error() -> Error {
+    Error::new_h3("HTTP Datagram on a request without Datagram semantics")
+}
+
+/// Closes the send direction of an empty request body. After a peer STOP_SENDING
+/// the guard stays unfinished so dropping it answers with a reset.
+struct Finish<'a, S>
+where
+    S: quic::SendStream<Bytes>,
+{
+    send: &'a mut SendGuard<S>,
+}
+
+// ===== impl Finish =====
+
+impl<S> Future for Finish<'_, S>
+where
+    S: quic::SendStream<Bytes>,
+{
+    type Output = Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let send = &mut self.get_mut().send;
+        match ready!(send.stream.poll_finish(cx)) {
+            Ok(()) => {}
+            Err(StreamError::RemoteTerminate { .. }) => return Poll::Ready(Ok(())),
+            Err(error) => return Poll::Ready(Err(Error::new_h3(error))),
+        }
+        send.finished = true;
+        #[cfg(feature = "http3-datagram")]
+        if let Some(datagrams) = &send.datagrams {
+            datagrams.close_send();
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Failure before the request left the caller; the request is returned.
+fn rejected<B>(error: Error, request: Request<B>) -> TrySendError<Request<B>> {
+    TrySendError {
+        error,
+        message: Some(request),
+    }
+}
+
+/// Failure once stream opening has been attempted; the request cannot be returned.
+fn lost<B>(error: Error) -> TrySendError<Request<B>> {
+    TrySendError {
+        error,
+        message: None,
+    }
+}
+
+pin_project! {
+    /// Sends a Body through the native HTTP/3 stream, retaining only its current
+    /// chunk across polls. Completion includes FIN acknowledgment or peer STOP.
+    struct PipeToSendStream<S, B>
+    where
+        S: quic::SendStream<Bytes>,
+        B: Body,
+    {
+        send: SendGuard<S>,
+        #[pin]
+        body: B,
+        data: Option<B::Data>,
+        remaining: Option<u64>,
+        trailers_sent: bool,
+        finishing: bool,
+    }
+}
+
+// ===== impl PipeToSendStream =====
+
+impl<S, B> PipeToSendStream<S, B>
+where
+    S: quic::SendStream<Bytes>,
+    B: Body,
+{
+    fn new(send: SendGuard<S>, body: B, remaining: Option<u64>) -> Self {
+        Self {
+            send,
+            body,
+            data: None,
+            remaining,
+            trailers_sent: false,
+            finishing: false,
+        }
+    }
+}
+
+impl<S, B> Future for PipeToSendStream<S, B>
 where
     S: quic::SendStream<Bytes>,
     B: Body,
     B::Error: Into<BoxError>,
 {
-    let mut body = pin!(body);
-    let mut trailers_sent = false;
-    let mut budget = 0;
-    let mut stopped = false;
-    while let Some(frame) = poll_fn(|cx| {
-        // Check cancellation before Body: continuously ready empty frames never
-        // reach the QUIC writer, so checking only on Pending would miss STOP.
-        // A complete early response remains valid: RFC 9114, Section 4.1.
-        // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1
-        if let Poll::Ready(result) = send.stream.poll_stopped(cx) {
-            stopped = true;
-            return Poll::Ready(result.err().map(|error| Err(Error::new_h3(error))));
+    type Output = Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        if this.send.finished {
+            return this
+                .send
+                .stream
+                .poll_stopped(cx)
+                .map(|result| result.map(|_| ()).map_err(Error::new_h3));
         }
-        body.as_mut()
-            .poll_frame(cx)
-            .map(|frame| frame.map(|result| result.map_err(Error::new_user_body)))
-    })
-    .await
-    {
-        let frame = frame?;
-        if trailers_sent {
-            return Err(Error::new_user_body("body frame after trailers"));
-        }
-        match frame.into_data() {
-            Ok(mut data) => {
-                consume_length(&mut remaining, data.remaining()).map_err(Error::new_user_body)?;
-                while data.has_remaining() {
+        for _ in 0..32 {
+            if *this.finishing {
+                match ready!(this.send.stream.poll_finish(cx)) {
+                    Ok(()) => {}
+                    Err(StreamError::RemoteTerminate { .. }) => return Poll::Ready(Ok(())),
+                    Err(error) => return Poll::Ready(Err(Error::new_h3(error))),
+                }
+                // FIN is submitted, but admission remains held until it is acknowledged.
+                this.send.finished = true;
+                #[cfg(feature = "http3-datagram")]
+                if let Some(datagrams) = &this.send.datagrams {
+                    datagrams.close_send();
+                }
+                return this
+                    .send
+                    .stream
+                    .poll_stopped(cx)
+                    .map(|result| result.map(|_| ()).map_err(Error::new_h3));
+            }
+            // Check STOP even for an endlessly ready sequence of empty Body frames.
+            if let Poll::Ready(result) = this.send.stream.poll_stopped(cx) {
+                return Poll::Ready(result.map(|_| ()).map_err(Error::new_h3));
+            }
+            match ready!(this.send.stream.poll_ready(cx)) {
+                Ok(()) => {}
+                Err(StreamError::RemoteTerminate { .. }) => return Poll::Ready(Ok(())),
+                Err(error) => return Poll::Ready(Err(Error::new_h3(error))),
+            }
+            if let Some(data) = this.data.as_mut() {
+                if data.has_remaining() {
                     let size = data.remaining().min(CHUNK);
-                    match send.stream.send_data(data.copy_to_bytes(size)).await {
+                    match this.send.stream.start_send_data(data.copy_to_bytes(size)) {
                         Ok(()) => {}
-                        Err(http3::error::StreamError::RemoteTerminate { .. }) => return Ok(()),
-                        Err(error) => return Err(Error::new_h3(error)),
+                        Err(StreamError::RemoteTerminate { .. }) => return Poll::Ready(Ok(())),
+                        Err(error) => return Poll::Ready(Err(Error::new_h3(error))),
                     }
-                    cooperate(&mut budget).await;
+                    continue;
+                }
+                *this.data = None;
+            }
+            let frame = match ready!(this.body.as_mut().poll_frame(cx)) {
+                Some(frame) => frame.map_err(Error::new_user_body)?,
+                None => {
+                    if this.remaining.is_some_and(|n| n != 0) {
+                        return Poll::Ready(Err(Error::new_user_body(
+                            "body shorter than content-length",
+                        )));
+                    }
+                    *this.finishing = true;
+                    continue;
+                }
+            };
+            if *this.trailers_sent {
+                return Poll::Ready(Err(Error::new_user_body("body frame after trailers")));
+            }
+            match frame.into_data() {
+                Ok(data) => {
+                    consume_length(this.remaining, data.remaining())
+                        .map_err(Error::new_user_body)?;
+                    *this.data = Some(data);
+                }
+                Err(frame) => {
+                    if let Ok(trailers) = frame.into_trailers() {
+                        if this.remaining.is_some_and(|n| n != 0) {
+                            return Poll::Ready(Err(Error::new_user_body(
+                                "body shorter than content-length",
+                            )));
+                        }
+                        match this.send.stream.start_send_trailers(trailers) {
+                            Ok(()) => {}
+                            Err(StreamError::RemoteTerminate { .. }) => return Poll::Ready(Ok(())),
+                            Err(error) => return Poll::Ready(Err(Error::new_h3(error))),
+                        }
+                        *this.trailers_sent = true;
+                    }
                 }
             }
-            Err(frame) => {
-                if let Ok(trailers) = frame.into_trailers() {
-                    if remaining.is_some_and(|n| n != 0) {
-                        return Err(Error::new_user_body("body shorter than content-length"));
-                    }
-                    match send.stream.send_trailers(trailers).await {
-                        Ok(()) => {}
-                        Err(http3::error::StreamError::RemoteTerminate { .. }) => return Ok(()),
-                        Err(error) => return Err(Error::new_h3(error)),
-                    }
-                    trailers_sent = true;
-                }
-            }
         }
-        cooperate(&mut budget).await;
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
-    if stopped {
-        return Ok(());
-    }
-    if remaining.is_some_and(|n| n != 0) {
-        return Err(Error::new_user_body("body shorter than content-length"));
-    }
-    match send.stream.finish().await {
-        Ok(()) => {}
-        Err(http3::error::StreamError::RemoteTerminate { .. }) => return Ok(()),
-        Err(error) => return Err(Error::new_h3(error)),
-    }
-    send.finished = true;
-    #[cfg(feature = "http3-datagram")]
-    if let Some(datagrams) = &send.datagrams {
-        datagrams.close_send();
-    }
-    // FIN is only queued by finish(). Keep the exchange active until transport
-    // delivery or peer cancellation, so connection drain cannot discard it.
-    poll_fn(|cx| send.stream.poll_stopped(cx))
-        .await
-        .map(|_| ())
-        .map_err(Error::new_h3)
 }
 
-async fn response_headers<S: quic::RecvStream>(recv: &mut RecvGuard<S>) -> Result<Response<()>> {
-    let mut budget = 0;
-    let headers = loop {
-        let headers = recv.stream.recv_response().await.map_err(Error::new_h3)?;
-        if headers.status() == StatusCode::SWITCHING_PROTOCOLS {
-            recv.code = Code::H3_MESSAGE_ERROR;
-            return Err(Error::new_h3("HTTP/3 response cannot use status 101"));
-        }
-        if !headers.status().is_informational() {
-            break headers;
-        }
-        // Ignore the length on a response without content, but still validate
-        // the field syntax. RFC 9114, Section 4.1.2.
-        // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1.2
-        content_length(headers.headers()).inspect_err(|_| {
-            recv.code = Code::H3_MESSAGE_ERROR;
-        })?;
-        cooperate(&mut budget).await;
-    };
-    Ok(headers)
+/// Reads the final response head, skipping informational responses.
+struct ResponseFutMap<'a, S>
+where
+    S: quic::RecvStream,
+{
+    recv: &'a mut RecvGuard<S>,
 }
 
-async fn download<S: quic::RecvStream, B>(
-    mut recv: RecvGuard<S>,
-    response: &mut ResponseGuard<'_, B>,
-    head: bool,
-    initial_response: Option<Response<()>>,
-    failure: &Failure,
-) -> Result<()> {
-    let mut budget = 0;
-    let mut headers = match initial_response {
-        Some(headers) => headers,
-        None => response_headers(&mut recv).await?,
-    };
-    let mut remaining = content_length(headers.headers()).inspect_err(|_| {
-        // A malformed response is a stream error, not a local cancellation.
-        // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1.2
-        recv.code = Code::H3_MESSAGE_ERROR;
-    })?;
-    if head
-        || matches!(
-            headers.status(),
-            StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED
-        )
-    {
-        remaining = Some(0);
-    }
-    *headers.version_mut() = http::Version::HTTP_3;
-    let (sender, incoming) = Incoming::h3(remaining.into());
-    let mut body = BodyGuard {
-        sender: Some(sender),
-        failure,
-    };
-    let Some(callback) = response.callback.take() else {
-        return Err(Error::new_canceled());
-    };
-    callback
-        .try_send(Ok(headers.map(|()| incoming)))
-        .map_err(|_| Error::new_canceled())?;
-    let Some(sender) = body.sender.as_mut() else {
-        return Err(Error::new_canceled());
-    };
-    let transfer = async {
-        while let Some(mut data) = poll_fn(|cx| {
-            if sender.poll_closed(cx).is_ready() {
-                return Poll::Ready(Err(Error::new_closed()));
-            }
-            recv.stream.poll_recv_data(cx).map_err(Error::new_h3)
-        })
-        .await?
-        {
-            consume_length(&mut remaining, data.remaining()).map_err(|reason| {
+// ===== impl ResponseFutMap =====
+
+impl<S> Future for ResponseFutMap<'_, S>
+where
+    S: quic::RecvStream,
+{
+    type Output = Result<Response<()>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let recv = &mut self.get_mut().recv;
+        for _ in 0..32 {
+            let headers = ready!(recv.stream.poll_recv_response(cx)).map_err(Error::new_h3)?;
+            if headers.status() == StatusCode::SWITCHING_PROTOCOLS {
                 recv.code = Code::H3_MESSAGE_ERROR;
-                Error::new_h3(reason)
+                return Poll::Ready(Err(Error::new_h3("HTTP/3 response cannot use status 101")));
+            }
+            if !headers.status().is_informational() {
+                return Poll::Ready(Ok(headers));
+            }
+            // Ignore the length on a response without content, but still validate
+            // the field syntax. RFC 9114, Section 4.1.2.
+            // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1.2
+            content_length(headers.headers()).inspect_err(|_| {
+                recv.code = Code::H3_MESSAGE_ERROR;
             })?;
-            while data.has_remaining() {
-                poll_fn(|cx| sender.poll_ready(cx)).await?;
-                let size = data.remaining().min(CHUNK);
-                sender
-                    .send_data(data.copy_to_bytes(size))
-                    .map_err(|_| Error::new_closed())?;
-                cooperate(&mut budget).await;
-            }
-            cooperate(&mut budget).await;
         }
-        if remaining.is_some_and(|n| n != 0) {
-            recv.code = Code::H3_MESSAGE_ERROR;
-            return Err(Error::new_body("HTTP/3 body shorter than content-length"));
-        }
-        if let Some(trailers) = poll_fn(|cx| {
-            if sender.poll_closed(cx).is_ready() {
-                return Poll::Ready(Err(Error::new_closed()));
-            }
-            recv.stream.poll_recv_trailers(cx).map_err(Error::new_h3)
-        })
-        .await?
-        {
-            sender
-                .send_trailers(trailers)
-                .map_err(|_| Error::new_closed())?;
-        }
-        recv.finished = true;
-        #[cfg(feature = "http3-datagram")]
-        if let Some(datagrams) = &recv.datagrams {
-            datagrams.close_recv();
-        }
-        Ok(())
-    };
-    match transfer.await {
-        Err(error) if !error.is_closed() => {
-            body.failure.set(error);
-            return Err(body.failure.get());
-        }
-        // Body drop only abandons receiving; request-future cancellation
-        // separately stops both directions before response handoff.
-        _ => {}
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
-    body.sender.take();
-    Ok(())
 }
 
 /// Validates the request and returns its declared Content-Length.
 fn validate_request<B>(request: &Request<B>) -> Result<Option<u64>> {
-    if request.extensions().get::<http3::ext::Protocol>().is_some()
-        && request.method() != Method::CONNECT
-    {
+    if request.extensions().get::<Protocol>().is_some() && request.method() != Method::CONNECT {
         return Err(Error::new_h3("Extended CONNECT protocol requires CONNECT"));
     }
-    let ordinary_connect = request.method() == Method::CONNECT
-        && request.extensions().get::<http3::ext::Protocol>().is_none();
+    let ordinary_connect =
+        request.method() == Method::CONNECT && request.extensions().get::<Protocol>().is_none();
     if request.uri().authority().is_none()
         || (!ordinary_connect && request.uri().scheme().is_none())
     {
@@ -523,6 +949,7 @@ fn validate_request<B>(request: &Request<B>) -> Result<Option<u64>> {
     content_length(request.headers())
 }
 
+/// Parses every Content-Length field, rejecting malformed or conflicting values.
 fn content_length(headers: &HeaderMap) -> Result<Option<u64>> {
     let mut length = None;
     for value in headers.get_all(header::CONTENT_LENGTH) {
@@ -542,125 +969,12 @@ fn content_length(headers: &HeaderMap) -> Result<Option<u64>> {
     Ok(length)
 }
 
-fn consume_length(remaining: &mut Option<u64>, size: usize) -> Result<(), &'static str> {
+/// Counts `size` against the declared length.
+pub(super) fn consume_length(remaining: &mut Option<u64>, size: usize) -> Result<(), &'static str> {
     if let Some(left) = remaining {
         *left = left
             .checked_sub(u64::try_from(size).map_err(|_| "body size overflow")?)
             .ok_or("body exceeds content-length")?;
     }
     Ok(())
-}
-
-pub(super) async fn cooperate(budget: &mut usize) {
-    *budget += 1;
-    if *budget < 32 {
-        return;
-    }
-    *budget = 0;
-    let mut yielded = false;
-    poll_fn(|cx| {
-        if yielded {
-            Poll::Ready(())
-        } else {
-            yielded = true;
-            cx.waker().wake_by_ref();
-            Poll::Pending
-        }
-    })
-    .await;
-}
-
-// ===== impl Failure =====
-
-impl Failure {
-    pub(super) fn set(&self, error: Error) {
-        self.error.get_or_init(|| {
-            // Closing QUIC can wake this exchange with a secondary transport
-            // error after the driver has already published the actual cause.
-            self.connection
-                .error
-                .get()
-                .cloned()
-                .unwrap_or_else(|| Arc::new(error))
-        });
-    }
-
-    pub(super) fn get(&self) -> Error {
-        self.error.get().map_or_else(
-            || self.connection.error(),
-            |e| Error::from_shared(e.clone()),
-        )
-    }
-}
-
-// ===== impl ResponseGuard =====
-
-impl<B> Drop for ResponseGuard<'_, B> {
-    fn drop(&mut self) {
-        if let Some(callback) = self.callback.take() {
-            callback.send(Err(TrySendError {
-                error: self.failure.get(),
-                message: None,
-            }));
-        }
-    }
-}
-
-// ===== impl BodyGuard =====
-
-impl Drop for BodyGuard<'_> {
-    fn drop(&mut self) {
-        if let Some(sender) = self.sender.as_mut() {
-            sender.send_error(self.failure.get());
-        }
-    }
-}
-
-// ===== impl SendGuard =====
-
-impl<S: quic::SendStream<Bytes>> Drop for SendGuard<S> {
-    fn drop(&mut self) {
-        if !self.finished {
-            let code = Code::H3_REQUEST_CANCELLED;
-            #[cfg(feature = "http3-datagram")]
-            let code = if self
-                .datagrams
-                .as_ref()
-                .is_some_and(|d| d.invalid.is_cancelled())
-            {
-                Code::H3_DATAGRAM_ERROR
-            } else {
-                code
-            };
-            self.stream.stop_stream(code);
-        }
-    }
-}
-
-// ===== impl RecvGuard =====
-
-impl<S: quic::RecvStream> Drop for RecvGuard<S> {
-    fn drop(&mut self) {
-        if !self.finished {
-            // Late Datagrams after receive cancellation must be discarded,
-            // without canceling an upload that still owns the send direction.
-            // https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1
-            #[cfg(feature = "http3-datagram")]
-            if let Some(datagrams) = &self.datagrams {
-                datagrams.close_recv();
-            }
-            let code = self.code;
-            #[cfg(feature = "http3-datagram")]
-            let code = if self
-                .datagrams
-                .as_ref()
-                .is_some_and(|d| d.invalid.is_cancelled())
-            {
-                Code::H3_DATAGRAM_ERROR
-            } else {
-                code
-            };
-            self.stream.stop_sending(code);
-        }
-    }
 }

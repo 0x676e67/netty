@@ -9,7 +9,7 @@ use futures_util::{
     future::{poll_fn, BoxFuture},
     task::AtomicWaker,
 };
-use hwire::rt::quic::{self as rt, DatagramConnection, OpenStreams};
+use netty::rt::quic::{self as rt, DatagramConnection, OpenStreams};
 
 use super::*;
 
@@ -20,6 +20,9 @@ struct Jobs(Arc<Queue>);
 struct Queue {
     jobs: Mutex<Vec<BoxFuture<'static, ()>>>,
     waker: AtomicWaker,
+    connection_submitted: AtomicBool,
+    /// Queue the connection task too, so a test drives it in lockstep.
+    inline_task: bool,
 }
 
 #[derive(Clone)]
@@ -31,6 +34,13 @@ struct Transport<T> {
 // ===== impl Jobs =====
 
 impl Jobs {
+    fn inline_task() -> Self {
+        Self(Arc::new(Queue {
+            inline_task: true,
+            ..Queue::default()
+        }))
+    }
+
     fn poll(&self, cx: &mut Context<'_>) {
         self.0.waker.register(cx.waker());
         self.0
@@ -41,10 +51,16 @@ impl Jobs {
     }
 }
 
-impl Executor<BoxFuture<'static, ()>> for Jobs {
-    fn execute(&self, job: BoxFuture<'static, ()>) {
-        self.0.jobs.lock().unwrap().push(job);
-        self.0.waker.wake();
+impl<F: Future<Output = ()> + Send + 'static> Executor<F> for Jobs {
+    fn execute(&self, job: F) {
+        // Handshake submits the connection before it can submit exchanges.
+        let is_exchange = self.0.connection_submitted.swap(true, Ordering::Relaxed);
+        if self.0.inline_task || is_exchange {
+            self.0.jobs.lock().unwrap().push(Box::pin(job));
+            self.0.waker.wake();
+        } else {
+            tokio::spawn(job);
+        }
     }
 }
 
@@ -224,7 +240,7 @@ async fn check_cause(response_started: bool) {
     .await;
 }
 
-fn assert_datagram_cause(error: &hwire::Error) {
+fn assert_datagram_cause(error: &netty::Error) {
     use std::error::Error;
     let mut source = error.source();
     while let Some(cause) = source {
@@ -247,7 +263,7 @@ async fn late_datagram_after_response_drop_preserves_upload() {
         let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
         let observed = client.clone();
         let peer = server.clone();
-        let jobs = Jobs::default();
+        let jobs = Jobs::inline_task();
         let ((mut tx, mut driver), mut server) = tokio::join!(
             async {
                 Builder::new(jobs.clone())
@@ -333,6 +349,7 @@ async fn late_datagram_after_response_drop_preserves_upload() {
         upload.send(()).expect("late datagram must preserve upload");
         progress(upload_received, &mut driver, &jobs).await.unwrap();
         drop(tx);
+        Pin::new(&mut driver).graceful_shutdown();
         poll_fn(|cx| {
             jobs.poll(cx);
             Pin::new(&mut driver).poll(cx)
@@ -347,7 +364,7 @@ async fn late_datagram_after_response_drop_preserves_upload() {
 async fn progress<F, D>(future: F, driver: &mut D, jobs: &Jobs) -> F::Output
 where
     F: Future,
-    D: Future<Output = Result<(), hwire::Error>> + Unpin,
+    D: Future<Output = Result<(), netty::Error>> + Unpin,
 {
     let mut future = std::pin::pin!(future);
     poll_fn(|cx| {

@@ -77,6 +77,11 @@ pub trait OpenStreams<B: Buf> {
     ) -> Poll<Result<Self::SendStream, StreamError>>;
 
     /// Closes the entire connection with a QUIC application error code.
+    ///
+    /// The driver and its cleanup may call this repeatedly through different
+    /// handles to the same connection. Calls after closing starts must be safe
+    /// and preserve the application close code and reason already selected for
+    /// transmission to the peer.
     fn close(&mut self, code: u64, reason: &[u8]);
 }
 

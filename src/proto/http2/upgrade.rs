@@ -23,16 +23,12 @@ use std::{
     future::Future,
     io::{self, Cursor},
     pin::Pin,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
     task::{ready, Context, Poll},
 };
 
 use bytes::{Buf, Bytes};
 use futures_channel::{mpsc, oneshot};
-use futures_util::{task::AtomicWaker, Stream};
+use futures_util::Stream;
 use http2::{Reason, RecvStream, SendStream};
 use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -46,15 +42,10 @@ pub(super) fn pair<B>(
 ) -> (H2Upgraded, UpgradedSendStreamTask<B>) {
     let (tx, rx) = mpsc::channel(1);
     let (error_tx, error_rx) = oneshot::channel();
-    let close_notify = Arc::new(UpgradedCloseNotify::new());
 
     (
         H2Upgraded {
-            send_stream: UpgradedSendStreamBridge {
-                tx,
-                error_rx,
-                close_notify: close_notify.clone(),
-            },
+            send_stream: UpgradedSendStreamBridge { tx, error_rx },
             recv_stream,
             ping,
             buf: Bytes::new(),
@@ -62,7 +53,7 @@ pub(super) fn pair<B>(
         UpgradedSendStreamTask {
             h2_tx: send_stream,
             rx,
-            close_notify,
+            buffered: None,
             error_tx: Some(error_tx),
         },
     )
@@ -80,13 +71,6 @@ pub(super) struct H2Upgraded {
 struct UpgradedSendStreamBridge {
     tx: mpsc::Sender<Cursor<Box<[u8]>>>,
     error_rx: oneshot::Receiver<crate::Error>,
-    close_notify: Arc<UpgradedCloseNotify>,
-}
-
-/// Wakes the send task when the write bridge closes while waiting for capacity.
-struct UpgradedCloseNotify {
-    closed: AtomicBool,
-    task: AtomicWaker,
 }
 
 pin_project! {
@@ -97,46 +81,8 @@ pin_project! {
         h2_tx: SendStream<SendBuf<B>>,
         #[pin]
         rx: mpsc::Receiver<Cursor<Box<[u8]>>>,
-        close_notify: Arc<UpgradedCloseNotify>,
+        buffered: Option<Cursor<Box<[u8]>>>,
         error_tx: Option<oneshot::Sender<crate::Error>>,
-    }
-}
-
-// ===== impl UpgradedSendStreamBridge =====
-
-impl Drop for UpgradedSendStreamBridge {
-    fn drop(&mut self) {
-        self.close_notify.close();
-    }
-}
-
-// ===== impl UpgradedCloseNotify =====
-
-impl UpgradedCloseNotify {
-    fn new() -> Self {
-        Self {
-            closed: AtomicBool::new(false),
-            task: AtomicWaker::new(),
-        }
-    }
-
-    fn close(&self) {
-        self.closed.store(true, Ordering::Release);
-        self.task.wake();
-    }
-
-    fn poll_closed(&self, cx: &mut Context<'_>) -> Poll<()> {
-        if self.closed.load(Ordering::Acquire) {
-            return Poll::Ready(());
-        }
-
-        self.task.register(cx.waker());
-
-        if self.closed.load(Ordering::Acquire) {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
     }
 }
 
@@ -154,35 +100,6 @@ where
         // one of the sides hanging up, so the task doesn't live around
         // longer than it's meant to.
         loop {
-            // we don't have the next chunk of data yet, so just reserve 1 byte to make
-            // sure there's some capacity available. h2 will handle the capacity management
-            // for the actual body chunk.
-            me.h2_tx.reserve_capacity(1);
-
-            let h2_has_capacity = if me.h2_tx.capacity() == 0 {
-                // poll_capacity oddly needs a loop
-                loop {
-                    match me.h2_tx.poll_capacity(cx) {
-                        Poll::Ready(Some(Ok(0))) => {}
-                        Poll::Ready(Some(Ok(_))) => break true,
-                        Poll::Ready(Some(Err(e))) => {
-                            return Poll::Ready(Err(crate::Error::new_body_write(e)))
-                        }
-                        Poll::Ready(None) => {
-                            // None means the stream is no longer in a
-                            // streaming state, we either finished it
-                            // somehow, or the remote reset us.
-                            return Poll::Ready(Err(crate::Error::new_body_write(
-                                "send stream capacity unexpectedly closed",
-                            )));
-                        }
-                        Poll::Pending => break false,
-                    }
-                }
-            } else {
-                true
-            };
-
             match me.h2_tx.poll_reset(cx) {
                 Poll::Ready(Ok(reason)) => {
                     trace!("stream received RST_STREAM: {:?}", reason);
@@ -196,28 +113,43 @@ where
                 Poll::Pending => (),
             }
 
-            // Keep accepted writes queued until HTTP/2 capacity returns, so freeing
-            // a channel slot cannot let the writer bypass flow-control backpressure.
-            // https://www.rfc-editor.org/rfc/rfc9113.html#section-5.2
-            if !h2_has_capacity {
-                // Empty END_STREAM is allowed without window space; observe the queue
-                // without consuming an accepted write that still needs capacity.
-                // https://www.rfc-editor.org/rfc/rfc9113.html#section-6.9.1
-                if me.rx.size_hint().0 == 0 && me.close_notify.poll_closed(cx).is_ready() {
-                    me.h2_tx
-                        .send_data(SendBuf::None, true)
-                        .map_err(crate::Error::new_body_write)?;
-                    return Poll::Ready(Ok(()));
+            // A write taken from the mpsc receiver waits here for h2 capacity,
+            // and the next one isn't pulled until it has been handed to h2, so
+            // the writer still sees h2 backpressure.
+            if me.buffered.is_some() {
+                // poll_capacity oddly needs a loop
+                while me.h2_tx.capacity() == 0 {
+                    match ready!(me.h2_tx.poll_capacity(cx)) {
+                        Some(Ok(0)) => {}
+                        Some(Ok(_)) => break,
+                        Some(Err(e)) => return Poll::Ready(Err(crate::Error::new_body_write(e))),
+                        None => {
+                            // None means the stream is no longer in a
+                            // streaming state, we either finished it
+                            // somehow, or the remote reset us.
+                            return Poll::Ready(Err(crate::Error::new_body_write(
+                                "send stream capacity unexpectedly closed",
+                            )));
+                        }
+                    }
                 }
 
-                return Poll::Pending;
+                let cursor = me.buffered.take().expect("checked is_some above");
+                me.h2_tx
+                    .send_data(SendBuf::Cursor(cursor), false)
+                    .map_err(crate::Error::new_body_write)?;
+                continue;
             }
 
             match me.rx.as_mut().poll_next(cx) {
                 Poll::Ready(Some(cursor)) => {
-                    me.h2_tx
-                        .send_data(SendBuf::Cursor(cursor), false)
-                        .map_err(crate::Error::new_body_write)?;
+                    // Only reserve capacity once there is something to send.
+                    // Reserving while idle, even a single byte, pins that
+                    // capacity on the connection-level window (#4003). As in
+                    // `PipeToSendStream`, h2 raises the request to the
+                    // buffered length inside `send_data`.
+                    me.h2_tx.reserve_capacity(1);
+                    *me.buffered = Some(cursor);
                 }
                 Poll::Ready(None) => {
                     me.h2_tx
@@ -353,7 +285,6 @@ impl AsyncWrite for H2Upgraded {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.send_stream.tx.close_channel();
-        self.send_stream.close_notify.close();
         match Pin::new(&mut self.send_stream.error_rx).poll(cx) {
             Poll::Ready(Ok(reason)) => Poll::Ready(Err(io_error(reason))),
             Poll::Ready(Err(_task_dropped)) => Poll::Ready(Ok(())),

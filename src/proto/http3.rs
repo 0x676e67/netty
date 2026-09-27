@@ -2,7 +2,7 @@
 //!
 //! Extended CONNECT and pseudo-header ordering use request extensions:
 //! ```
-//! use hwire::http3::{Protocol, PseudoId, PseudoOrder};
+//! use netty::http3::{Protocol, PseudoId, PseudoOrder};
 //!
 //! let request = http::Request::connect("https://example.com/tunnel")
 //!     .extension(Protocol::WEBSOCKET)
@@ -13,10 +13,11 @@
 
 pub use http3::{ext::Protocol, PseudoId, PseudoOrder, PseudoOrderBuilder, SettingId};
 
+pub(crate) mod body;
 pub(crate) mod client;
 #[cfg(feature = "http3-datagram")]
 pub(crate) mod datagram;
-pub(crate) mod dispatch;
+pub(crate) mod shared;
 pub(crate) mod transport;
 pub(crate) mod upgrade;
 
