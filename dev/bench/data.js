@@ -20,7 +20,7 @@ window.BENCHMARK_DATA = {
           "message": "Add default feature and tracing logging",
           "timestamp": "2026-04-28T14:22:21+08:00",
           "tree_id": "c572260330a33718ddaf6ed11bc61b02030ca9de",
-          "url": "https://github.com/0x676e67/hwire/commit/5c91cfbd2f3d7ca76ec4498bcc6c2c6164023583"
+          "url": "https://github.com/0x676e67/netty/commit/5c91cfbd2f3d7ca76ec4498bcc6c2c6164023583"
         },
         "date": 1777357829384,
         "tool": "cargo",
@@ -128,7 +128,7 @@ window.BENCHMARK_DATA = {
           "message": "Bump actions/cache from 3 to 5 (#3)\n\nBumps [actions/cache](https://github.com/actions/cache) from 3 to 5.\n- [Release notes](https://github.com/actions/cache/releases)\n- [Changelog](https://github.com/actions/cache/blob/main/RELEASES.md)\n- [Commits](https://github.com/actions/cache/compare/v3...v5)\n\n---\nupdated-dependencies:\n- dependency-name: actions/cache\n  dependency-version: '5'\n  dependency-type: direct:production\n  update-type: version-update:semver-major\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
           "timestamp": "2026-04-28T14:43:08+08:00",
           "tree_id": "33315d82ad4b3fb1f768e59ddfd2690afe37724a",
-          "url": "https://github.com/0x676e67/hwire/commit/91f8bcc881aa9d438a3a1b8ce462f2d49d5c9142"
+          "url": "https://github.com/0x676e67/netty/commit/91f8bcc881aa9d438a3a1b8ce462f2d49d5c9142"
         },
         "date": 1777358762522,
         "tool": "cargo",
@@ -236,7 +236,7 @@ window.BENCHMARK_DATA = {
           "message": "Create README.md",
           "timestamp": "2026-04-28T14:52:01+08:00",
           "tree_id": "8a78936b01189c03edcf9a191d4a4e4f06378e05",
-          "url": "https://github.com/0x676e67/hwire/commit/7aa43cd197e5d27353cdf6c17c4299e9ce793bcc"
+          "url": "https://github.com/0x676e67/netty/commit/7aa43cd197e5d27353cdf6c17c4299e9ce793bcc"
         },
         "date": 1777359301715,
         "tool": "cargo",
@@ -344,7 +344,7 @@ window.BENCHMARK_DATA = {
           "message": "Update README.md\n\nRemoved Crates.io badge from",
           "timestamp": "2026-04-28T14:55:01+08:00",
           "tree_id": "b183d21fc1772658d5cf71d45a5d3d96507679b5",
-          "url": "https://github.com/0x676e67/hwire/commit/edc728ce465e801fc82d14ca4d5a9b13bcaf60bd"
+          "url": "https://github.com/0x676e67/netty/commit/edc728ce465e801fc82d14ca4d5a9b13bcaf60bd"
         },
         "date": 1777359470045,
         "tool": "cargo",
@@ -452,7 +452,7 @@ window.BENCHMARK_DATA = {
           "message": "Update README.md",
           "timestamp": "2026-04-28T14:56:41+08:00",
           "tree_id": "f51651d8e82f3839b767bd735c1ca13a1fe27d2a",
-          "url": "https://github.com/0x676e67/hwire/commit/155bd1d2a496aff42bfed4a123527306b3f569ee"
+          "url": "https://github.com/0x676e67/netty/commit/155bd1d2a496aff42bfed4a123527306b3f569ee"
         },
         "date": 1777359578281,
         "tool": "cargo",
@@ -560,7 +560,7 @@ window.BENCHMARK_DATA = {
           "message": "Update Cargo.toml",
           "timestamp": "2026-04-28T15:56:16+08:00",
           "tree_id": "50be68345f1d2e5d9e9e4cf857e799f7d0be1f55",
-          "url": "https://github.com/0x676e67/hwire/commit/d9a965faca422aef072ac80871ac547a1b54f209"
+          "url": "https://github.com/0x676e67/netty/commit/d9a965faca422aef072ac80871ac547a1b54f209"
         },
         "date": 1777363146720,
         "tool": "cargo",
@@ -668,7 +668,7 @@ window.BENCHMARK_DATA = {
           "message": "test: update tests (#4)",
           "timestamp": "2026-04-28T20:45:09+08:00",
           "tree_id": "ed75d54eec55e9dfe46f6887436ef1725943eb26",
-          "url": "https://github.com/0x676e67/hwire/commit/60d573fe90953a09e3c22361f5f157cdb3e72996"
+          "url": "https://github.com/0x676e67/netty/commit/60d573fe90953a09e3c22361f5f157cdb3e72996"
         },
         "date": 1777380505232,
         "tool": "cargo",
@@ -776,7 +776,7 @@ window.BENCHMARK_DATA = {
           "message": "feat(rt): runtime-agnostic (#5)",
           "timestamp": "2026-04-28T21:14:14+08:00",
           "tree_id": "a8f7aa9a7decd95177e43a9472a2c4efe98882e7",
-          "url": "https://github.com/0x676e67/hwire/commit/8ed3f407ff24af82d0444f7246c0a6f4231c1996"
+          "url": "https://github.com/0x676e67/netty/commit/8ed3f407ff24af82d0444f7246c0a6f4231c1996"
         },
         "date": 1777382233873,
         "tool": "cargo",
@@ -884,7 +884,7 @@ window.BENCHMARK_DATA = {
           "message": "remove unused mod",
           "timestamp": "2026-04-28T21:22:31+08:00",
           "tree_id": "b1e712284cde8173f80360182a1ac7dc4f0b796b",
-          "url": "https://github.com/0x676e67/hwire/commit/42c5f98d986df84b5e97eb4ab665db0bd5729e4e"
+          "url": "https://github.com/0x676e67/netty/commit/42c5f98d986df84b5e97eb4ab665db0bd5729e4e"
         },
         "date": 1777382732840,
         "tool": "cargo",
@@ -992,7 +992,7 @@ window.BENCHMARK_DATA = {
           "message": "remove parking_lot",
           "timestamp": "2026-04-28T21:27:00+08:00",
           "tree_id": "16f7ad4eede31dffb9a28a66752d4a35e5e34c48",
-          "url": "https://github.com/0x676e67/hwire/commit/8fd6035f022a0b835e7e30542737865242cc3dc6"
+          "url": "https://github.com/0x676e67/netty/commit/8fd6035f022a0b835e7e30542737865242cc3dc6"
         },
         "date": 1777383008225,
         "tool": "cargo",
@@ -1100,7 +1100,7 @@ window.BENCHMARK_DATA = {
           "message": "feat(ext): add `ext::on_informational()` callback extension (#6)",
           "timestamp": "2026-04-29T11:56:53+08:00",
           "tree_id": "20e105fe3ab1c79f2fce263307e61ee9dd9a37de",
-          "url": "https://github.com/0x676e67/hwire/commit/7eb58470a2951cfd89b711797509315e3be79993"
+          "url": "https://github.com/0x676e67/netty/commit/7eb58470a2951cfd89b711797509315e3be79993"
         },
         "date": 1777435191691,
         "tool": "cargo",
@@ -1208,7 +1208,7 @@ window.BENCHMARK_DATA = {
           "message": "update package description in Cargo.toml",
           "timestamp": "2026-04-29T14:11:32+08:00",
           "tree_id": "88ddceebb925b6b18a5034baffb8a3bf8a7eeb80",
-          "url": "https://github.com/0x676e67/hwire/commit/97cd5e2b4e7772ea15692a63240538c36958c801"
+          "url": "https://github.com/0x676e67/netty/commit/97cd5e2b4e7772ea15692a63240538c36958c801"
         },
         "date": 1777443286420,
         "tool": "cargo",
@@ -1316,7 +1316,7 @@ window.BENCHMARK_DATA = {
           "message": "Update README.md",
           "timestamp": "2026-04-29T14:12:21+08:00",
           "tree_id": "23fb06f991c9f08e202be82fbd78c5f0e0c3bdd9",
-          "url": "https://github.com/0x676e67/hwire/commit/e03d484424f61262d3dad056791bf925cb6ae6ad"
+          "url": "https://github.com/0x676e67/netty/commit/e03d484424f61262d3dad056791bf925cb6ae6ad"
         },
         "date": 1777443315848,
         "tool": "cargo",
@@ -1424,7 +1424,7 @@ window.BENCHMARK_DATA = {
           "message": "feat(ext): add `ext::on_preserve_header()` callback extension (#7)",
           "timestamp": "2026-04-29T14:14:47+08:00",
           "tree_id": "d993343cbfdd22857026e92b3c04e30cadcf390a",
-          "url": "https://github.com/0x676e67/hwire/commit/9eb860f2a9fd2f6ce927bdde701ff9ad6b393be1"
+          "url": "https://github.com/0x676e67/netty/commit/9eb860f2a9fd2f6ce927bdde701ff9ad6b393be1"
         },
         "date": 1777443479113,
         "tool": "cargo",
@@ -1532,7 +1532,7 @@ window.BENCHMARK_DATA = {
           "message": "remove unused mod",
           "timestamp": "2026-04-29T14:51:31+08:00",
           "tree_id": "7a20b38d5c58ad7603edfd43ff1fc88eb8f6f929",
-          "url": "https://github.com/0x676e67/hwire/commit/cbba4237df73d945998ea45d8032d2e908b2a382"
+          "url": "https://github.com/0x676e67/netty/commit/cbba4237df73d945998ea45d8032d2e908b2a382"
         },
         "date": 1777445665282,
         "tool": "cargo",
@@ -1640,7 +1640,7 @@ window.BENCHMARK_DATA = {
           "message": "ci: release-plz",
           "timestamp": "2026-04-29T15:34:57+08:00",
           "tree_id": "a14e5cb770b4f40531e730f80b0288d9b81ad4b1",
-          "url": "https://github.com/0x676e67/hwire/commit/fd289908151f3e802eca415107df4575412962e7"
+          "url": "https://github.com/0x676e67/netty/commit/fd289908151f3e802eca415107df4575412962e7"
         },
         "date": 1777448257051,
         "tool": "cargo",
@@ -1748,7 +1748,7 @@ window.BENCHMARK_DATA = {
           "message": "chore: release v0.1.0 (#8)",
           "timestamp": "2026-04-29T16:24:16+08:00",
           "tree_id": "f894814a3a7eff69dea048a58aad174a03f63cda",
-          "url": "https://github.com/0x676e67/hwire/commit/345948a182b68c05cd74b2f96be2816f853e631b"
+          "url": "https://github.com/0x676e67/netty/commit/345948a182b68c05cd74b2f96be2816f853e631b"
         },
         "date": 1777451238880,
         "tool": "cargo",
@@ -1856,7 +1856,7 @@ window.BENCHMARK_DATA = {
           "message": "refactor(ext): rename method to `call_visit` and clarify its purpose (#10)",
           "timestamp": "2026-04-29T23:28:16+08:00",
           "tree_id": "97ac21861c35261ff1342019211a5b32965cdb85",
-          "url": "https://github.com/0x676e67/hwire/commit/702f3439ac113cbca020daa08f49d08a8db829d8"
+          "url": "https://github.com/0x676e67/netty/commit/702f3439ac113cbca020daa08f49d08a8db829d8"
         },
         "date": 1777476680848,
         "tool": "cargo",
@@ -1964,7 +1964,7 @@ window.BENCHMARK_DATA = {
           "message": "Fix capitalization in package description",
           "timestamp": "2026-04-29T23:28:55+08:00",
           "tree_id": "68e52506f4e0977cc73236b15a057947eb281363",
-          "url": "https://github.com/0x676e67/hwire/commit/e2a67950cf81bfdadd538f820eb494c793341c15"
+          "url": "https://github.com/0x676e67/netty/commit/e2a67950cf81bfdadd538f820eb494c793341c15"
         },
         "date": 1777476707324,
         "tool": "cargo",
@@ -2072,7 +2072,7 @@ window.BENCHMARK_DATA = {
           "message": "chore: release v0.2.0 (#11)",
           "timestamp": "2026-04-29T23:34:00+08:00",
           "tree_id": "f5d8e2fcfc1ed2e6421b8b1b17b0f5cd1afac265",
-          "url": "https://github.com/0x676e67/hwire/commit/7fd0c8939fc3041f855eda616ef59f8b6d9df924"
+          "url": "https://github.com/0x676e67/netty/commit/7fd0c8939fc3041f855eda616ef59f8b6d9df924"
         },
         "date": 1777477048895,
         "tool": "cargo",
@@ -2180,7 +2180,7 @@ window.BENCHMARK_DATA = {
           "message": "docs(body): fix docs build (#12)",
           "timestamp": "2026-04-30T00:02:53+08:00",
           "tree_id": "6cc4c4bed3a0fbeb80e6bb9fa4dccf00abc2e858",
-          "url": "https://github.com/0x676e67/hwire/commit/95348235400e630cfa9a876c162e34c60cff0e4e"
+          "url": "https://github.com/0x676e67/netty/commit/95348235400e630cfa9a876c162e34c60cff0e4e"
         },
         "date": 1777478736110,
         "tool": "cargo",
@@ -2288,7 +2288,7 @@ window.BENCHMARK_DATA = {
           "message": "fmt",
           "timestamp": "2026-04-30T00:02:35+08:00",
           "tree_id": "366df0c09944651dfa6867469a684af91c260364",
-          "url": "https://github.com/0x676e67/hwire/commit/791d5bc4d83263457d7a9b5d28ea752bb881d6ad"
+          "url": "https://github.com/0x676e67/netty/commit/791d5bc4d83263457d7a9b5d28ea752bb881d6ad"
         },
         "date": 1777478759005,
         "tool": "cargo",
@@ -2396,7 +2396,7 @@ window.BENCHMARK_DATA = {
           "message": "chore: release v0.2.1 (#13)",
           "timestamp": "2026-04-30T00:09:43+08:00",
           "tree_id": "e87930a7ccf873c8bfc699a773c417fed0f6b235",
-          "url": "https://github.com/0x676e67/hwire/commit/522250d6e84fa410cfc99a8dfc49bfb436e1e4b8"
+          "url": "https://github.com/0x676e67/netty/commit/522250d6e84fa410cfc99a8dfc49bfb436e1e4b8"
         },
         "date": 1777479169825,
         "tool": "cargo",
@@ -2504,7 +2504,7 @@ window.BENCHMARK_DATA = {
           "message": "Update README.md",
           "timestamp": "2026-05-07T07:43:14+08:00",
           "tree_id": "ef950df74f3dd5ab0ba1c81446d764986cea8a91",
-          "url": "https://github.com/0x676e67/hwire/commit/e207fc580858217995f09fd0a6dbd63d6faf5fca"
+          "url": "https://github.com/0x676e67/netty/commit/e207fc580858217995f09fd0a6dbd63d6faf5fca"
         },
         "date": 1778111168916,
         "tool": "cargo",
@@ -2612,7 +2612,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http2): do not reserve capacity before body data is available (#15)\n\n* fix(http2): do not reserve capacity before body data is available\n\n* fmt",
           "timestamp": "2026-05-08T18:21:22+08:00",
           "tree_id": "cb9fbc145f6399ddf4e64be288910080b5c6c224",
-          "url": "https://github.com/0x676e67/hwire/commit/9bc4a72495cd058332958475b8bf0b91a95b3707"
+          "url": "https://github.com/0x676e67/netty/commit/9bc4a72495cd058332958475b8bf0b91a95b3707"
         },
         "date": 1778235858818,
         "tool": "cargo",
@@ -2720,7 +2720,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http2): do not reserve capacity before body data is available (#15)\n\n* fix(http2): do not reserve capacity before body data is available\n\n* fmt",
           "timestamp": "2026-05-08T18:21:22+08:00",
           "tree_id": "cb9fbc145f6399ddf4e64be288910080b5c6c224",
-          "url": "https://github.com/0x676e67/hwire/commit/9bc4a72495cd058332958475b8bf0b91a95b3707"
+          "url": "https://github.com/0x676e67/netty/commit/9bc4a72495cd058332958475b8bf0b91a95b3707"
         },
         "date": 1778236096706,
         "tool": "cargo",
@@ -2828,7 +2828,7 @@ window.BENCHMARK_DATA = {
           "message": "revert: \"build(deps): reduce dependency on futures-channel\" (#16)",
           "timestamp": "2026-05-08T20:50:09+08:00",
           "tree_id": "400c9b158fdfffb4aca0ccc99d7a8f7aa32e051d",
-          "url": "https://github.com/0x676e67/hwire/commit/80ee670647b211b15392561bc291453dcef009ac"
+          "url": "https://github.com/0x676e67/netty/commit/80ee670647b211b15392561bc291453dcef009ac"
         },
         "date": 1778244766522,
         "tool": "cargo",
@@ -2936,7 +2936,7 @@ window.BENCHMARK_DATA = {
           "message": "chore: release v0.2.2 (#14)",
           "timestamp": "2026-05-08T21:25:30+08:00",
           "tree_id": "c7489dd31aa21c0c5a64ced641735364773576bd",
-          "url": "https://github.com/0x676e67/hwire/commit/03a1652c4a062a6fd6e01f1edd6947a2cf240538"
+          "url": "https://github.com/0x676e67/netty/commit/03a1652c4a062a6fd6e01f1edd6947a2cf240538"
         },
         "date": 1778246907391,
         "tool": "cargo",
@@ -3044,7 +3044,7 @@ window.BENCHMARK_DATA = {
           "message": "crate: Add wreq-rt (#17)",
           "timestamp": "2026-05-11T00:40:54+08:00",
           "tree_id": "ceb28336d64e8e9fea3117f3bccf2ae2eee9e51c",
-          "url": "https://github.com/0x676e67/hwire/commit/5b8c74da17c1262a0f7ac3595fbb3c622a74d554"
+          "url": "https://github.com/0x676e67/netty/commit/5b8c74da17c1262a0f7ac3595fbb3c622a74d554"
         },
         "date": 1778431421000,
         "tool": "cargo",
@@ -3152,7 +3152,7 @@ window.BENCHMARK_DATA = {
           "message": "Update Cargo.toml",
           "timestamp": "2026-05-11T00:42:21+08:00",
           "tree_id": "9eac54099476c5dfe2330a17e75cb46f822513c7",
-          "url": "https://github.com/0x676e67/hwire/commit/9f1d6188572c0731fbbddb7ef0875127250d087f"
+          "url": "https://github.com/0x676e67/netty/commit/9f1d6188572c0731fbbddb7ef0875127250d087f"
         },
         "date": 1778431513945,
         "tool": "cargo",
@@ -3260,7 +3260,7 @@ window.BENCHMARK_DATA = {
           "message": "Update rust-toolchain",
           "timestamp": "2026-05-11T00:43:57+08:00",
           "tree_id": "9eac54099476c5dfe2330a17e75cb46f822513c7",
-          "url": "https://github.com/0x676e67/hwire/commit/ccd6d6bcbbdf7fce2706ea95eaca4ce140101cbb"
+          "url": "https://github.com/0x676e67/netty/commit/ccd6d6bcbbdf7fce2706ea95eaca4ce140101cbb"
         },
         "date": 1778431598610,
         "tool": "cargo",
@@ -3368,7 +3368,7 @@ window.BENCHMARK_DATA = {
           "message": "Update rustfmt.toml",
           "timestamp": "2026-05-11T00:44:17+08:00",
           "tree_id": "9edcba650b9b28f2a34f3652d72554cd829223a9",
-          "url": "https://github.com/0x676e67/hwire/commit/18a4aa406610e8ae22d045211aa8c0d979b941c4"
+          "url": "https://github.com/0x676e67/netty/commit/18a4aa406610e8ae22d045211aa8c0d979b941c4"
         },
         "date": 1778431663419,
         "tool": "cargo",
@@ -3476,7 +3476,7 @@ window.BENCHMARK_DATA = {
           "message": "Update LICENSE",
           "timestamp": "2026-05-11T00:44:50+08:00",
           "tree_id": "f43044f4101f24fe796eca8c6db487cd2abd29f4",
-          "url": "https://github.com/0x676e67/hwire/commit/c24168dff4db333e472d19456bb8d8c4937f4528"
+          "url": "https://github.com/0x676e67/netty/commit/c24168dff4db333e472d19456bb8d8c4937f4528"
         },
         "date": 1778431666664,
         "tool": "cargo",
@@ -3584,7 +3584,7 @@ window.BENCHMARK_DATA = {
           "message": "Update .gitignore",
           "timestamp": "2026-05-11T00:45:47+08:00",
           "tree_id": "4b97eff030f5b4012dfa8451023a7faa2ba02292",
-          "url": "https://github.com/0x676e67/hwire/commit/b66f548c39a8a5040bde90f5f7c102c9b2e076b8"
+          "url": "https://github.com/0x676e67/netty/commit/b66f548c39a8a5040bde90f5f7c102c9b2e076b8"
         },
         "date": 1778431714743,
         "tool": "cargo",
@@ -3692,7 +3692,7 @@ window.BENCHMARK_DATA = {
           "message": "Update ci.yml",
           "timestamp": "2026-05-11T00:46:19+08:00",
           "tree_id": "77243dfabede7379c598f7cd22e03e114022e301",
-          "url": "https://github.com/0x676e67/hwire/commit/4fe465f602238c2ad8eef8621bf28fc324e98f7c"
+          "url": "https://github.com/0x676e67/netty/commit/4fe465f602238c2ad8eef8621bf28fc324e98f7c"
         },
         "date": 1778431764086,
         "tool": "cargo",
@@ -3800,7 +3800,7 @@ window.BENCHMARK_DATA = {
           "message": "fmt Cargo.toml",
           "timestamp": "2026-05-11T00:47:27+08:00",
           "tree_id": "6a86d0f4c921690d288c74e77da780ed1708bbca",
-          "url": "https://github.com/0x676e67/hwire/commit/ac182ca76a83b922594ef92f1ae17ddd70ef84ab"
+          "url": "https://github.com/0x676e67/netty/commit/ac182ca76a83b922594ef92f1ae17ddd70ef84ab"
         },
         "date": 1778431801402,
         "tool": "cargo",
@@ -3908,7 +3908,7 @@ window.BENCHMARK_DATA = {
           "message": "fmt Cargo.toml",
           "timestamp": "2026-05-11T00:47:57+08:00",
           "tree_id": "03d4c4fbbc7b4d8eb790c72b586120a09f73022c",
-          "url": "https://github.com/0x676e67/hwire/commit/3ea795de81e2c4f5db22cc5219ad6437e6a6eb3c"
+          "url": "https://github.com/0x676e67/netty/commit/3ea795de81e2c4f5db22cc5219ad6437e6a6eb3c"
         },
         "date": 1778431868368,
         "tool": "cargo",
@@ -4016,7 +4016,7 @@ window.BENCHMARK_DATA = {
           "message": "chore: Add homepage",
           "timestamp": "2026-05-11T00:53:54+08:00",
           "tree_id": "2e9c02ef9443966edf6c8b312260bf3b26b16b2e",
-          "url": "https://github.com/0x676e67/hwire/commit/65659ad9a503b78736f79bba3ee51f138106dccf"
+          "url": "https://github.com/0x676e67/netty/commit/65659ad9a503b78736f79bba3ee51f138106dccf"
         },
         "date": 1778432215704,
         "tool": "cargo",
@@ -4124,7 +4124,7 @@ window.BENCHMARK_DATA = {
           "message": "perf(rt): improve poll read (#19)\n\n* perf(rt): improve poll read\n\n* fmt",
           "timestamp": "2026-05-11T04:59:35+08:00",
           "tree_id": "62c138d054bd90d35e9f571bc2b0f44b9caa3f30",
-          "url": "https://github.com/0x676e67/hwire/commit/757e1947dd6b149ef19c56fb805e7f97ffa1fcd5"
+          "url": "https://github.com/0x676e67/netty/commit/757e1947dd6b149ef19c56fb805e7f97ffa1fcd5"
         },
         "date": 1778446941261,
         "tool": "cargo",
@@ -4232,7 +4232,7 @@ window.BENCHMARK_DATA = {
           "message": "fmt deps",
           "timestamp": "2026-05-11T04:59:13+08:00",
           "tree_id": "a61c634f2b684ee813c2222362c75a7d49e2bea8",
-          "url": "https://github.com/0x676e67/hwire/commit/ed0b5643ea7e24d6838ffd2fabc1e6a5474c5d5c"
+          "url": "https://github.com/0x676e67/netty/commit/ed0b5643ea7e24d6838ffd2fabc1e6a5474c5d5c"
         },
         "date": 1778446950368,
         "tool": "cargo",
@@ -4340,7 +4340,7 @@ window.BENCHMARK_DATA = {
           "message": "chore: release (#18)",
           "timestamp": "2026-05-11T05:03:29+08:00",
           "tree_id": "9b78f03cc7f1a22545005172029331797cd528ee",
-          "url": "https://github.com/0x676e67/hwire/commit/c3e97277cc84cc25761b03a485d0f98a5207c1c0"
+          "url": "https://github.com/0x676e67/netty/commit/c3e97277cc84cc25761b03a485d0f98a5207c1c0"
         },
         "date": 1778447174705,
         "tool": "cargo",
@@ -4448,7 +4448,7 @@ window.BENCHMARK_DATA = {
           "message": "test(proto):  Add dropped conn send incomplete body test (#20)",
           "timestamp": "2026-05-13T07:07:40+08:00",
           "tree_id": "f1506ee279a93e089bd76b87bc1153c0787fb1ab",
-          "url": "https://github.com/0x676e67/hwire/commit/73ed8f5910b7e831c540c665842235315197e5b4"
+          "url": "https://github.com/0x676e67/netty/commit/73ed8f5910b7e831c540c665842235315197e5b4"
         },
         "date": 1778627435309,
         "tool": "cargo",
@@ -4556,7 +4556,7 @@ window.BENCHMARK_DATA = {
           "message": "refactor(lib): replace unwraps with expects (#22)",
           "timestamp": "2026-05-20T08:57:25+08:00",
           "tree_id": "eabeba1cbb499b78dd55476baa49437b688f9110",
-          "url": "https://github.com/0x676e67/hwire/commit/10de0709f4747715d517c2da1094b14eb0d3b89b"
+          "url": "https://github.com/0x676e67/netty/commit/10de0709f4747715d517c2da1094b14eb0d3b89b"
         },
         "date": 1779238822992,
         "tool": "cargo",
@@ -4664,7 +4664,7 @@ window.BENCHMARK_DATA = {
           "message": "refactor(lib):  use a panic_if_poisoned() helper for mutexes (#21)",
           "timestamp": "2026-05-20T08:57:14+08:00",
           "tree_id": "11da1d1f0855fc2195df79c17c6a05bad3e2951c",
-          "url": "https://github.com/0x676e67/hwire/commit/5e77be3078e930788284f792b8c0482a38fd26cb"
+          "url": "https://github.com/0x676e67/netty/commit/5e77be3078e930788284f792b8c0482a38fd26cb"
         },
         "date": 1779238846164,
         "tool": "cargo",
@@ -4772,7 +4772,7 @@ window.BENCHMARK_DATA = {
           "message": "chore: release (#23)",
           "timestamp": "2026-05-21T08:37:55+08:00",
           "tree_id": "965428ff5c0845770da494c5e222d3678771f31d",
-          "url": "https://github.com/0x676e67/hwire/commit/eddd30c5bb7b33569dfa8f755ef7d6f13b54ac74"
+          "url": "https://github.com/0x676e67/netty/commit/eddd30c5bb7b33569dfa8f755ef7d6f13b54ac74"
         },
         "date": 1779324070528,
         "tool": "cargo",
@@ -4880,7 +4880,7 @@ window.BENCHMARK_DATA = {
           "message": "chore: release (#23)",
           "timestamp": "2026-05-21T08:37:55+08:00",
           "tree_id": "965428ff5c0845770da494c5e222d3678771f31d",
-          "url": "https://github.com/0x676e67/hwire/commit/eddd30c5bb7b33569dfa8f755ef7d6f13b54ac74"
+          "url": "https://github.com/0x676e67/netty/commit/eddd30c5bb7b33569dfa8f755ef7d6f13b54ac74"
         },
         "date": 1779497897678,
         "tool": "cargo",
@@ -4988,7 +4988,7 @@ window.BENCHMARK_DATA = {
           "message": "test(client): fix misuse of `path_and_query` in CONNECT test (#25)",
           "timestamp": "2026-05-27T15:44:39+08:00",
           "tree_id": "568365c8ba0e21402f385cacbbfae5805303049a",
-          "url": "https://github.com/0x676e67/hwire/commit/6eaac5cad2d76691badfdc741250f96e8a6b1a36"
+          "url": "https://github.com/0x676e67/netty/commit/6eaac5cad2d76691badfdc741250f96e8a6b1a36"
         },
         "date": 1779868056036,
         "tool": "cargo",
@@ -5096,7 +5096,7 @@ window.BENCHMARK_DATA = {
           "message": "Update README.md",
           "timestamp": "2026-05-27T16:58:57+08:00",
           "tree_id": "5c3a78b050681a3b307852c1b4685c3037640bd1",
-          "url": "https://github.com/0x676e67/hwire/commit/2f6e5547c1c68801c32fad4f5b977feb40ffa821"
+          "url": "https://github.com/0x676e67/netty/commit/2f6e5547c1c68801c32fad4f5b977feb40ffa821"
         },
         "date": 1779872502293,
         "tool": "cargo",
@@ -5204,7 +5204,7 @@ window.BENCHMARK_DATA = {
           "message": "Update README.md",
           "timestamp": "2026-05-27T16:59:54+08:00",
           "tree_id": "8d965483d302af5e3ea074ca7ea9f8fc6b883f63",
-          "url": "https://github.com/0x676e67/hwire/commit/f3e9bedd292fd19aae77fce914ff696cec874bc3"
+          "url": "https://github.com/0x676e67/netty/commit/f3e9bedd292fd19aae77fce914ff696cec874bc3"
         },
         "date": 1779872571595,
         "tool": "cargo",
@@ -5312,7 +5312,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http1): fix busy loop when peer half-closes and open body (#27)",
           "timestamp": "2026-05-31T13:49:33+08:00",
           "tree_id": "799fdedec809f87bab004fb2e3978995493132cc",
-          "url": "https://github.com/0x676e67/hwire/commit/ea56836fc1c110c56e914ef550c4b3206cc0a933"
+          "url": "https://github.com/0x676e67/netty/commit/ea56836fc1c110c56e914ef550c4b3206cc0a933"
         },
         "date": 1780206738973,
         "tool": "cargo",
@@ -5420,7 +5420,7 @@ window.BENCHMARK_DATA = {
           "message": "chore: release (#26)",
           "timestamp": "2026-05-31T14:04:18+08:00",
           "tree_id": "5e1853596875be9374ff0f487ed6c3c2e29d8000",
-          "url": "https://github.com/0x676e67/hwire/commit/74aa79439c61b8f2d92395722614bdb440bbd729"
+          "url": "https://github.com/0x676e67/netty/commit/74aa79439c61b8f2d92395722614bdb440bbd729"
         },
         "date": 1780207654099,
         "tool": "cargo",
@@ -5528,7 +5528,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http1): flush buffered data before shutdown (#30)",
           "timestamp": "2026-06-24T18:58:58+08:00",
           "tree_id": "d26e23538f2bee82a2ea1a883d4c4221f9c504a3",
-          "url": "https://github.com/0x676e67/hwire/commit/dfb9106e2a4e6e3d779da3d62a3da471bbb5489e"
+          "url": "https://github.com/0x676e67/netty/commit/dfb9106e2a4e6e3d779da3d62a3da471bbb5489e"
         },
         "date": 1782298913100,
         "tool": "cargo",
@@ -5636,7 +5636,7 @@ window.BENCHMARK_DATA = {
           "message": "chore: release (#26)",
           "timestamp": "2026-05-31T14:04:18+08:00",
           "tree_id": "5e1853596875be9374ff0f487ed6c3c2e29d8000",
-          "url": "https://github.com/0x676e67/hwire/commit/74aa79439c61b8f2d92395722614bdb440bbd729"
+          "url": "https://github.com/0x676e67/netty/commit/74aa79439c61b8f2d92395722614bdb440bbd729"
         },
         "date": 1782300226542,
         "tool": "cargo",
@@ -5744,7 +5744,7 @@ window.BENCHMARK_DATA = {
           "message": "chore(deps): bump actions/checkout from 6 to 7 (#29)\n\nBumps [actions/checkout](https://github.com/actions/checkout) from 6 to 7.\n- [Release notes](https://github.com/actions/checkout/releases)\n- [Changelog](https://github.com/actions/checkout/blob/main/CHANGELOG.md)\n- [Commits](https://github.com/actions/checkout/compare/v6...v7)\n\n---\nupdated-dependencies:\n- dependency-name: actions/checkout\n  dependency-version: '7'\n  dependency-type: direct:production\n  update-type: version-update:semver-major\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
           "timestamp": "2026-07-01T09:03:41+08:00",
           "tree_id": "ae81a01004880e111a2d5b27f9628f12be50a658",
-          "url": "https://github.com/0x676e67/hwire/commit/6481a17b03abaf205a88b39a0f8dd6c5e3b07033"
+          "url": "https://github.com/0x676e67/netty/commit/6481a17b03abaf205a88b39a0f8dd6c5e3b07033"
         },
         "date": 1782867999612,
         "tool": "cargo",
@@ -5852,7 +5852,7 @@ window.BENCHMARK_DATA = {
           "message": "chore(deps): bump actions/cache from 5 to 6 (#33)\n\nBumps [actions/cache](https://github.com/actions/cache) from 5 to 6.\n- [Release notes](https://github.com/actions/cache/releases)\n- [Changelog](https://github.com/actions/cache/blob/main/RELEASES.md)\n- [Commits](https://github.com/actions/cache/compare/v5...v6)\n\n---\nupdated-dependencies:\n- dependency-name: actions/cache\n  dependency-version: '6'\n  dependency-type: direct:production\n  update-type: version-update:semver-major\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
           "timestamp": "2026-07-01T09:03:28+08:00",
           "tree_id": "24f6741be1b6cae59ba581ddda80f80ba13dad24",
-          "url": "https://github.com/0x676e67/hwire/commit/0d7e027a53117b628f95af29fc07bfca7fb4d727"
+          "url": "https://github.com/0x676e67/netty/commit/0d7e027a53117b628f95af29fc07bfca7fb4d727"
         },
         "date": 1782868004444,
         "tool": "cargo",
@@ -5960,7 +5960,7 @@ window.BENCHMARK_DATA = {
           "message": "Modify Dependabot config for cargo updates",
           "timestamp": "2026-08-23T01:23:59+08:00",
           "tree_id": "901f71a2d47851906fce101ceb8ac6b7c894100b",
-          "url": "https://github.com/0x676e67/hwire/commit/172d5ddab6935c8f0616db3e3b79378233359506"
+          "url": "https://github.com/0x676e67/netty/commit/172d5ddab6935c8f0616db3e3b79378233359506"
         },
         "date": 1787419628477,
         "tool": "cargo",
@@ -6068,7 +6068,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(ci): use default Cargo Dependabot strategy",
           "timestamp": "2026-08-23T01:36:21+08:00",
           "tree_id": "c45f06722787beeb1f4460109c661ad576f87aab",
-          "url": "https://github.com/0x676e67/hwire/commit/b4af3c7784a945da7ee89d843c248581bbece0e7"
+          "url": "https://github.com/0x676e67/netty/commit/b4af3c7784a945da7ee89d843c248581bbece0e7"
         },
         "date": 1787420356847,
         "tool": "cargo",
@@ -6176,7 +6176,7 @@ window.BENCHMARK_DATA = {
           "message": "Update .gitignore",
           "timestamp": "2026-08-28T22:28:53+08:00",
           "tree_id": "86b2b4b00350427d337b1ffdf06937548a8031c2",
-          "url": "https://github.com/0x676e67/hwire/commit/0b5602c3eb2130940aa9b4a1b01054c03740a1ed"
+          "url": "https://github.com/0x676e67/netty/commit/0b5602c3eb2130940aa9b4a1b01054c03740a1ed"
         },
         "date": 1787927503295,
         "tool": "cargo",
@@ -6284,7 +6284,7 @@ window.BENCHMARK_DATA = {
           "message": "feat(client): expose HTTP/2 current max stream count (#35)",
           "timestamp": "2026-09-08T05:13:21+08:00",
           "tree_id": "84398b4660a0c9b8f0b26cc3e450370e83885ef4",
-          "url": "https://github.com/0x676e67/hwire/commit/807044863b31477dac462a9ba47216946d568a15"
+          "url": "https://github.com/0x676e67/netty/commit/807044863b31477dac462a9ba47216946d568a15"
         },
         "date": 1788815782705,
         "tool": "cargo",
@@ -6392,7 +6392,7 @@ window.BENCHMARK_DATA = {
           "message": "feat(client): implement Eq and Hash for HTTP options (#37)",
           "timestamp": "2026-09-08T20:17:18+08:00",
           "tree_id": "5dcb03332be729ef0fdb62dbfa89c08f88c11cff",
-          "url": "https://github.com/0x676e67/hwire/commit/dae7159cc6b0ff1788a07c57a69844eeb3a1717e"
+          "url": "https://github.com/0x676e67/netty/commit/dae7159cc6b0ff1788a07c57a69844eeb3a1717e"
         },
         "date": 1788870011964,
         "tool": "cargo",
@@ -6500,7 +6500,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http2): fix internals of HTTP/2 CONNECT upgrades (#38)",
           "timestamp": "2026-09-09T00:04:37+08:00",
           "tree_id": "ee3a640a1ae8b5e8f2e1bc8d5c8f84e2d5eee5e2",
-          "url": "https://github.com/0x676e67/hwire/commit/9a1877e045e79bb97fcc5dcdee5328ca7a5770c3"
+          "url": "https://github.com/0x676e67/netty/commit/9a1877e045e79bb97fcc5dcdee5328ca7a5770c3"
         },
         "date": 1788883643222,
         "tool": "cargo",
@@ -6608,7 +6608,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http2): avoid buffering `Upgraded` writes without send capacity (#40)",
           "timestamp": "2026-09-09T00:27:22+08:00",
           "tree_id": "43959da131379bf258f3782d6de656cb05d3a60e",
-          "url": "https://github.com/0x676e67/hwire/commit/02eb3ff54c5ac85bf6bd7e2a4d93d19b346b3c70"
+          "url": "https://github.com/0x676e67/netty/commit/02eb3ff54c5ac85bf6bd7e2a4d93d19b346b3c70"
         },
         "date": 1788885020041,
         "tool": "cargo",
@@ -6716,7 +6716,7 @@ window.BENCHMARK_DATA = {
           "message": "feat(client): add a `TrySendError::error()` method (#44)",
           "timestamp": "2026-09-09T01:06:49+08:00",
           "tree_id": "2d11f72b2e4530fa6741df4311b22c024c9df7e3",
-          "url": "https://github.com/0x676e67/hwire/commit/e4da489701c24580592f84a00ee60f8e9c2691c3"
+          "url": "https://github.com/0x676e67/netty/commit/e4da489701c24580592f84a00ee60f8e9c2691c3"
         },
         "date": 1788887388546,
         "tool": "cargo",
@@ -6824,7 +6824,7 @@ window.BENCHMARK_DATA = {
           "message": "feat(error): add `Error::is_shutdown()` (#45)",
           "timestamp": "2026-09-09T01:31:56+08:00",
           "tree_id": "d25dc79e27f16072b7e2dcb559a200d86d0ad324",
-          "url": "https://github.com/0x676e67/hwire/commit/075fd78eca6b93d2f95353e33c10f64849faf88d"
+          "url": "https://github.com/0x676e67/netty/commit/075fd78eca6b93d2f95353e33c10f64849faf88d"
         },
         "date": 1788888899168,
         "tool": "cargo",
@@ -6932,7 +6932,7 @@ window.BENCHMARK_DATA = {
           "message": "docs(error): add more information about `is_incomplete_message()` (#46)",
           "timestamp": "2026-09-09T01:46:02+08:00",
           "tree_id": "eae3cb0ba4f32de875f1f094e0bf2359e1080393",
-          "url": "https://github.com/0x676e67/hwire/commit/083c243fa0642b6aa2bbbae7772e8f395e8834c2"
+          "url": "https://github.com/0x676e67/netty/commit/083c243fa0642b6aa2bbbae7772e8f395e8834c2"
         },
         "date": 1788889773063,
         "tool": "cargo",
@@ -7040,7 +7040,7 @@ window.BENCHMARK_DATA = {
           "message": "feat(client): add HTTP/2 `max_local_error_reset_streams` option (#47)",
           "timestamp": "2026-09-09T05:57:22+08:00",
           "tree_id": "e75dba3bedd0682dd8ab06cd744dc70004e59801",
-          "url": "https://github.com/0x676e67/hwire/commit/87d0ce6879fe4616392a5eca857faa5fd4206e7c"
+          "url": "https://github.com/0x676e67/netty/commit/87d0ce6879fe4616392a5eca857faa5fd4206e7c"
         },
         "date": 1788904815074,
         "tool": "cargo",
@@ -7148,7 +7148,7 @@ window.BENCHMARK_DATA = {
           "message": "docs(client): document Drop behavior for Connection types (#48)",
           "timestamp": "2026-09-09T15:14:38+08:00",
           "tree_id": "28c6710cb3fdbf7105477aa0f354f5ea2d634707",
-          "url": "https://github.com/0x676e67/hwire/commit/90dc70edb2ac03cd47d5d8c11cff33c1f1eb6d8e"
+          "url": "https://github.com/0x676e67/netty/commit/90dc70edb2ac03cd47d5d8c11cff33c1f1eb6d8e"
         },
         "date": 1788938257263,
         "tool": "cargo",
@@ -7256,7 +7256,7 @@ window.BENCHMARK_DATA = {
           "message": "feat(http2): add  `reset_stream_duration()` client option (#49)",
           "timestamp": "2026-09-09T15:29:22+08:00",
           "tree_id": "1a7d7fd9b039e67bfab4c1adead17c5d378e03d4",
-          "url": "https://github.com/0x676e67/hwire/commit/18cdef77ab809b937f4dde239c466bc46ccd5d0e"
+          "url": "https://github.com/0x676e67/netty/commit/18cdef77ab809b937f4dde239c466bc46ccd5d0e"
         },
         "date": 1788939129735,
         "tool": "cargo",
@@ -7364,7 +7364,7 @@ window.BENCHMARK_DATA = {
           "message": "docs(client): document cancel safety for client send_request futures (#50)",
           "timestamp": "2026-09-09T15:36:31+08:00",
           "tree_id": "37dbb023f0c282f0a161f4c6f39ebff752193a26",
-          "url": "https://github.com/0x676e67/hwire/commit/3fa8ca12a6347a666e84844de80c627d672cfb05"
+          "url": "https://github.com/0x676e67/netty/commit/3fa8ca12a6347a666e84844de80c627d672cfb05"
         },
         "date": 1788939544452,
         "tool": "cargo",
@@ -7472,7 +7472,7 @@ window.BENCHMARK_DATA = {
           "message": "docs(error): add detailed doc comments to Error query methods (#51)",
           "timestamp": "2026-09-09T15:47:09+08:00",
           "tree_id": "2aa9a2ec792234634bedfc8209259ddd62542b47",
-          "url": "https://github.com/0x676e67/hwire/commit/0964206b425f0ddd2a991f439d54a3979e05f458"
+          "url": "https://github.com/0x676e67/netty/commit/0964206b425f0ddd2a991f439d54a3979e05f458"
         },
         "date": 1788940216124,
         "tool": "cargo",
@@ -7580,7 +7580,7 @@ window.BENCHMARK_DATA = {
           "message": "style(lib); fix 'undocumented_unsafe_blocks' lint (#52)",
           "timestamp": "2026-09-10T01:43:18+08:00",
           "tree_id": "c010d45e06a6a2b9204b6d486941e7504d4bbd70",
-          "url": "https://github.com/0x676e67/hwire/commit/5821049ee66bad20eefc7c28fcfa5db5a9e62968"
+          "url": "https://github.com/0x676e67/netty/commit/5821049ee66bad20eefc7c28fcfa5db5a9e62968"
         },
         "date": 1788975975233,
         "tool": "cargo",
@@ -7688,7 +7688,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http1): more strictly enforce max_buf_size when parsing (#53)",
           "timestamp": "2026-09-10T14:15:18+08:00",
           "tree_id": "636e4a30e94d5d42d1987b4243de93d1c9b404b7",
-          "url": "https://github.com/0x676e67/hwire/commit/e54a6299073584d90ea6ba526e39856e9c4f9576"
+          "url": "https://github.com/0x676e67/netty/commit/e54a6299073584d90ea6ba526e39856e9c4f9576"
         },
         "date": 1789021104821,
         "tool": "cargo",
@@ -7796,7 +7796,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http1): flush buffered data before shutdown (#54)",
           "timestamp": "2026-09-10T14:52:23+08:00",
           "tree_id": "00dbe11677849c0193f0227317841b71935dffb4",
-          "url": "https://github.com/0x676e67/hwire/commit/e6f3ca69ef79716863d7044bd4491a5c080caebf"
+          "url": "https://github.com/0x676e67/netty/commit/e6f3ca69ef79716863d7044bd4491a5c080caebf"
         },
         "date": 1789023328183,
         "tool": "cargo",
@@ -7904,7 +7904,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http1): use append for repeat trailers (#55)\n\nCo-authored-by: Sean McArthur <sean@seanmonstar.com>",
           "timestamp": "2026-09-10T15:08:00+08:00",
           "tree_id": "281f5b81d71418db9a06ca31a642799017135be6",
-          "url": "https://github.com/0x676e67/hwire/commit/b1e4d1d39dbc3e84e11a73b3c48f36049e2d9c03"
+          "url": "https://github.com/0x676e67/netty/commit/b1e4d1d39dbc3e84e11a73b3c48f36049e2d9c03"
         },
         "date": 1789024261948,
         "tool": "cargo",
@@ -8012,7 +8012,7 @@ window.BENCHMARK_DATA = {
           "message": "Update README",
           "timestamp": "2026-09-10T15:50:44+08:00",
           "tree_id": "7b9f98a780d58b5898447768a88bf17aef6941cf",
-          "url": "https://github.com/0x676e67/hwire/commit/36f042768198f05e860ac1be47a23a53cc6cddbc"
+          "url": "https://github.com/0x676e67/netty/commit/36f042768198f05e860ac1be47a23a53cc6cddbc"
         },
         "date": 1789026829362,
         "tool": "cargo",
@@ -8120,7 +8120,7 @@ window.BENCHMARK_DATA = {
           "message": "Update README",
           "timestamp": "2026-09-10T15:52:55+08:00",
           "tree_id": "ab7b4ce5fa802a27528542aa025eb042c961ac27",
-          "url": "https://github.com/0x676e67/hwire/commit/4974a1ce64d06d91bed4f6c79dd8c41488b3111c"
+          "url": "https://github.com/0x676e67/netty/commit/4974a1ce64d06d91bed4f6c79dd8c41488b3111c"
         },
         "date": 1789026965118,
         "tool": "cargo",
@@ -8228,7 +8228,7 @@ window.BENCHMARK_DATA = {
           "message": "Update README\n\nRemoved the Relationship section and added Accolades section.",
           "timestamp": "2026-09-10T15:55:09+08:00",
           "tree_id": "7a2990d70658d524906374fa0b6c24beb1399697",
-          "url": "https://github.com/0x676e67/hwire/commit/f2735e70f6a539571672fd276af8cf7647ec515a"
+          "url": "https://github.com/0x676e67/netty/commit/f2735e70f6a539571672fd276af8cf7647ec515a"
         },
         "date": 1789027098895,
         "tool": "cargo",
@@ -8336,7 +8336,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http1): allow up to max_headers trailers (#56)\n\nCo-authored-by: Sean McArthur <sean@seanmonstar.com>",
           "timestamp": "2026-09-10T15:55:30+08:00",
           "tree_id": "f132c6415f025da14c0f8bef46d17cbc5ee9ca10",
-          "url": "https://github.com/0x676e67/hwire/commit/2aa668d3408ec53c3070549404d7460ae0b2d418"
+          "url": "https://github.com/0x676e67/netty/commit/2aa668d3408ec53c3070549404d7460ae0b2d418"
         },
         "date": 1789027109315,
         "tool": "cargo",
@@ -8444,7 +8444,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(release): configure workspace publishing and changelogs (#58)\n\n* fix(release): configure workspace publishing and changelogs\n\n* fix(release): load standalone git-cliff configuration",
           "timestamp": "2026-09-10T16:25:55+08:00",
           "tree_id": "953c119ac554c7d9df23ea487769d9d7c98d7119",
-          "url": "https://github.com/0x676e67/hwire/commit/7fbb519e07c4de2545d2eeb4b92f991f0e8630ca"
+          "url": "https://github.com/0x676e67/netty/commit/7fbb519e07c4de2545d2eeb4b92f991f0e8630ca"
         },
         "date": 1789028965458,
         "tool": "cargo",
@@ -8552,7 +8552,7 @@ window.BENCHMARK_DATA = {
           "message": "Update README badges for CI and Crates.io",
           "timestamp": "2026-09-10T16:39:37+08:00",
           "tree_id": "e513e6eb69eab0a154942f7d5da857fd832e0778",
-          "url": "https://github.com/0x676e67/hwire/commit/9aeeddbbf087cbf4ecee0135e45a186c7ec4b74b"
+          "url": "https://github.com/0x676e67/netty/commit/9aeeddbbf087cbf4ecee0135e45a186c7ec4b74b"
         },
         "date": 1789029745488,
         "tool": "cargo",
@@ -8660,7 +8660,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http1): use append for repeat trailer values in encoder (#59)\n\nCo-authored-by: greymoth <m.hirakawa07@icloud.com>",
           "timestamp": "2026-09-11T08:35:28+08:00",
           "tree_id": "acaa99ec101f971fb3c75ad53c115b6ee22729cf",
-          "url": "https://github.com/0x676e67/hwire/commit/93842951666a09a513d9e1d1974dfe20775a7179"
+          "url": "https://github.com/0x676e67/netty/commit/93842951666a09a513d9e1d1974dfe20775a7179"
         },
         "date": 1789087101667,
         "tool": "cargo",
@@ -8768,7 +8768,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http1): evict pooled conn on request-side Connection: close (#60)\n\nhyper's client derives connection reuse from the response alone, so a\nrequest carrying `Connection: close` whose backend response omits it\n(keeps the socket alive) leaves the connection pooled and reusable.\nDisable keep-alive at request-encode time when the outgoing request\ncarries a `Connection: close` token so the connection is evicted\nregardless of the response.\n\nEvery `Connection` header line is inspected via a `connection_any_close`\nhelper (over `get_all`), not just the first, so a `close` on a later\nline or within a comma-separated value is honored.\n\nAdds a conn-level regression test (client Conn + write_head) asserting a\n`Connection: close` request disables keep-alive -- including\ncomma-separated and multi-line forms -- while a keep-alive request stays\nreusable.\n\nBackport adaptation: the regression uses a wreq-proto client and an upstream\nHyper server instead of inspecting Conn internals, with a test transport\nthat hides the request Connection fields from the server.\n\nCo-authored-by: Sam Landfried <slandfried@bignerdranch.com>\nCo-authored-by: Sam Landfried <samlland@amazon.com>",
           "timestamp": "2026-09-11T13:37:14+08:00",
           "tree_id": "2d7e777d56235312acd5a331cb7e9e5977a6c120",
-          "url": "https://github.com/0x676e67/hwire/commit/56fc782190e893510c8a253ae513bde67d69e05e"
+          "url": "https://github.com/0x676e67/netty/commit/56fc782190e893510c8a253ae513bde67d69e05e"
         },
         "date": 1789105202312,
         "tool": "cargo",
@@ -8876,7 +8876,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http1): flush bytes buffered by the write re-check before yielding (#61)\n\n`poll_loop`'s main path always calls `poll_flush` after `poll_write`. The\n\"wants_write_again\" re-check added in #3988 calls `poll_write` a second time\nand returns straight out of the loop when it pends, skipping that flush.\n\nThat second write can buffer bytes before it pends. When a response body\nreaches end-of-stream between the two write polls, `end_body()` buffers the\nend of the message and the write then pends on the *next* message\n(`poll_msg`). Returning there strands the terminating chunk in the write\nbuffer: the wake-ups the connection is left waiting on are for reads, so\nnothing flushes it. The peer receives the body but never the terminator and\nwaits until it gives up, at which point the connection reports\n`IncompleteMessage` from `mid_message_detect_eof`.\n\nObserved on a server streaming a chunked body fed from another thread, at\nroughly one connection in 600k. hyper's own trace shows the divergence:\n\n    healthy:  buf.len=24, buf.len=5, flushed 29 bytes\n    stalled:  buf.len=24, flushed 24 bytes, buf.len=5, <nothing>\n\nFlush what the re-check buffered before yielding. Guard the flush on there\nbeing buffered bytes so the call pattern is otherwise unchanged.\n\nAdd a test that drives the interleaving deterministically: a body that yields\none data frame, then pends, then ends the stream on the very next poll, all\nwithin a single `poll_loop` iteration.\n\nBackport adaptation: exercise the same body-poll interleaving on a\nwreq-proto client request, with upstream Hyper consuming the complete\nchunked body before responding. The test uses duplex I/O and adds Debug\nto the body for the local try_send_request error type.\n\nCo-authored-by: Bailey Hayes <ricochet@users.noreply.github.com>",
           "timestamp": "2026-09-11T14:08:04+08:00",
           "tree_id": "7ebd8c2356ffb2f34e2edaf4777c175b755aa250",
-          "url": "https://github.com/0x676e67/hwire/commit/43b6f1db7e43524893a3e13fe17be48c134a6ca5"
+          "url": "https://github.com/0x676e67/netty/commit/43b6f1db7e43524893a3e13fe17be48c134a6ca5"
         },
         "date": 1789107057682,
         "tool": "cargo",
@@ -8984,7 +8984,7 @@ window.BENCHMARK_DATA = {
           "message": "perf(http2): reserve minimal send capacity when piping request bodies (#62)\n\nReserving the full chunk length makes every in-flight stream a heavyweight\nclaimant in the connection-window distribution for as long as it waits for\ncapacity, which is costly once the streams sharing a connection collectively\ndemand more than the window the peer advertises.\n\nThe chunk is still only reserved against once it is in hand, so capacity can\nnever be pinned by a body that produces nothing (#4003). h2 raises the\nrequested send capacity to the buffered length inside `send_data`, so the\ndemand eventually signalled to the peer is unchanged; only the transient claim\nheld while the stream waits for its first byte of capacity differs.\n\nBackport adaptation: the dependency is named http2 locally; its send_data\ncapacity behavior matches the upstream h2 implementation.\n\nCo-authored-by: Sander Saares <sander@saares.eu>",
           "timestamp": "2026-09-14T09:30:51+08:00",
           "tree_id": "f2c08973e3735f31d2a2a17968372c094b558b11",
-          "url": "https://github.com/0x676e67/hwire/commit/72a4b6160b54cf8ca33baafb3fb9230014f4782e"
+          "url": "https://github.com/0x676e67/netty/commit/72a4b6160b54cf8ca33baafb3fb9230014f4782e"
         },
         "date": 1789349619054,
         "tool": "cargo",
@@ -9092,7 +9092,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http1): recognize `\\n\\r\\n` as a head terminator in the partial-read fast path (#63)\n\n`is_complete_fast` recognizes `\\r\\n\\r\\n` and `\\n\\n` as head terminators but not `\\n\\r\\n`, while the full parser (httparse) accepts all three. So a request whose head ends with `\\n\\r\\n` parses fine when it arrives in a single read, but stalls when it arrives split across reads: the fast path never reports the head complete and the connection keeps waiting for more bytes.\n\nThis extends the `\\n` branch to also accept a following `\\r\\n`, using the same panic-safe slicing idiom as the `\\r` branch. Added the `\\n\\r\\n` witness and the `\\n\\r` negative to `test_is_complete_fast`, plus a parse-level test documenting that the full parser accepts this terminator.\n\nCloses #4145\n\nBackport adaptation: retain the fast-scan positive and negative witnesses\nin a local unit test, and replace the server parse test with a wreq-proto\nclient receiving a Hyper-generated response through a transport that\nadjusts the final header line ending and tests whole and bytewise reads.\n\nCo-authored-by: Nam2ee <81401376+nam2ee@users.noreply.github.com>",
           "timestamp": "2026-09-15T00:51:05+08:00",
           "tree_id": "2caff653f229577002abd2e8e23db1641e3fb5c4",
-          "url": "https://github.com/0x676e67/hwire/commit/361958c500ffc016400b9391d4d8599509cabdd4"
+          "url": "https://github.com/0x676e67/netty/commit/361958c500ffc016400b9391d4d8599509cabdd4"
         },
         "date": 1789404855104,
         "tool": "cargo",
@@ -9200,7 +9200,7 @@ window.BENCHMARK_DATA = {
           "message": "docs(body): add streaming read examples (#64)\n\nShow how to process data and trailer frames while preserving back-pressure, and contrast that with intentionally collecting a bounded body in memory.\n\nCloses #2201\n\nBackport adaptation: use wreq_proto paths and import Bytes directly from\nbytes because the local body module does not re-export it.\n\nCo-authored-by: Morax <100508620+fzlzjerry@users.noreply.github.com>",
           "timestamp": "2026-09-15T01:01:48+08:00",
           "tree_id": "7ffcecfb0090fa1845adcb09f3779a23b86f7745",
-          "url": "https://github.com/0x676e67/hwire/commit/1078de8873450b091579b04e49f10a112fdbb3ca"
+          "url": "https://github.com/0x676e67/netty/commit/1078de8873450b091579b04e49f10a112fdbb3ca"
         },
         "date": 1789405478641,
         "tool": "cargo",
@@ -9308,7 +9308,7 @@ window.BENCHMARK_DATA = {
           "message": "style(lib): fix missing_errors_doc lint (#65)\n\nRefs: #4071\n\nBackport adaptation: retain documentation for existing client connection APIs;\nomit the lint configuration and documentation for absent free handshake,\nsend_request, and Upgraded::downcast APIs. Document that the local HTTP/1\nbuilder handshake currently returns no error.\n\nCo-authored-by: Murilo Silva <zafkielc@gmail.com>",
           "timestamp": "2026-09-15T01:06:11+08:00",
           "tree_id": "f63b9a686314e4ae56ce4911aed8ca47494e28de",
-          "url": "https://github.com/0x676e67/hwire/commit/51b58de2acb0096922fc340753b16937a4206c0e"
+          "url": "https://github.com/0x676e67/netty/commit/51b58de2acb0096922fc340753b16937a4206c0e"
         },
         "date": 1789405751219,
         "tool": "cargo",
@@ -9416,7 +9416,7 @@ window.BENCHMARK_DATA = {
           "message": "docs(lib): expand crate-level cancel safety section with HTTP/1 vs HTTP/2 (#66)\n\nCloses #4054\n\nBackport adaptation: scope the documentation to request futures, use local\ntry_send_request links and transport-neutral I/O wording, and clarify that\nconnection/background tasks must be driven to complete cancellation and\nthat HTTP/2 resets apply to opened streams.\n\nCo-authored-by: MsfPablo <129399053+MsfPablo@users.noreply.github.com>",
           "timestamp": "2026-09-15T01:10:25+08:00",
           "tree_id": "5914197c370f2bc33cdf7dde39a31a59a3895700",
-          "url": "https://github.com/0x676e67/hwire/commit/2ce0cc8bf0c478094fd1b88054eb13eb4cd4414a"
+          "url": "https://github.com/0x676e67/netty/commit/2ce0cc8bf0c478094fd1b88054eb13eb4cd4414a"
         },
         "date": 1789406001721,
         "tool": "cargo",
@@ -9524,7 +9524,7 @@ window.BENCHMARK_DATA = {
           "message": "chore(deps): bump http from 1.4.2 to 1.5.0 (#68)",
           "timestamp": "2026-09-16T00:57:21+08:00",
           "tree_id": "5a71f9db94e1976a5a6cd946d419bd30ee127fe4",
-          "url": "https://github.com/0x676e67/hwire/commit/7b4f76b0e4feb4c53547e3c13c494cdcd37e5a28"
+          "url": "https://github.com/0x676e67/netty/commit/7b4f76b0e4feb4c53547e3c13c494cdcd37e5a28"
         },
         "date": 1789491596223,
         "tool": "cargo",
@@ -9632,7 +9632,7 @@ window.BENCHMARK_DATA = {
           "message": "perf(body): simpler custom Incoming channel (#67)",
           "timestamp": "2026-09-16T00:57:06+08:00",
           "tree_id": "14d194cc27bd9ae031eb84fb7a776441add60f10",
-          "url": "https://github.com/0x676e67/hwire/commit/16445ff30aa1934b8139ac21ccc6ff3ef9d71a8a"
+          "url": "https://github.com/0x676e67/netty/commit/16445ff30aa1934b8139ac21ccc6ff3ef9d71a8a"
         },
         "date": 1789491599550,
         "tool": "cargo",
@@ -9740,7 +9740,7 @@ window.BENCHMARK_DATA = {
           "message": "chore(deps): bump futures-util from 0.3.32 to 0.3.34 (#75)",
           "timestamp": "2026-09-16T00:58:30+08:00",
           "tree_id": "8fd02a188abc69de65a07f0d843c005a0d8fc08f",
-          "url": "https://github.com/0x676e67/hwire/commit/fb0528d2d847e2cbc8cafd7b915efb94597963f3"
+          "url": "https://github.com/0x676e67/netty/commit/fb0528d2d847e2cbc8cafd7b915efb94597963f3"
         },
         "date": 1789491684017,
         "tool": "cargo",
@@ -9848,7 +9848,7 @@ window.BENCHMARK_DATA = {
           "message": "chore(deps): bump http-body-util from 0.1.3 to 0.1.5 (#74)",
           "timestamp": "2026-09-16T00:58:06+08:00",
           "tree_id": "54e841c147eb9f0d36e932009f18753e3453330a",
-          "url": "https://github.com/0x676e67/hwire/commit/f3038ad31b207348c35a5a358d267b841f08c4cf"
+          "url": "https://github.com/0x676e67/netty/commit/f3038ad31b207348c35a5a358d267b841f08c4cf"
         },
         "date": 1789491687068,
         "tool": "cargo",
@@ -9956,7 +9956,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(http1): preserve hop-by-hop when setting close or keep-alive (#78)\n\nThis adjusts https://github.com/hyperium/hyper/pull/4110 to use `append` instead of `insert` when a nonzero number of \"connection\" headers are already present, and only if none of the existing headers already include the value being added.\n\nFixes https://github.com/hyperium/hyper/issues/4195\n\nBackport adaptation: use the local HTTP/1 module layout and replace the raw\nserver fixture with an upstream Hyper server, checking combined and repeated\nConnection fields and retaining the hop-by-hop header value.\n\nCo-authored-by: David Tolnay <dtolnay@gmail.com>",
           "timestamp": "2026-09-16T22:42:54+08:00",
           "tree_id": "0fe87d5a93b35e46fbd07a3e0b29a204b2e80291",
-          "url": "https://github.com/0x676e67/hwire/commit/e103ea095cdf3ec6eca2e40815f1e1691524cde8"
+          "url": "https://github.com/0x676e67/netty/commit/e103ea095cdf3ec6eca2e40815f1e1691524cde8"
         },
         "date": 1789569951667,
         "tool": "cargo",
@@ -10064,7 +10064,7 @@ window.BENCHMARK_DATA = {
           "message": "docs(rt): improve `rt` module overview (#79)\n\nBackport adaptation: use the local crate name, describe Tokio IO traits and\nwreq-rt adapters outside this module, and omit the Hyper-specific runtime\nguide link. Executor and timer descriptions retain the upstream wording.\n\nCo-authored-by: Sean McArthur <sean@seanmonstar.com>",
           "timestamp": "2026-09-17T00:35:54+08:00",
           "tree_id": "b04d6c7ca46e3564fcba0c8ef84c7fa03e483a06",
-          "url": "https://github.com/0x676e67/hwire/commit/a5e13003f61bf32234bb9195a4551f06fe1aedfe"
+          "url": "https://github.com/0x676e67/netty/commit/a5e13003f61bf32234bb9195a4551f06fe1aedfe"
         },
         "date": 1789576724162,
         "tool": "cargo",
@@ -10172,7 +10172,7 @@ window.BENCHMARK_DATA = {
           "message": "docs(client): fix HTTP/2 max concurrent stream link to spec (#80)\n\nBackport adaptation: apply the unchanged URL correction to the local\nHTTP/2 options builder, where max_concurrent_streams is defined.\n\nCo-authored-by: dentiny <dentinyhao@gmail.com>",
           "timestamp": "2026-09-17T00:36:06+08:00",
           "tree_id": "a31b6d1228f66da34c6fc0983571c169f5604f77",
-          "url": "https://github.com/0x676e67/hwire/commit/587b44bbb61fd8619779e7dea381e60911eac9be"
+          "url": "https://github.com/0x676e67/netty/commit/587b44bbb61fd8619779e7dea381e60911eac9be"
         },
         "date": 1789576755695,
         "tool": "cargo",
@@ -10280,7 +10280,7 @@ window.BENCHMARK_DATA = {
           "message": "chore(deps): bump tokio-util from 0.7.18 to 0.7.19 (#69)\n\nBumps [tokio-util](https://github.com/tokio-rs/tokio) from 0.7.18 to 0.7.19.\n- [Release notes](https://github.com/tokio-rs/tokio/releases)\n- [Commits](https://github.com/tokio-rs/tokio/compare/tokio-util-0.7.18...tokio-util-0.7.19)\n\n---\nupdated-dependencies:\n- dependency-name: tokio-util\n  dependency-version: 0.7.19\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
           "timestamp": "2026-09-18T17:34:13+08:00",
           "tree_id": "fa9d0f8449368cbfb5279b285a355c0e7ee35f55",
-          "url": "https://github.com/0x676e67/hwire/commit/b4ff7448a698c1e03addd92c8aa3674eda4f57ac"
+          "url": "https://github.com/0x676e67/netty/commit/b4ff7448a698c1e03addd92c8aa3674eda4f57ac"
         },
         "date": 1789724225398,
         "tool": "cargo",
@@ -10388,7 +10388,7 @@ window.BENCHMARK_DATA = {
           "message": "Merge branch 'feat/task-02-http3-client'",
           "timestamp": "2026-09-23T01:44:53+08:00",
           "tree_id": "400cae1dd2ac58d62d3f86315999a08fa1919e4f",
-          "url": "https://github.com/0x676e67/hwire/commit/3d279e6443a2882b6d82fd1097516acc3a6922dc"
+          "url": "https://github.com/0x676e67/netty/commit/3d279e6443a2882b6d82fd1097516acc3a6922dc"
         },
         "date": 1790099298178,
         "tool": "cargo",
@@ -10496,7 +10496,7 @@ window.BENCHMARK_DATA = {
           "message": "fix(deps): pin http3 dependencies directly to git",
           "timestamp": "2026-09-23T01:51:00+08:00",
           "tree_id": "97dcf8a55ff5e60bacb6bd03fcb966940adb1ec5",
-          "url": "https://github.com/0x676e67/hwire/commit/cf58dfd2c8324c35dad13d4652fe0f97da5e2f66"
+          "url": "https://github.com/0x676e67/netty/commit/cf58dfd2c8324c35dad13d4652fe0f97da5e2f66"
         },
         "date": 1790099682882,
         "tool": "cargo",
@@ -10604,7 +10604,7 @@ window.BENCHMARK_DATA = {
           "message": "chore(deps): bump h2 from 0.4.18 to 0.4.19 (#76)\n\nBumps [h2](https://github.com/hyperium/h2) from 0.4.18 to 0.4.19.\n- [Release notes](https://github.com/hyperium/h2/releases)\n- [Changelog](https://github.com/hyperium/h2/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/hyperium/h2/compare/v0.4.18...v0.4.19)\n\n---\nupdated-dependencies:\n- dependency-name: h2\n  dependency-version: 0.4.19\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
           "timestamp": "2026-09-23T01:59:31+08:00",
           "tree_id": "b209119246c011a3bc2e404b1b56b54a295ceed7",
-          "url": "https://github.com/0x676e67/hwire/commit/1d4c1e40c78812062743e9dd6838cb5c9578093a"
+          "url": "https://github.com/0x676e67/netty/commit/1d4c1e40c78812062743e9dd6838cb5c9578093a"
         },
         "date": 1790100173028,
         "tool": "cargo",
@@ -10712,7 +10712,7 @@ window.BENCHMARK_DATA = {
           "message": "chore(deps): bump http-body from 1.0.1 to 1.1.0 (#72)\n\nBumps [http-body](https://github.com/hyperium/http-body) from 1.0.1 to 1.1.0.\n- [Release notes](https://github.com/hyperium/http-body/releases)\n- [Commits](https://github.com/hyperium/http-body/compare/v1.0.1...v1.1.0)\n\n---\nupdated-dependencies:\n- dependency-name: http-body\n  dependency-version: 1.1.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
           "timestamp": "2026-09-23T02:08:36+08:00",
           "tree_id": "d8963cf8a80bfa9c4cb674e1e61134401c66ad48",
-          "url": "https://github.com/0x676e67/hwire/commit/754cedd154e94582799a421713267e409c637b64"
+          "url": "https://github.com/0x676e67/netty/commit/754cedd154e94582799a421713267e409c637b64"
         },
         "date": 1790100738865,
         "tool": "cargo",
@@ -10820,7 +10820,7 @@ window.BENCHMARK_DATA = {
           "message": "chore: update hwire repository links (#83)",
           "timestamp": "2026-09-23T09:07:15+08:00",
           "tree_id": "4e2d741808b0dc2f8045ff0b89d27842a640c5a7",
-          "url": "https://github.com/0x676e67/hwire/commit/7c0760d467707c49cfd0329d18ebf40a0ffccde5"
+          "url": "https://github.com/0x676e67/netty/commit/7c0760d467707c49cfd0329d18ebf40a0ffccde5"
         },
         "date": 1790125847573,
         "tool": "cargo",
@@ -10928,7 +10928,7 @@ window.BENCHMARK_DATA = {
           "message": "refactor(http3): use caller-driven requests (#81)\n\n* refactor(http3): run requests in the caller's future and the connection task on the executor\n\n* docs(http3): describe the connection model, feature gates and internal types\n\n* Update README.md\n\n* refactor(http3): simplify connection and datagram drivers\n\n* chore(http3): update driver lifecycle dependency\n\n* fix(bench): stop the native HTTP/3 driver after measurement\n\n* fix(http3): wake settings waiters on graceful shutdown\n\n* Update README.md\n\n* style: fmt code\n\n* refactor(http3): align connection generic bounds\n\n* fix(http3): keep connections open after senders drop\n\n* fix: restore empty default features\n\n* refactor(http3): align request body bounds\n\n* docs(http3): align request method documentation\n\n* docs(http3): clarify request recovery boundary\n\n* fix(http3): drain connections when the last sender drops\n\n* docs(http3): clarify generic executor implementations\n\n* docs(quic): require idempotent connection close\n\n* perf(http3): avoid repeated shutdown cancellation\n\n* fix(http3): preserve CONNECT permission errors while draining\n\n* style: fmt code\n\n* refactor(http3): unify client task structure",
           "timestamp": "2026-09-23T09:18:45+08:00",
           "tree_id": "10fa6a744d1b4d7d071aae0bbb2a2d37be55b3da",
-          "url": "https://github.com/0x676e67/hwire/commit/eb4f614c8df160bd4a1bd8a27b5372d7c64d8592"
+          "url": "https://github.com/0x676e67/netty/commit/eb4f614c8df160bd4a1bd8a27b5372d7c64d8592"
         },
         "date": 1790126567359,
         "tool": "cargo",
@@ -11036,7 +11036,7 @@ window.BENCHMARK_DATA = {
           "message": "Merge pull request #84 from 0x676e67/fix/release-plz-http3-baseline\n\nfix(ci): patch HTTP/3 for release-plz baseline",
           "timestamp": "2026-09-23T09:30:17+08:00",
           "tree_id": "05c00cbb4e10e98f2817099cdd4ec088fff9f517",
-          "url": "https://github.com/0x676e67/hwire/commit/70617bcb899fed1386370bfe2e947ad9a658670a"
+          "url": "https://github.com/0x676e67/netty/commit/70617bcb899fed1386370bfe2e947ad9a658670a"
         },
         "date": 1790127218182,
         "tool": "cargo",
@@ -11144,7 +11144,7 @@ window.BENCHMARK_DATA = {
           "message": "refactor(http3): use named polling futures (#82)",
           "timestamp": "2026-09-23T09:32:06+08:00",
           "tree_id": "0bfdaacd50c5eb026fafeee3dd55d2a1a1a92df6",
-          "url": "https://github.com/0x676e67/hwire/commit/85530ada7a77a3b8d806c1c4bfe131e8d7d2e5a8"
+          "url": "https://github.com/0x676e67/netty/commit/85530ada7a77a3b8d806c1c4bfe131e8d7d2e5a8"
         },
         "date": 1790127407170,
         "tool": "cargo",
@@ -11252,7 +11252,7 @@ window.BENCHMARK_DATA = {
           "message": "chore(deps): bump smallvec from 1.15.2 to 1.16.1 (#73)\n\nBumps [smallvec](https://github.com/servo/rust-smallvec) from 1.15.2 to 1.16.1.\n- [Release notes](https://github.com/servo/rust-smallvec/releases)\n- [Commits](https://github.com/servo/rust-smallvec/compare/v1.15.2...v1.16.1)\n\n---\nupdated-dependencies:\n- dependency-name: smallvec\n  dependency-version: 1.16.1\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
           "timestamp": "2026-09-23T09:53:01+08:00",
           "tree_id": "51e4dc1c0a6b9a99e35eff20aafafd0a75903ccb",
-          "url": "https://github.com/0x676e67/hwire/commit/7eb449c6a8fb84a4ebe3bda64b1196743ebb5ce6"
+          "url": "https://github.com/0x676e67/netty/commit/7eb449c6a8fb84a4ebe3bda64b1196743ebb5ce6"
         },
         "date": 1790128610050,
         "tool": "cargo",
@@ -11360,7 +11360,7 @@ window.BENCHMARK_DATA = {
           "message": "chore(deps): update http3 to 0.2.0",
           "timestamp": "2026-09-23T11:15:17+08:00",
           "tree_id": "b7b095596653f0ecf7913bf3288710775b892c3b",
-          "url": "https://github.com/0x676e67/hwire/commit/5fa0311bfb3d1389470f23d2b7020ef338af2635"
+          "url": "https://github.com/0x676e67/netty/commit/5fa0311bfb3d1389470f23d2b7020ef338af2635"
         },
         "date": 1790133537008,
         "tool": "cargo",
@@ -11468,7 +11468,7 @@ window.BENCHMARK_DATA = {
           "message": "chore(deps): update http3 to 0.2.0",
           "timestamp": "2026-09-23T11:15:17+08:00",
           "tree_id": "b7b095596653f0ecf7913bf3288710775b892c3b",
-          "url": "https://github.com/0x676e67/hwire/commit/5fa0311bfb3d1389470f23d2b7020ef338af2635"
+          "url": "https://github.com/0x676e67/netty/commit/5fa0311bfb3d1389470f23d2b7020ef338af2635"
         },
         "date": 1790146916196,
         "tool": "cargo",
@@ -11576,7 +11576,7 @@ window.BENCHMARK_DATA = {
           "message": "chore(deps): bump quinn from 0.11.11 to 0.11.12 (#85)",
           "timestamp": "2026-09-23T15:13:26+08:00",
           "tree_id": "3cc03050af78e71fa3e92162467316f5a31928d0",
-          "url": "https://github.com/0x676e67/hwire/commit/aa2cb3b12cf43d5ce6b9a23e5ebc8cdc9cbc5448"
+          "url": "https://github.com/0x676e67/netty/commit/aa2cb3b12cf43d5ce6b9a23e5ebc8cdc9cbc5448"
         },
         "date": 1790147800547,
         "tool": "cargo",
