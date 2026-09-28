@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790529348471,
+  "lastUpdate": 1790583185903,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -12635,6 +12635,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 5468411,
             "range": "± 186756.95",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2c8cc0af2338f5a28cb46013e5402b4dcca50a1d",
+          "message": "Update Cargo.toml",
+          "timestamp": "2026-09-28T16:09:28+08:00",
+          "tree_id": "2161c2087ec6c9c792233ac4d5407aac48b27ea1",
+          "url": "https://github.com/0x676e67/netty/commit/2c8cc0af2338f5a28cb46013e5402b4dcca50a1d"
+        },
+        "date": 1790583184128,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 91963,
+            "range": "± 1723.57",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 6381024,
+            "range": "± 483977.03",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 20741,
+            "range": "± 475.30",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 23054,
+            "range": "± 529.25",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 33602,
+            "range": "± 668.67",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 102284,
+            "range": "± 4909.49",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 40999791,
+            "range": "± 9751.08",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 84357,
+            "range": "± 1967.96",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 16102162,
+            "range": "± 16431590.82",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 7763229,
+            "range": "± 150781.76",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 7661593,
+            "range": "± 140463.53",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 92389274,
+            "range": "± 1008484.52",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 53111277,
+            "range": "± 1266404.92",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 5256546,
+            "range": "± 154394.29",
             "unit": "ns/iter"
           }
         ]
