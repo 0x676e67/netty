@@ -27,7 +27,7 @@ use http3_datagram::datagram::Datagram;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::{rt::quic, Error, Result};
+use crate::{Error, Result, rt::quic};
 
 /// Packets queued per session and direction. The limits are also stated on
 /// `conn::http3::datagram::Sender::try_send`.
@@ -231,10 +231,10 @@ impl Registry {
             // An active request without Datagram semantics is a stream error,
             // unlike an unknown stream (RFC 9297 §2).
             request.invalid.cancel();
-            if let Some((state, stop)) = request.stop_state.get().zip(request.stop.get()) {
-                if let Some(state) = state.upgrade() {
-                    stop(&*state);
-                }
+            if let Some((state, stop)) = request.stop_state.get().zip(request.stop.get())
+                && let Some(state) = state.upgrade()
+            {
+                stop(&*state);
             }
             return Ok(());
         }
@@ -468,7 +468,7 @@ where
                     .map_err(|error| (Code::H3_DATAGRAM_ERROR, error))?,
                 Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
                 Poll::Ready(Err(error)) => {
-                    return Poll::Ready(Err((Code::H3_INTERNAL_ERROR, Error::new_h3(error))))
+                    return Poll::Ready(Err((Code::H3_INTERNAL_ERROR, Error::new_h3(error))));
                 }
                 Poll::Pending => break,
             }
@@ -558,12 +558,16 @@ mod tests {
         let second_waker = futures_util::task::waker(second_wakes.clone());
         let mut cx1 = Context::from_waker(&first_waker);
         let mut cx2 = Context::from_waker(&second_waker);
-        assert!(first
-            .poll_send(&mut cx1, &Bytes::from_static(b"first"))
-            .is_pending());
-        assert!(second
-            .poll_send(&mut cx2, &Bytes::from_static(b"second"))
-            .is_pending());
+        assert!(
+            first
+                .poll_send(&mut cx1, &Bytes::from_static(b"first"))
+                .is_pending()
+        );
+        assert!(
+            second
+                .poll_send(&mut cx2, &Bytes::from_static(b"second"))
+                .is_pending()
+        );
         assert_eq!(registry.lock().streams[&0].outgoing.len(), PACKETS);
         registry.next().unwrap();
         assert!(first_wakes.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
@@ -573,12 +577,16 @@ mod tests {
             Poll::Ready(Ok(()))
         ));
         // Reusing the second sender may first consume the broadcast notification.
-        assert!(second
-            .poll_send(&mut cx2, &Bytes::from_static(b"second"))
-            .is_pending());
-        assert!(second
-            .poll_send(&mut cx2, &Bytes::from_static(b"second"))
-            .is_pending());
+        assert!(
+            second
+                .poll_send(&mut cx2, &Bytes::from_static(b"second"))
+                .is_pending()
+        );
+        assert!(
+            second
+                .poll_send(&mut cx2, &Bytes::from_static(b"second"))
+                .is_pending()
+        );
         let before_close = second_wakes.0.load(std::sync::atomic::Ordering::Relaxed);
         request.0.close_send();
         assert!(second_wakes.0.load(std::sync::atomic::Ordering::Relaxed) > before_close);

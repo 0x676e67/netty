@@ -29,8 +29,8 @@ mod tls;
 use std::{
     future::Future,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -41,7 +41,7 @@ use http_body_util::{BodyExt, Full};
 use netty::{
     conn::http3::{Builder, Connection, SendRequest},
     http3::Http3Options,
-    rt::{bounds::Http3ClientConnExec, Executor},
+    rt::{Executor, bounds::Http3ClientConnExec},
 };
 use tokio::{sync::oneshot, time::timeout};
 
@@ -237,15 +237,17 @@ async fn canceling_partially_written_headers_resets_stream_and_releases_slot() {
                 _ => panic!("unexpected request or connection failure"),
             }
         });
-        assert!(response
-            .await
-            .unwrap()
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty());
+        assert!(
+            response
+                .await
+                .unwrap()
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
         drop(tx);
         client_driver.as_mut().graceful_shutdown();
         client_driver.await.unwrap();
@@ -921,13 +923,15 @@ where
             .await
             .unwrap();
         drop(body);
-        assert!(response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty());
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
         drop(tx);
         client_driver.as_mut().graceful_shutdown();
         client_driver.await.unwrap();
@@ -1181,13 +1185,15 @@ async fn invalid_datagram_on_ordinary_request(connect: bool) {
             )
             .await
             .unwrap();
-        assert!(response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty());
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
         if let Some(mut tunnel) = tunnel {
             assert!(tunnel.read_to_end(&mut Vec::new()).await.is_err());
         } else {
@@ -1275,13 +1281,15 @@ async fn datagram_before_response_head_fails_request_and_releases_slot() {
             )
             .await
             .unwrap();
-        assert!(response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty());
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
         drop(tx);
         client_driver.as_mut().graceful_shutdown();
         client_driver.await.unwrap();
@@ -1652,15 +1660,17 @@ async fn canceled_request_waiting_for_quic_credit_releases_active_slot() {
                 _ => panic!("unexpected request or connection failure"),
             }
         });
-        assert!(response
-            .await
-            .unwrap()
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty());
+        assert!(
+            response
+                .await
+                .unwrap()
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
         drop(tx);
         client_driver.as_mut().graceful_shutdown();
         client_driver.await.unwrap();

@@ -3,8 +3,8 @@
 
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, OnceLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::Context,
 };

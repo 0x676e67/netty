@@ -207,13 +207,15 @@ async fn control_fin_closes_only_its_datagram_direction() {
                 )
                 .await
                 .unwrap();
-            assert!(response
-                .into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes()
-                .is_empty());
+            assert!(
+                response
+                    .into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .is_empty()
+            );
             drop(control);
             drop(tx);
             client_driver.as_mut().graceful_shutdown();
@@ -301,13 +303,15 @@ async fn control_reset_wakes_datagrams_and_releases_request() {
             )
             .await
             .unwrap();
-        assert!(response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty());
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
         drop(control);
         drop(tx);
         client_driver.as_mut().graceful_shutdown();

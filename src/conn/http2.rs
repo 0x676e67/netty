@@ -5,7 +5,7 @@ use std::{
     marker::PhantomData,
     pin::Pin,
     sync::Arc,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use http::{Request, Response};
@@ -13,15 +13,15 @@ use http_body::Body;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
+    Result,
     body::Incoming,
     dispatch::{self, TrySendError},
     error::{BoxError, Error},
     proto::{
         self,
-        http2::{ping, Http2Options},
+        http2::{Http2Options, ping},
     },
-    rt::{bounds::Http2ClientConnExec, Time, Timer},
-    Result,
+    rt::{Time, Timer, bounds::Http2ClientConnExec},
 };
 
 /// The sender side of an established connection.
@@ -144,7 +144,7 @@ where
     pub fn try_send_request(
         &mut self,
         req: Request<B>,
-    ) -> impl Future<Output = Result<Response<Incoming>, TrySendError<Request<B>>>> {
+    ) -> impl Future<Output = Result<Response<Incoming>, TrySendError<Request<B>>>> + use<B> {
         let sent = self.dispatch.try_send(req);
         async move {
             match sent {

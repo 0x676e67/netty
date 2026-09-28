@@ -1,7 +1,7 @@
 //! Concurrent openers must survive canceled waiters and replenished QUIC credit.
 use std::sync::Arc;
 
-use futures_util::{stream::FuturesUnordered, StreamExt};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 
 use super::*;
 
@@ -71,10 +71,11 @@ async fn canceled_openers_do_not_strand_other_credit_waiters() {
                     .unwrap();
                 stream.finish().await.unwrap();
             }
-            assert!(seen
-                .iter()
-                .enumerate()
-                .all(|(i, &seen)| seen == (i % 2 == 1)));
+            assert!(
+                seen.iter()
+                    .enumerate()
+                    .all(|(i, &seen)| seen == (i % 2 == 1))
+            );
             match server.accept().await {
                 Ok(None) => {}
                 Err(error) if error.is_h3_no_error() => {}

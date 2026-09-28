@@ -1,7 +1,7 @@
 use std::{
     error::Error as StdError,
     fmt, io,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -9,7 +9,7 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 use http_body::Frame;
 
 use self::Kind::{Chunked, Eof, Length};
-use super::{io::MemRead, role::DEFAULT_MAX_HEADERS, DecodedLength};
+use super::{DecodedLength, io::MemRead, role::DEFAULT_MAX_HEADERS};
 
 /// Maximum amount of bytes allowed in chunked extensions.
 ///

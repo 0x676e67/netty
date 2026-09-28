@@ -33,34 +33,34 @@
 pub mod datagram;
 
 use std::{
-    future::{poll_fn, Future},
+    future::{Future, poll_fn},
     marker::PhantomData,
     pin::Pin,
-    sync::{atomic::Ordering, Arc, Mutex, PoisonError},
-    task::{ready, Context, Poll},
+    sync::{Arc, Mutex, PoisonError, atomic::Ordering},
+    task::{Context, Poll, ready},
 };
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use http::{Request, Response};
-use http3::error::Code;
 use http_body::Body;
+use http3::error::Code;
 use tokio::sync::oneshot;
 
 #[cfg(feature = "http3-datagram")]
 use crate::proto::http3::datagram::{Drive, Registry};
 use crate::{
+    Error, Result,
     body::Incoming,
     dispatch::TrySendError,
     error::BoxError,
     proto::http3::{
+        Http3Options,
         client::{self, ConnTask, H3ClientFuture},
         shared::{Active, Shared},
         transport::Transport,
-        Http3Options,
     },
     rt::{bounds::Http3ClientConnExec, quic},
-    Error, Result,
 };
 
 /// The boxed request future a handle returns.
@@ -215,7 +215,7 @@ where
     pub fn try_send_request(
         &mut self,
         request: Request<B>,
-    ) -> impl Future<Output = Result<Response<Incoming>, TrySendError<Request<B>>>> {
+    ) -> impl Future<Output = Result<Response<Incoming>, TrySendError<Request<B>>>> + use<B> {
         // Reserve before returning the future so dropping the last sender
         // cannot close the connection before this request is polled.
         let reservation = (!self.shared.is_draining()).then(|| Active::reserve(&self.shared));

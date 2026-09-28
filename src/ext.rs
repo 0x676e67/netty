@@ -27,6 +27,6 @@ mod preserve_header;
 pub use self::{
     h1_reason_phrase::ReasonPhrase,
     informational::on_informational,
-    preserve_header::{on_preserve_header, OnPreserveHeaderCallback},
+    preserve_header::{OnPreserveHeaderCallback, on_preserve_header},
 };
 pub(crate) use self::{informational::OnInformational, preserve_header::OnPreserveHeader};

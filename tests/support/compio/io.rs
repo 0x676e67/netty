@@ -6,10 +6,10 @@
 use std::{
     io,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
-use compio::io::{compat::AsyncStream, util::Splittable, AsyncRead, AsyncWrite};
+use compio::io::{AsyncRead, AsyncWrite, compat::AsyncStream, util::Splittable};
 use send_wrapper::SendWrapper;
 
 /// A wrapper around `compio::io::compat::AsyncStream` that implements

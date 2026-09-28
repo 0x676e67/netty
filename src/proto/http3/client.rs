@@ -5,23 +5,24 @@
 
 use std::{
     borrow::Cow,
-    future::{pending, poll_fn, Future},
-    pin::{pin, Pin},
+    future::{Future, pending, poll_fn},
+    pin::{Pin, pin},
     sync::Arc,
-    task::{ready, Context, Poll, Waker},
+    task::{Context, Poll, Waker, ready},
 };
 
 use bytes::{Buf, Bytes};
 use futures_util::future::BoxFuture;
-use http::{header, HeaderMap, Method, Request, Response, StatusCode};
+use http::{HeaderMap, Method, Request, Response, StatusCode, header};
+use http_body::Body;
+use http_body_util::combinators::BoxBody;
 use http3::{
+    ConnectionState,
     client::{RequestStream, SendRequest},
     error::{Code, StreamError},
     ext::Protocol,
-    quic, ConnectionState,
+    quic,
 };
-use http_body::Body;
-use http_body_util::combinators::BoxBody;
 use pin_project_lite::pin_project;
 use tokio::sync::oneshot;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
@@ -33,13 +34,13 @@ use super::{
     upgrade::{self, UpgradeTask},
 };
 use crate::{
+    Error, Result,
     body::Incoming,
     dispatch::TrySendError,
     error::BoxError,
     ext::OnPreserveHeader,
     proto::headers,
     rt::{self, bounds::Http3ClientConnExec},
-    Error, Result,
 };
 #[cfg(feature = "http3-datagram")]
 use crate::{
@@ -279,23 +280,23 @@ where
         }
 
         #[cfg(feature = "http3-datagram")]
-        if let Some(datagrams) = &mut this.datagrams {
-            if let Poll::Ready(result) = datagrams.as_mut().poll(cx) {
-                this.datagrams = None;
-                if let Err((code, error)) = result {
-                    // Publish the cause before transport close wakes exchanges.
-                    this.shared.terminate(error);
-                    rt::quic::OpenStreams::close(
-                        &mut this.opener,
-                        code.value(),
-                        b"HTTP Datagram driver failed",
-                    );
-                    let error = this.shared.error();
-                    return this.finish(Err(error));
-                }
-                if let Some(registry) = &this.shared.datagrams {
-                    registry.close();
-                }
+        if let Some(datagrams) = &mut this.datagrams
+            && let Poll::Ready(result) = datagrams.as_mut().poll(cx)
+        {
+            this.datagrams = None;
+            if let Err((code, error)) = result {
+                // Publish the cause before transport close wakes exchanges.
+                this.shared.terminate(error);
+                rt::quic::OpenStreams::close(
+                    &mut this.opener,
+                    code.value(),
+                    b"HTTP Datagram driver failed",
+                );
+                let error = this.shared.error();
+                return this.finish(Err(error));
+            }
+            if let Some(registry) = &this.shared.datagrams {
+                registry.close();
             }
         }
 
@@ -428,11 +429,11 @@ where
                 || request.extensions().get::<Protocol>().is_none())
         {
             return Err(rejected(
-            Error::new_user_invalid_request(
-                "Datagram requests require an Extended CONNECT and a Datagram-enabled connection",
-            ),
-            request,
-        ));
+                Error::new_user_invalid_request(
+                    "Datagram requests require an Extended CONNECT and a Datagram-enabled connection",
+                ),
+                request,
+            ));
         }
 
         if connect && !request.body().is_end_stream() {
@@ -463,10 +464,10 @@ where
 
         let length = if length.is_none() && !connect {
             let size = request.body().size_hint().exact();
-            if let Some(size) = size {
-                if size != 0 || headers::method_has_defined_payload_semantics(request.method()) {
-                    headers::set_content_length_if_missing(request.headers_mut(), size);
-                }
+            if let Some(size) = size
+                && (size != 0 || headers::method_has_defined_payload_semantics(request.method()))
+            {
+                headers::set_content_length_if_missing(request.headers_mut(), size);
             }
             size
         } else {
@@ -625,24 +626,24 @@ where
 
         // The peer's response packet normally carries the acknowledgment of the
         // packet that held HEADERS and FIN; only a late one needs a task.
-        if let Some(mut send) = finished.take() {
-            if send.finished {
-                match send
-                    .stream
-                    .poll_stopped(&mut Context::from_waker(Waker::noop()))
-                {
-                    Poll::Ready(Ok(_)) => {}
-                    Poll::Ready(Err(error)) => {
-                        return Err(lost(shared.error_or(Error::new_h3(error))));
-                    }
-                    Poll::Pending => {
-                        pipe = Some(Box::pin(async move {
-                            poll_fn(|cx| send.stream.poll_stopped(cx))
-                                .await
-                                .map(|_| ())
-                                .map_err(Error::new_h3)
-                        }));
-                    }
+        if let Some(mut send) = finished.take()
+            && send.finished
+        {
+            match send
+                .stream
+                .poll_stopped(&mut Context::from_waker(Waker::noop()))
+            {
+                Poll::Ready(Ok(_)) => {}
+                Poll::Ready(Err(error)) => {
+                    return Err(lost(shared.error_or(Error::new_h3(error))));
+                }
+                Poll::Pending => {
+                    pipe = Some(Box::pin(async move {
+                        poll_fn(|cx| send.stream.poll_stopped(cx))
+                            .await
+                            .map(|_| ())
+                            .map_err(Error::new_h3)
+                    }));
                 }
             }
         }

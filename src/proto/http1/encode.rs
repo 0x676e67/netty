@@ -1,15 +1,15 @@
 use std::{collections::HashSet, fmt, io::IoSlice};
 
 use bytes::{
-    buf::{Chain, Take},
     Buf, Bytes,
+    buf::{Chain, Take},
 };
 use http::{
+    HeaderMap, HeaderName,
     header::{
         AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE,
         CONTENT_TYPE, HOST, MAX_FORWARDS, SET_COOKIE, TE, TRAILER, TRANSFER_ENCODING,
     },
-    HeaderMap, HeaderName,
 };
 
 use super::{io::WriteBuf, role::write_headers};
@@ -398,11 +398,11 @@ impl std::error::Error for NotEof {}
 mod tests {
     use bytes::BufMut;
     use http::{
+        HeaderMap, HeaderName, HeaderValue,
         header::{
             AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE,
             CONTENT_TYPE, HOST, MAX_FORWARDS, SET_COOKIE, TE, TRAILER, TRANSFER_ENCODING,
         },
-        HeaderMap, HeaderName, HeaderValue,
     };
 
     use super::{super::io::Cursor, Encoder};

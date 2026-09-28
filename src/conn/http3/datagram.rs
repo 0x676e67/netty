@@ -4,7 +4,7 @@
 //! response, [`on`] takes the session, including its reliable Capsule byte stream.
 //! Capsule and CONNECT-UDP Context ID encoding belong to the caller.
 use std::{
-    future::{poll_fn, Future},
+    future::{Future, poll_fn},
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},

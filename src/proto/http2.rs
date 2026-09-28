@@ -8,20 +8,20 @@ use std::{
     future::Future,
     io::{Cursor, IoSlice},
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
     time::Duration,
 };
 
 use bytes::Buf;
+use http_body::Body;
+use http2::SendStream;
 pub use http2::frame::{
     Priorities, PrioritiesBuilder, Priority, PseudoId, PseudoOrder, Setting, SettingId,
     SettingsOrder, SettingsOrderBuilder, StreamDependency, StreamId,
 };
-use http2::SendStream;
-use http_body::Body;
 use pin_project_lite::pin_project;
 
-use crate::{error::BoxError, Error, Result};
+use crate::{Error, Result, error::BoxError};
 
 /// Default initial stream window size defined in HTTP2 spec.
 const SPEC_WINDOW_SIZE: u32 = 65_535;

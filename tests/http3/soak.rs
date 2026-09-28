@@ -2,8 +2,8 @@
 use std::{
     future::Future,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -281,7 +281,13 @@ async fn cancellation_and_close() {
     })
     .await
     .unwrap();
-    println!("soak elapsed={:.3} queued_cancel={} body_cancel={} complete={} server_complete={} server_reset={} active=0",
-        started.elapsed().as_secs_f64(), totals[0], totals[1], totals[2],
-        completed.load(Ordering::Relaxed), reset.load(Ordering::Relaxed));
+    println!(
+        "soak elapsed={:.3} queued_cancel={} body_cancel={} complete={} server_complete={} server_reset={} active=0",
+        started.elapsed().as_secs_f64(),
+        totals[0],
+        totals[1],
+        totals[2],
+        completed.load(Ordering::Relaxed),
+        reset.load(Ordering::Relaxed)
+    );
 }

@@ -1,15 +1,15 @@
 use std::{
-    future::{poll_fn, Future},
+    future::{Future, poll_fn},
     pin::pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     task::{Context, Waker},
     time::Instant,
 };
 
-use futures_util::task::{waker_ref, ArcWake};
+use futures_util::task::{ArcWake, waker_ref};
 
 #[derive(Default)]
 pub(super) struct Stats {

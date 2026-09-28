@@ -118,13 +118,15 @@ async fn handshake_accepts_send_only_executor_and_non_unpin_backend() {
             )
             .await
             .unwrap();
-        assert!(response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty());
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
         drop(tx);
         client_driver.as_mut().graceful_shutdown();
         client_driver.await.unwrap();

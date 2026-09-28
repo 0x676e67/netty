@@ -6,7 +6,7 @@ use std::{
 };
 
 use futures_util::{
-    future::{poll_fn, BoxFuture},
+    future::{BoxFuture, poll_fn},
     task::AtomicWaker,
 };
 use netty::rt::quic::{self as rt, DatagramConnection, OpenStreams};
@@ -188,26 +188,26 @@ async fn check_cause(response_started: bool) {
             drop(stream);
             server
         });
-        let mut response = std::pin::pin!(tx.try_send_request(
-            Request::get("https://localhost/pending")
-                .body(Full::new(Bytes::new()))
-                .unwrap()
-        ));
+        let mut response = std::pin::pin!(
+            tx.try_send_request(
+                Request::get("https://localhost/pending")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap()
+            )
+        );
         let mut head = None;
         let mut seen = false;
         poll_fn(|cx| {
             jobs.poll(cx);
-            if head.is_none() {
-                if let Poll::Ready(result) = response.as_mut().poll(cx) {
-                    assert!(response_started);
-                    head = Some(result.unwrap());
-                }
+            if head.is_none()
+                && let Poll::Ready(result) = response.as_mut().poll(cx)
+            {
+                assert!(response_started);
+                head = Some(result.unwrap());
             }
-            if !seen {
-                if let Poll::Ready(result) = Pin::new(&mut received).poll(cx) {
-                    result.unwrap();
-                    seen = true;
-                }
+            if !seen && let Poll::Ready(result) = Pin::new(&mut received).poll(cx) {
+                result.unwrap();
+                seen = true;
             }
             if seen && (!response_started || head.is_some()) {
                 Poll::Ready(())

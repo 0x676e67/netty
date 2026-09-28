@@ -3,7 +3,7 @@
 //! [`Compat`](crate::rt::quic::Compat): the backend implements the crate's
 //! contract, and this adapter satisfies http3's.
 
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use bytes::Buf;
 use http3::quic::WriteBuf;
