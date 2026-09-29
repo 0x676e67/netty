@@ -23,7 +23,7 @@ use std::{
     future::Future,
     io::{self, Cursor},
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::{Buf, Bytes};
@@ -33,7 +33,7 @@ use http2::{Reason, RecvStream, SendStream};
 use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use super::{ping::Recorder, SendBuf};
+use super::{SendBuf, ping::Recorder};
 
 pub(super) fn pair<B>(
     send_stream: SendStream<SendBuf<B>>,
@@ -108,7 +108,7 @@ where
                     ))));
                 }
                 Poll::Ready(Err(err)) => {
-                    return Poll::Ready(Err(crate::Error::new_body_write(err)))
+                    return Poll::Ready(Err(crate::Error::new_body_write(err)));
                 }
                 Poll::Pending => (),
             }
@@ -198,7 +198,7 @@ impl AsyncRead for H2Upgraded {
                 match ready!(self.recv_stream.poll_data(cx)) {
                     None => return Poll::Ready(Ok(())),
                     Some(Ok(buf)) if buf.is_empty() && !self.recv_stream.is_end_stream() => {
-                        continue
+                        continue;
                     }
                     Some(Ok(buf)) => {
                         self.ping.record_data(buf.len());
@@ -211,7 +211,7 @@ impl AsyncRead for H2Upgraded {
                                 Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
                             }
                             _ => Err(h2_to_io_error(e)),
-                        })
+                        });
                     }
                 }
             };

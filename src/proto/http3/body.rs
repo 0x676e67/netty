@@ -3,26 +3,26 @@
 use std::{
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
-    task::{ready, Context, Poll, Waker},
+    task::{Context, Poll, Waker, ready},
 };
 
 use bytes::{Buf, Bytes};
 use futures_util::task::AtomicWaker;
-use http3::{error::Code, quic};
 use http_body::{Body, Frame, SizeHint};
+use http3::{error::Code, quic};
 
 #[cfg(feature = "http3-datagram")]
 use super::client::invalid_datagram_error;
 #[cfg(feature = "http3-datagram")]
 use super::datagram::{Registration, RequestState};
 use super::{
-    client::{consume_length, RecvGuard},
+    client::{RecvGuard, consume_length},
     shared::Active,
 };
-use crate::{lock::LockResultExt, Error, Result};
+use crate::{Error, Result, lock::LockResultExt};
 
 /// Response body handed to the application; [`Incoming`](crate::body::Incoming)
 /// boxes it. Dropping it stops receiving without canceling pending sending.

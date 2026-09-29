@@ -1,7 +1,7 @@
 use std::{
     fmt,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::Bytes;
@@ -9,8 +9,8 @@ use http_body::{Body, Frame, SizeHint};
 #[cfg(feature = "http3")]
 use http_body_util::combinators::BoxBody;
 
-use super::{chan, DecodedLength};
-use crate::{proto::http2::ping, Error, Result};
+use super::{DecodedLength, chan};
+use crate::{Error, Result, proto::http2::ping};
 
 /// A stream of [`Bytes`], used when receiving bodies from the network.
 ///

@@ -2,10 +2,10 @@
 
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::{Buf, Bytes};

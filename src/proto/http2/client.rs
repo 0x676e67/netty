@@ -3,7 +3,7 @@ use std::{
     future::Future,
     marker::PhantomData,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::Bytes;
@@ -17,31 +17,30 @@ use futures_util::{
     stream::{FusedStream, Stream},
 };
 use http::{Method, Request, Response, StatusCode};
-use http2::{
-    client::{Builder, Connection, ResponseFuture, SendRequest},
-    SendStream,
-};
 use http_body::Body;
+use http2::{
+    SendStream,
+    client::{Builder, Connection, ResponseFuture, SendRequest},
+};
 use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::{
-    ping,
+    PipeToSendStream, SendBuf, ping,
     ping::{Ponger, Recorder},
-    PipeToSendStream, SendBuf,
 };
 use crate::{
+    Error, Result,
     body::{self, Incoming},
     dispatch::{self, Callback, SendWhen, TrySendError},
     error::BoxError,
     ext::OnPreserveHeader,
-    proto::{headers, Dispatched},
+    proto::{Dispatched, headers},
     rt::{
-        bounds::{Http2ClientConnExec, Http2UpgradedExec},
         Time,
+        bounds::{Http2ClientConnExec, Http2UpgradedExec},
     },
     upgrade::{self, Upgraded},
-    Error, Result,
 };
 
 /// Receiver for HTTP/2 client requests
@@ -609,10 +608,10 @@ where
                     let (head, body) = req.into_parts();
                     let mut req = ::http::Request::from_parts(head, ());
                     headers::strip_connection_headers(req.headers_mut(), true);
-                    if let Some(len) = body.size_hint().exact() {
-                        if len != 0 || headers::method_has_defined_payload_semantics(req.method()) {
-                            headers::set_content_length_if_missing(req.headers_mut(), len);
-                        }
+                    if let Some(len) = body.size_hint().exact()
+                        && (len != 0 || headers::method_has_defined_payload_semantics(req.method()))
+                    {
+                        headers::set_content_length_if_missing(req.headers_mut(), len);
                     }
 
                     // Sort headers

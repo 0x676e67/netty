@@ -9,7 +9,7 @@ use http_body::Body;
 use pin_project_lite::pin_project;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{body::Incoming, proto::http2::client::ResponseFutMap, Error};
+use super::{Error, body::Incoming, proto::http2::client::ResponseFutMap};
 
 type RetryPromise<T, U> = oneshot::Receiver<Result<U, TrySendError<T>>>;
 

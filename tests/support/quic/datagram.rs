@@ -1,18 +1,18 @@
 use std::{
     sync::Arc,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::Bytes;
 use futures_util::{
-    stream::{self, BoxStream},
     StreamExt,
+    stream::{self, BoxStream},
 };
 use netty::rt::quic::{
     ConnectionError, DatagramConnection, DatagramError, RecvDatagram, SendDatagram,
 };
 
-use super::{backend, Connection};
+use super::{Connection, backend};
 
 /// Sends complete QUIC Datagram payloads over the adapted connection.
 pub struct Sender(backend::Connection);

@@ -3,7 +3,7 @@ use std::{
     future::Future,
     marker::Unpin,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::{Buf, Bytes};
@@ -13,12 +13,12 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::{BodyLength, Conn, Http1Transaction, MessageHead, Wants};
 use crate::{
+    Error, Result,
     body::{self, DecodedLength, Incoming},
     dispatch::{self, TrySendError},
     error::BoxError,
     proto::{self, Dispatched, RequestHead},
     upgrade::OnUpgrade,
-    Error, Result,
 };
 
 pub(crate) struct Dispatcher<D, Bs: Body, I, T> {

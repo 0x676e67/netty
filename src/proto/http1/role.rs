@@ -5,18 +5,18 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use http::{
-    header::{self, Entry, HeaderMap, HeaderName, HeaderValue},
     Method, StatusCode, Version,
+    header::{self, Entry, HeaderMap, HeaderName, HeaderValue},
 };
-use smallvec::{smallvec, smallvec_inline, SmallVec};
+use smallvec::{SmallVec, smallvec, smallvec_inline};
 
 use super::{Encode, Encoder, Http1Transaction, ParseContext, ParsedMessage};
 use crate::{
+    Error, Result,
     body::DecodedLength,
     error::Parse,
     ext::{OnPreserveHeader, ReasonPhrase},
-    proto::{headers, BodyLength, MessageHead, RequestHead, RequestLine},
-    Error, Result,
+    proto::{BodyLength, MessageHead, RequestHead, RequestLine, headers},
 };
 
 /// totally scientific
@@ -79,10 +79,10 @@ where
 
     trace_span!("parse_headers");
 
-    if let Some(prev_len) = prev_len {
-        if !is_complete_fast(bytes, prev_len) {
-            return Ok(None);
-        }
+    if let Some(prev_len) = prev_len
+        && !is_complete_fast(bytes, prev_len)
+    {
+        return Ok(None);
     }
 
     T::parse(bytes, ctx)
@@ -255,10 +255,10 @@ impl Http1Transaction for Client {
                 }));
             }
 
-            if head.subject.is_informational() {
-                if let Some(callback) = ctx.on_informational {
-                    callback.call(head.into_response(()));
-                }
+            if head.subject.is_informational()
+                && let Some(callback) = ctx.on_informational
+            {
+                callback.call(head.into_response(()));
             }
 
             // Parsing a 1xx response could have consumed the buffer, check if
@@ -272,8 +272,7 @@ impl Http1Transaction for Client {
     fn encode(msg: Encode<'_, Self::Outgoing>, dst: &mut Vec<u8>) -> Result<Encoder> {
         trace!(
             "Client::encode method={:?}, body={:?}",
-            msg.head.subject.0,
-            msg.body
+            msg.head.subject.0, msg.body
         );
 
         *msg.req_method = Some(msg.head.subject.0.clone());

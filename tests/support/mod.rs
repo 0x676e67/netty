@@ -4,20 +4,20 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 pub use futures_util::{
-    future, FutureExt as _, StreamExt as _, TryFutureExt as _, TryStreamExt as _,
+    FutureExt as _, StreamExt as _, TryFutureExt as _, TryStreamExt as _, future,
 };
 use http_body_util::{BodyExt, Full};
 pub use hyper::HeaderMap;
 use hyper::{
-    body::Incoming as IncomingBody, server, service::service_fn, Request, Response, Version,
+    Request, Response, Version, body::Incoming as IncomingBody, server, service::service_fn,
 };
 use tokio::net::{TcpListener, TcpStream};
 

@@ -23,9 +23,9 @@ use futures_util::future::{self, FutureExt, LocalBoxFuture, TryFuture, TryFuture
 use http::uri::PathAndQuery;
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{
+    Method, Request, StatusCode, Uri, Version,
     body::Frame,
     header::{HeaderMap, HeaderName, HeaderValue},
-    Method, Request, StatusCode, Uri, Version,
 };
 use support::TokioIo;
 use tokio::net::TcpStream;
@@ -410,9 +410,7 @@ macro_rules! test {
 }
 
 macro_rules! __client_req_prop {
-    ($req_builder:ident, $body:ident, $addr:ident, headers: $map:tt) => {{
-        __client_req_header!($req_builder, $map)
-    }};
+    ($req_builder:ident, $body:ident, $addr:ident, headers: $map:tt) => {{ __client_req_header!($req_builder, $map) }};
 
     ($req_builder:ident, $body:ident, $addr:ident, method: $method:ident) => {{
         $req_builder = $req_builder.method(Method::$method);
@@ -1505,8 +1503,8 @@ mod conn {
         net::{SocketAddr, TcpListener},
         pin::Pin,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         task::{Context, Poll},
         thread,
@@ -1515,14 +1513,14 @@ mod conn {
 
     use bytes::{Buf, Bytes};
     use futures_channel::{mpsc, oneshot};
-    use futures_util::future::{self, poll_fn, FutureExt, TryFutureExt};
+    use futures_util::future::{self, FutureExt, TryFutureExt, poll_fn};
     use http::{HeaderMap, HeaderName};
     use http_body_util::{BodyExt, Empty, Full, StreamBody};
     use hyper::{
+        Method, Request, Response, StatusCode,
         body::{Body, Frame},
         rt::Timer,
         upgrade::OnUpgrade,
-        Method, Request, Response, StatusCode,
     };
     use netty::{
         conn::{self},
@@ -1535,7 +1533,7 @@ mod conn {
         net::{TcpListener as TkTcpListener, TcpStream},
     };
 
-    use super::{concat, s, support, tcp_connect, FutureHyperExt};
+    use super::{FutureHyperExt, concat, s, support, tcp_connect};
     use crate::support::{header::OrigHeaderMap, rt};
 
     fn setup_logger() {
@@ -1677,13 +1675,15 @@ mod conn {
                     .unwrap();
                 assert_eq!(response.status(), StatusCode::OK);
                 assert_eq!(response.headers()["a"], "b");
-                assert!(response
-                    .into_body()
-                    .collect()
-                    .await
-                    .unwrap()
-                    .to_bytes()
-                    .is_empty());
+                assert!(
+                    response
+                        .into_body()
+                        .collect()
+                        .await
+                        .unwrap()
+                        .to_bytes()
+                        .is_empty()
+                );
                 drop(client);
                 connection.await.unwrap().unwrap();
                 relay.await.unwrap();
@@ -2984,8 +2984,8 @@ mod conn {
     #[tokio::test]
     async fn client_on_informational_ext() {
         use std::sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         };
         let (server, addr) = setup_std_test_server();
 
@@ -3029,8 +3029,8 @@ mod conn {
     #[tokio::test]
     async fn client_on_preserve_header_ext() {
         use std::sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         };
         let (server, addr) = setup_std_test_server();
 

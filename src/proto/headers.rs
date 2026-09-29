@@ -1,10 +1,10 @@
 use bytes::BytesMut;
 use http::{
-    header::{
-        HeaderName, HeaderValue, ValueIter, CONNECTION, CONTENT_LENGTH, TE, TRANSFER_ENCODING,
-        UPGRADE,
-    },
     HeaderMap, Method,
+    header::{
+        CONNECTION, CONTENT_LENGTH, HeaderName, HeaderValue, TE, TRANSFER_ENCODING, UPGRADE,
+        ValueIter,
+    },
 };
 
 // List of connection headers from RFC 9110 Section 7.6.1
@@ -172,10 +172,10 @@ pub(super) fn is_chunked(mut encodings: ValueIter<'_, HeaderValue>) -> bool {
     // chunked must always be the last encoding, according to spec
     if let Some(line) = encodings.next_back() {
         // chunked must always be the last encoding, according to spec
-        if let Ok(s) = line.to_str() {
-            if let Some(encoding) = s.rsplit(',').next() {
-                return encoding.trim().eq_ignore_ascii_case("chunked");
-            }
+        if let Ok(s) = line.to_str()
+            && let Some(encoding) = s.rsplit(',').next()
+        {
+            return encoding.trim().eq_ignore_ascii_case("chunked");
         }
     }
 

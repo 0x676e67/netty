@@ -2,28 +2,29 @@ use std::{
     fmt, io,
     marker::{PhantomData, Unpin},
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::{Buf, Bytes};
 use http::{
-    header::{Entry, HeaderValue, CONNECTION, TE},
     HeaderMap, Method, Version,
+    header::{CONNECTION, Entry, HeaderValue, TE},
 };
 use http_body::Frame;
 use httparse::ParserConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::{
+    Decoder, Encode, Http1Transaction, ParseContext, Wants,
     encode::{EncodedBuf, Encoder},
     io::Buffered,
-    Decoder, Encode, Http1Transaction, ParseContext, Wants,
 };
 use crate::{
+    Error, Result,
     body::DecodedLength,
     ext::OnInformational,
-    proto::{headers, BodyLength, MessageHead},
-    upgrade, Error, Result,
+    proto::{BodyLength, MessageHead, headers},
+    upgrade,
 };
 
 /// This handles a connection, which will have been established over an

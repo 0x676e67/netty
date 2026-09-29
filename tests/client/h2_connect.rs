@@ -378,9 +378,11 @@ async fn h2_connect_reset_during_backpressure() {
     drop(server);
     let error = assert_ready!(driver.poll(&mut write)).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::Other);
-    assert!(error
-        .get_ref()
-        .unwrap()
-        .downcast_ref::<netty::Error>()
-        .is_some());
+    assert!(
+        error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<netty::Error>()
+            .is_some()
+    );
 }

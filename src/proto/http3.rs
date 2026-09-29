@@ -11,7 +11,7 @@
 //! # Ok::<(), http::Error>(())
 //! ```
 
-pub use http3::{ext::Protocol, PseudoId, PseudoOrder, PseudoOrderBuilder, SettingId};
+pub use http3::{PseudoId, PseudoOrder, PseudoOrderBuilder, SettingId, ext::Protocol};
 
 pub(crate) mod body;
 pub(crate) mod client;

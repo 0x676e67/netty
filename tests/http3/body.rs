@@ -133,13 +133,15 @@ async fn last_sender_drop_preserves_connect_waiting_for_settings() {
         });
         let response = waiting.await.unwrap();
         assert_eq!(response.status(), 403);
-        assert!(response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty());
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
         drive.await.unwrap();
         peer.await.unwrap();
     })
@@ -453,13 +455,15 @@ async fn upload_failure_cancels_unread_response_and_releases_request() {
                 )
                 .await
                 .unwrap();
-            assert!(response
-                .into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes()
-                .is_empty());
+            assert!(
+                response
+                    .into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .is_empty()
+            );
             if poll_body {
                 assert!(frame.is_woken(), "upload failure must wake a pending Body");
             }
@@ -1130,13 +1134,15 @@ async fn upload_holds_admission_until_finished() {
             .await
             .unwrap();
         // The response is read to its end while the upload is still pending.
-        assert!(response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty());
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
         let mut second = tokio_test::task::spawn(
             tx.try_send_request(
                 Request::get("https://localhost/queued")
@@ -1148,13 +1154,15 @@ async fn upload_holds_admission_until_finished() {
         assert!(second.poll().is_pending());
         upload.send(()).unwrap();
         let response = second.await.unwrap();
-        assert!(response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty());
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
         drop(tx);
         drive.as_mut().graceful_shutdown();
         drive.await.unwrap();
@@ -1185,9 +1193,11 @@ async fn unpolled_request_does_not_block_graceful_shutdown() {
         drop(tx);
         let mut driver = Box::pin(driver);
         // Let the automatic drain park on the unpolled reservation first.
-        assert!(timeout(Duration::from_millis(50), driver.as_mut())
-            .await
-            .is_err());
+        assert!(
+            timeout(Duration::from_millis(50), driver.as_mut())
+                .await
+                .is_err()
+        );
         driver.as_mut().graceful_shutdown();
         driver.await.unwrap();
         let returned = unpolled.await.unwrap_err().take_message().unwrap();

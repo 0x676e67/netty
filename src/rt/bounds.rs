@@ -84,7 +84,7 @@ mod h3_client {
 
     use crate::{
         proto::http3::client::H3ClientFuture,
-        rt::{quic, Executor},
+        rt::{Executor, quic},
     };
 
     /// An executor to spawn HTTP/3 futures for the client: the connection

@@ -3,7 +3,7 @@
 use std::{
     future::Future,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::Bytes;
@@ -13,14 +13,14 @@ use httparse::ParserConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
+    Error, Result,
     body::Incoming,
     dispatch::{self, TrySendError},
     error::BoxError,
     proto::{
         self,
-        http1::{self, conn::Conn, role::Client, Http1Options},
+        http1::{self, Http1Options, conn::Conn, role::Client},
     },
-    Error, Result,
 };
 
 /// The sender side of an established connection.
@@ -152,7 +152,7 @@ where
     pub fn try_send_request(
         &mut self,
         req: Request<B>,
-    ) -> impl Future<Output = Result<Response<Incoming>, TrySendError<Request<B>>>> {
+    ) -> impl Future<Output = Result<Response<Incoming>, TrySendError<Request<B>>>> + use<B> {
         let sent = self.dispatch.try_send(req);
         async move {
             match sent {
@@ -211,10 +211,11 @@ where
     pub async fn without_shutdown(self) -> crate::Result<Parts<T>> {
         let mut conn = Some(self);
         std::future::poll_fn(move |cx| -> Poll<crate::Result<Parts<T>>> {
-            ready!(conn
-                .as_mut()
-                .expect("client connection polled after completion")
-                .poll_without_shutdown(cx))?;
+            ready!(
+                conn.as_mut()
+                    .expect("client connection polled after completion")
+                    .poll_without_shutdown(cx)
+            )?;
             Poll::Ready(Ok(conn
                 .take()
                 .expect("client connection missing before completion")

@@ -12,8 +12,8 @@ mod tls;
 use std::{
     future::Future,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -462,7 +462,9 @@ fn main() {
         .enable_all()
         .build()
         .unwrap();
-    println!("round,implementation,concurrency,body_bytes,requests,seconds,requests_per_second,p50_us_upper,p99_us_upper");
+    println!(
+        "round,implementation,concurrency,body_bytes,requests,seconds,requests_per_second,p50_us_upper,p99_us_upper"
+    );
     runtime.block_on(async {
         for round in 0..rounds {
             for bytes in [0, 128 * 1024] {

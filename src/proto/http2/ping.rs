@@ -28,10 +28,10 @@ use std::{
 use http2::{Ping, PingPong};
 
 use crate::{
+    Result,
     error::{Error, Kind, TimedOut},
     lock::LockResultExt,
     rt::{Sleep, Time, Timer},
-    Result,
 };
 
 type WindowSize = u32;
@@ -330,12 +330,12 @@ impl Future for Ponger {
                 debug!("pong error: {}", _e);
             }
             Poll::Pending => {
-                if let Some(ref mut ka) = this.keep_alive {
-                    if let Err(KeepAliveTimedOut) = ka.maybe_timeout(cx) {
-                        this.keep_alive = None;
-                        locked.is_keep_alive_timed_out = true;
-                        return Poll::Ready(Ponged::KeepAliveTimedOut);
-                    }
+                if let Some(ref mut ka) = this.keep_alive
+                    && let Err(KeepAliveTimedOut) = ka.maybe_timeout(cx)
+                {
+                    this.keep_alive = None;
+                    locked.is_keep_alive_timed_out = true;
+                    return Poll::Ready(Ponged::KeepAliveTimedOut);
                 }
             }
         }

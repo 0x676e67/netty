@@ -6,7 +6,7 @@ use std::{
     future::Future,
     io,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::{Buf, Bytes};
@@ -20,14 +20,14 @@ use tokio::{
 use tokio_util::sync::{CancellationToken, PollSender, WaitForCancellationFutureOwned};
 
 use super::{
-    client::{invalid_datagram_error, H3ClientFuture, RecvGuard, SendGuard, CHUNK},
+    client::{CHUNK, H3ClientFuture, RecvGuard, SendGuard, invalid_datagram_error},
     shared::Active,
 };
 use crate::{
-    body::{chan, Incoming},
-    rt::{self, bounds::Http3ClientConnExec},
-    upgrade::{pending, Upgraded},
     Error, Result,
+    body::{Incoming, chan},
+    rt::{self, bounds::Http3ClientConnExec},
+    upgrade::{Upgraded, pending},
 };
 #[cfg(feature = "http3-datagram")]
 use crate::{
