@@ -27,7 +27,8 @@ pub(crate) struct Dispatcher<D, Bs: Body, I, T> {
     body_tx: SenderGuard,
     body_rx: Pin<Box<Option<Bs>>>,
     is_closing: bool,
-    /// Set when the dispatch gave up on the exchange; the IO is then dropped without shutdown.
+    /// Set when the dispatch gave up on the exchange; shutdown is skipped, so neither buffered
+    /// writes nor a TLS close_notify are flushed.
     is_aborted: bool,
 }
 
@@ -143,7 +144,9 @@ where
             if let Some(pending) = self.conn.pending_upgrade() {
                 self.conn.take_error()?;
                 return Poll::Ready(Ok(Dispatched::Upgrade(pending)));
-            } else if should_shutdown && !self.is_aborted {
+            } else if should_shutdown && !self.is_aborted && !self.conn.can_write_body() {
+                // A message still mid-body once reading closed can never complete, so only a
+                // finished one is flushed before shutdown.
                 ready!(self.conn.poll_shutdown(cx)).map_err(Error::new_shutdown)?;
             }
             self.conn.take_error()?;

@@ -2220,38 +2220,60 @@ mod conn {
     }
 
     #[tokio::test]
-    async fn http1_canceled_upload_closes_without_flush() {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            // The peer never reads, so neither a flush nor a shutdown could ever finish.
-            let (client_io, server_io) = tokio::io::duplex(1024);
-            let (mut client, connection) = conn::http1::Builder::default()
-                .handshake(client_io)
-                .await
-                .unwrap();
-            let mut connection = std::pin::pin!(connection);
-            let body = StreamBody::new(futures_util::stream::repeat_with(|| {
-                Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from(vec![b'a'; 4096])))
-            }));
-            let mut request =
-                Box::pin(client.try_send_request(Request::post("/").body(body).unwrap()));
+    async fn http1_abandoned_upload_closes_without_flush() {
+        // The peer never reads, so neither a flush nor a shutdown could ever finish.
+        for early_response in [false, true] {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let (client_io, mut server_io) = tokio::io::duplex(1024);
+                let (mut client, connection) = conn::http1::Builder::default()
+                    .handshake(client_io)
+                    .await
+                    .unwrap();
+                let mut connection = std::pin::pin!(connection);
+                let body = StreamBody::new(futures_util::stream::repeat_with(|| {
+                    Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from(vec![b'a'; 4096])))
+                }));
+                let mut request =
+                    Box::pin(client.try_send_request(Request::post("/").body(body).unwrap()));
 
-            // Write until the transport is full, then cancel the request mid-body.
-            let filled = tokio::time::timeout(
-                Duration::from_millis(100),
-                poll_fn(|cx| {
-                    assert!(connection.as_mut().poll(cx).is_pending());
-                    request.as_mut().poll(cx)
-                }),
-            )
-            .await;
-            assert!(filled.is_err(), "the request must still be uploading");
-            drop(request);
+                // Write until the transport is full.
+                let filled = tokio::time::timeout(
+                    Duration::from_millis(100),
+                    poll_fn(|cx| {
+                        assert!(connection.as_mut().poll(cx).is_pending());
+                        request.as_mut().poll(cx)
+                    }),
+                )
+                .await;
+                assert!(filled.is_err(), "the request must still be uploading");
 
-            connection.await.unwrap();
-            drop(server_io);
-        })
-        .await
-        .expect("a canceled upload must not wait for the peer to read");
+                if early_response {
+                    // Drop an early response whose body never completes instead of canceling.
+                    server_io
+                        .write_all(
+                            b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 10\r\n\r\nab",
+                        )
+                        .await
+                        .unwrap();
+                    let Ok(response) = poll_fn(|cx| {
+                        assert!(connection.as_mut().poll(cx).is_pending());
+                        request.as_mut().poll(cx)
+                    })
+                    .await
+                    else {
+                        panic!("the early response must arrive");
+                    };
+                    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+                    drop(response);
+                }
+                drop(request);
+
+                connection.await.unwrap();
+                drop(server_io);
+            })
+            .await
+            .expect("an abandoned upload must not wait for the peer to read");
+        }
     }
 
     #[tokio::test]
