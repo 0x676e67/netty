@@ -1,3 +1,24 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## netty [0.2.6](https://github.com/0x676e67/netty/compare/v0.2.5...v0.2.6) - 2026-10-03
+
+
+
+### 🐛 Bug Fixes
+
+- *(http1)* Close canceled connections without flushing ([#145](https://github.com/0x676e67/netty/issues/145)) - ([f8652dd](https://github.com/0x676e67/netty/commit/f8652ddf5e386d66b7f03cceedbc6b319d849762))
+- *(http2)* Do not reserve capacity for idle Upgraded streams ([#140](https://github.com/0x676e67/netty/issues/140)) - ([f598a3e](https://github.com/0x676e67/netty/commit/f598a3edfcc72c4ad0ca7e1a0aff884ee1cff3d7))
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump MSRV to 1.98 and edition to 2024 ([#142](https://github.com/0x676e67/netty/issues/142)) - ([0b1799b](https://github.com/0x676e67/netty/commit/0b1799b6459a72186108bd8808f9ed11e0402999))
 ## [0.2.5] - 2026-09-25
 
 ### 🚀 Features
