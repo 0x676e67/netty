@@ -1504,7 +1504,7 @@ mod conn {
         pin::Pin,
         sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         task::{Context, Poll},
         thread,
@@ -2219,61 +2219,144 @@ mod conn {
         .expect("buffered request should flush before shutdown");
     }
 
-    #[tokio::test]
-    async fn http1_abandoned_upload_closes_without_flush() {
-        // The peer never reads, so neither a flush nor a shutdown could ever finish.
-        for early_response in [false, true] {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                let (client_io, mut server_io) = tokio::io::duplex(1024);
-                let (mut client, connection) = conn::http1::Builder::default()
-                    .handshake(client_io)
-                    .await
-                    .unwrap();
-                let mut connection = std::pin::pin!(connection);
-                let body = StreamBody::new(futures_util::stream::repeat_with(|| {
-                    Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from(vec![b'a'; 4096])))
-                }));
-                let mut request =
-                    Box::pin(client.try_send_request(Request::post("/").body(body).unwrap()));
+    /// A transport whose peer takes the first write and then stops reading: every later write
+    /// stays pending, like a full socket send buffer, and nothing ever wakes it. The peer
+    /// answers once when `respond` is set, with a response body that never completes.
+    struct StallAfterFirstWrite {
+        wrote: bool,
+        stalled: Arc<AtomicBool>,
+        respond: Arc<AtomicBool>,
+    }
 
-                // Write until the transport is full.
-                let filled = tokio::time::timeout(
-                    Duration::from_millis(100),
-                    poll_fn(|cx| {
-                        assert!(connection.as_mut().poll(cx).is_pending());
-                        request.as_mut().poll(cx)
-                    }),
-                )
-                .await;
-                assert!(filled.is_err(), "the request must still be uploading");
+    impl StallAfterFirstWrite {
+        const EARLY_RESPONSE: &'static [u8] =
+            b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 10\r\n\r\nab";
 
-                if early_response {
-                    // Drop an early response whose body never completes instead of canceling.
-                    server_io
-                        .write_all(
-                            b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 10\r\n\r\nab",
-                        )
-                        .await
-                        .unwrap();
-                    let Ok(response) = poll_fn(|cx| {
-                        assert!(connection.as_mut().poll(cx).is_pending());
-                        request.as_mut().poll(cx)
-                    })
-                    .await
-                    else {
-                        panic!("the early response must arrive");
-                    };
-                    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-                    drop(response);
-                }
-                drop(request);
-
-                connection.await.unwrap();
-                drop(server_io);
-            })
-            .await
-            .expect("an abandoned upload must not wait for the peer to read");
+        fn new() -> Self {
+            Self {
+                wrote: false,
+                stalled: Arc::new(AtomicBool::new(false)),
+                respond: Arc::new(AtomicBool::new(false)),
+            }
         }
+    }
+
+    impl tokio::io::AsyncRead for StallAfterFirstWrite {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.respond.swap(false, Ordering::SeqCst) {
+                buf.put_slice(Self::EARLY_RESPONSE);
+                return Poll::Ready(Ok(()));
+            }
+            Poll::Pending
+        }
+    }
+
+    impl tokio::io::AsyncWrite for StallAfterFirstWrite {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if !self.wrote {
+                self.wrote = true;
+                return Poll::Ready(Ok(buf.len()));
+            }
+            self.stalled.store(true, Ordering::SeqCst);
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            // A shutdown has to write too, say a TLS close_notify; the peer never takes it.
+            Poll::Pending
+        }
+    }
+
+    type Boxed<T> = Pin<Box<dyn std::future::Future<Output = T>>>;
+
+    async fn poll_once<T>(future: &mut Boxed<T>) -> Poll<T> {
+        poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
+    }
+
+    /// Start an endless chunked upload and poll the connection once, which writes the head,
+    /// buffers the body and runs into the peer that stopped reading.
+    async fn stalled_upload(
+        transport: StallAfterFirstWrite,
+    ) -> (
+        conn::http1::SendRequest<StreamBody<impl futures_util::Stream>>,
+        Boxed<()>,
+        Boxed<Response<netty::body::Incoming>>,
+    ) {
+        let stalled = transport.stalled.clone();
+        let (mut client, connection) = conn::http1::Builder::default()
+            .handshake(transport)
+            .await
+            .unwrap();
+        let body = StreamBody::new(futures_util::stream::repeat_with(|| {
+            Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from(vec![b'a'; 4096])))
+        }));
+        let request = client.try_send_request(Request::post("/").body(body).unwrap());
+        let mut connection: Boxed<()> = Box::pin(connection.map(|result| result.unwrap()));
+
+        assert!(
+            poll_once(&mut connection).await.is_pending(),
+            "the connection must still be uploading"
+        );
+        assert!(
+            stalled.load(Ordering::SeqCst),
+            "the peer must have refused a body write"
+        );
+        let request = Box::pin(request.map(|result| match result {
+            Ok(response) => response,
+            Err(_) => panic!("the request must not fail"),
+        }));
+        (client, connection, request)
+    }
+
+    #[tokio::test]
+    async fn http1_canceled_upload_closes_without_flush() {
+        let (_client, mut connection, request) = stalled_upload(StallAfterFirstWrite::new()).await;
+
+        // Cancel mid-body. One poll must finish the connection: the peer never wakes it again,
+        // so a connection that still wants to flush or shut down would hang forever.
+        drop(request);
+        assert!(
+            poll_once(&mut connection).await.is_ready(),
+            "a canceled upload must not wait for a peer that stopped reading"
+        );
+    }
+
+    #[tokio::test]
+    async fn http1_early_response_mid_upload_closes_without_flush() {
+        let transport = StallAfterFirstWrite::new();
+        let respond = transport.respond.clone();
+        let (_client, mut connection, mut request) = stalled_upload(transport).await;
+
+        // The peer answers before the upload is done, with a body that never completes.
+        respond.store(true, Ordering::SeqCst);
+        assert!(
+            poll_once(&mut connection).await.is_pending(),
+            "the connection must still be reading the response body"
+        );
+        let Poll::Ready(response) = poll_once(&mut request).await else {
+            panic!("the early response must arrive");
+        };
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        // Abandon the response. One poll must finish the connection, exactly as for a cancel:
+        // the unfinished upload can never complete, so nothing is worth flushing.
+        drop(response);
+        assert!(
+            poll_once(&mut connection).await.is_ready(),
+            "an abandoned upload must not wait for a peer that stopped reading"
+        );
     }
 
     #[tokio::test]
