@@ -357,7 +357,7 @@ impl fmt::Write for ChunkSize {
         (&mut self.bytes[self.len.into()..])
             .write_all(num.as_bytes())
             .expect("&mut [u8].write() cannot error");
-        self.len += num.len() as u8; // safe because bytes is never bigger than 256
+        self.len += num.len() as u8; // safe because bytes is never bigger than 255
         Ok(())
     }
 }
