@@ -57,6 +57,7 @@ where
                 method: None,
                 h1_parser_config: ParserConfig::default(),
                 h1_max_headers: None,
+                h1_max_header_size: None,
                 h09_responses: false,
                 on_informational: None,
                 notify_read: false,
@@ -105,6 +106,11 @@ where
     #[inline]
     pub(crate) fn set_http1_max_headers(&mut self, val: usize) {
         self.state.h1_max_headers = Some(val);
+    }
+
+    #[inline]
+    pub(crate) fn set_http1_max_header_size(&mut self, val: usize) {
+        self.state.h1_max_header_size = Some(val);
     }
 
     #[inline]
@@ -171,6 +177,7 @@ where
                 req_method: &mut self.state.method,
                 h1_parser_config: &self.state.h1_parser_config,
                 h1_max_headers: self.state.h1_max_headers,
+                h1_max_header_size: self.state.h1_max_header_size,
                 h09_responses: self.state.h09_responses,
                 on_informational: &mut self.state.on_informational,
             },
@@ -210,8 +217,7 @@ where
             self.state.reading = Reading::KeepAlive;
             self.try_keep_alive(cx);
         } else if msg.expect_continue && msg.head.version.gt(&Version::HTTP_10) {
-            // TODO: remove this when we land h1_max_header_size support
-            let h1_max_header_size = None;
+            let h1_max_header_size = self.state.h1_max_header_size;
             self.state.reading = Reading::Continue(Decoder::new(
                 msg.decode,
                 self.state.h1_max_headers,
@@ -219,8 +225,7 @@ where
             ));
             wants = wants.add(Wants::EXPECT);
         } else {
-            // TODO: remove this when we land h1_max_header_size support
-            let h1_max_header_size = None;
+            let h1_max_header_size = self.state.h1_max_header_size;
             self.state.reading = Reading::Body(Decoder::new(
                 msg.decode,
                 self.state.h1_max_headers,
@@ -836,6 +841,7 @@ struct State {
     method: Option<Method>,
     h1_parser_config: ParserConfig,
     h1_max_headers: Option<usize>,
+    h1_max_header_size: Option<usize>,
     h09_responses: bool,
     /// If set, called with each 1xx informational response received for
     /// the current request. MUST be unset after a non-1xx response is

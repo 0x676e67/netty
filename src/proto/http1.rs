@@ -55,6 +55,7 @@ pub(crate) struct ParseContext<'a> {
     req_method: &'a mut Option<Method>,
     h1_parser_config: &'a ParserConfig,
     h1_max_headers: Option<usize>,
+    h1_max_header_size: Option<usize>,
     h09_responses: bool,
     on_informational: &'a mut Option<OnInformational>,
 }
@@ -110,6 +111,9 @@ pub struct Http1Options {
 
     /// Maximum number of headers allowed in HTTP/1 responses.
     pub h1_max_headers: Option<usize>,
+
+    /// Maximum size of HTTP/1 response headers and chunked trailers in bytes.
+    pub h1_max_header_size: Option<usize>,
 
     /// Exact size of the read buffer to use for HTTP/1 connections.
     pub h1_read_buf_exact_size: Option<usize>,
@@ -169,6 +173,23 @@ impl Http1OptionsBuilder {
     #[inline]
     pub fn max_headers(mut self, max_headers: usize) -> Self {
         self.opts.h1_max_headers = Some(max_headers);
+        self
+    }
+
+    /// Set the maximum size of response headers (including the status line) in bytes.
+    ///
+    /// If the server sends headers exceeding this limit, the error "message head is too large"
+    /// is returned.
+    ///
+    /// If not configured, then the [`max_buf_size`](Http1OptionsBuilder::max_buf_size) will
+    /// naturally be reached and applied.
+    ///
+    /// This value is also used as the maximum size limit for chunked trailers.
+    ///
+    /// Default is `None`.
+    #[inline]
+    pub fn max_header_size(mut self, val: usize) -> Self {
+        self.opts.h1_max_header_size = Some(val);
         self
     }
 

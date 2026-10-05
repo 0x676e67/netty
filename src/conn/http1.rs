@@ -308,6 +308,10 @@ impl Builder {
             conn.set_http1_max_headers(max_headers);
         }
 
+        if let Some(max_header_size) = self.opts.h1_max_header_size {
+            conn.set_http1_max_header_size(max_header_size);
+        }
+
         // Enable HTTP/0.9 responses if requested
         if self.opts.h09_responses {
             conn.set_h09_responses();

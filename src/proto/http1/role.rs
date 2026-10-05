@@ -154,6 +154,11 @@ impl Http1Transaction for Client {
                 ) {
                     Ok(httparse::Status::Complete(len)) => {
                         trace!("Response.parse Complete({})", len);
+                        if let Some(max_header_size) = ctx.h1_max_header_size
+                            && len > max_header_size
+                        {
+                            return Err(Parse::TooLarge);
+                        }
                         let status = StatusCode::from_u16(res.code.unwrap())?;
 
                         let reason = {
@@ -687,7 +692,38 @@ fn extend(dst: &mut Vec<u8>, data: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::is_complete_fast;
+    use super::*;
+
+    #[test]
+    fn test_h1_client_max_header_size() {
+        let _ = pretty_env_logger::try_init();
+
+        let resp_str = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(resp_str.len(), 38);
+
+        let parse_resp = |max_header_size: Option<usize>| {
+            let mut bytes = BytesMut::from(resp_str);
+            Client::parse(
+                &mut bytes,
+                ParseContext {
+                    cached_headers: &mut None,
+                    req_method: &mut None,
+                    h1_parser_config: &Default::default(),
+                    h1_max_headers: None,
+                    h1_max_header_size: max_header_size,
+                    h09_responses: false,
+                    on_informational: &mut None,
+                },
+            )
+        };
+
+        // Client checks
+        parse_resp(None).unwrap().unwrap();
+        parse_resp(Some(38)).unwrap().unwrap();
+        parse_resp(Some(50)).unwrap().unwrap();
+        assert!(matches!(parse_resp(Some(37)), Err(Parse::TooLarge)));
+        assert!(matches!(parse_resp(Some(10)), Err(Parse::TooLarge)));
+    }
 
     #[test]
     fn test_is_complete_fast_lf_crlf() {

@@ -2360,6 +2360,122 @@ mod conn {
     }
 
     #[tokio::test]
+    async fn http1_max_header_size_response_head() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for (header_len, too_large) in [(800, false), (1200, true)] {
+                let (client_io, server_io) = tokio::io::duplex(4096);
+                let server = tokio::spawn(async move {
+                    hyper::server::conn::http1::Builder::new()
+                        .keep_alive(false)
+                        .serve_connection(
+                            TokioIo::new(server_io),
+                            hyper::service::service_fn(move |_request| async move {
+                                Ok::<_, std::convert::Infallible>(
+                                    Response::builder()
+                                        .header("x-large", "a".repeat(header_len))
+                                        .body(Empty::<Bytes>::new())
+                                        .unwrap(),
+                                )
+                            }),
+                        )
+                        .await
+                });
+                let (mut client, connection) = conn::http1::Builder::default()
+                    .options(Http1Options::builder().max_header_size(1024).build())
+                    .handshake(client_io)
+                    .await
+                    .unwrap();
+                let connection = tokio::spawn(connection);
+                let result = client
+                    .try_send_request(Request::get("/").body(Empty::<Bytes>::new()).unwrap())
+                    .await;
+                if too_large {
+                    let error = result.err().expect("response head must respect byte limit");
+                    assert!(error.error().is_parse(), "{error:?}");
+                    assert_eq!(error.error().to_string(), "message head is too large");
+                } else {
+                    let response = result.unwrap();
+                    assert_eq!(response.status(), StatusCode::OK);
+                    assert_eq!(response.headers()["x-large"].as_bytes().len(), header_len);
+                    assert!(concat(response.into_body()).await.unwrap().is_empty());
+                }
+                let _ = connection.await.unwrap();
+                server.await.unwrap().unwrap();
+            }
+        })
+        .await
+        .expect("response head byte limit should finish");
+    }
+
+    #[tokio::test]
+    async fn http1_max_header_size_response_trailers() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for (header_len, too_large) in [(800, false), (1200, true)] {
+                let (client_io, server_io) = tokio::io::duplex(4096);
+                let server = tokio::spawn(async move {
+                    hyper::server::conn::http1::Builder::new()
+                        .keep_alive(false)
+                        .serve_connection(
+                            TokioIo::new(server_io),
+                            hyper::service::service_fn(move |_request| async move {
+                                let mut trailers = HeaderMap::new();
+                                trailers.insert("x-large", "a".repeat(header_len).parse().unwrap());
+                                let frames = [
+                                    Ok::<_, std::convert::Infallible>(Frame::data(
+                                        Bytes::from_static(b"hello"),
+                                    )),
+                                    Ok(Frame::trailers(trailers)),
+                                ];
+                                Ok::<_, std::convert::Infallible>(
+                                    Response::builder()
+                                        .header("trailer", "x-large")
+                                        .body(StreamBody::new(futures_util::stream::iter(frames)))
+                                        .unwrap(),
+                                )
+                            }),
+                        )
+                        .await
+                });
+                let (mut client, connection) = conn::http1::Builder::default()
+                    .options(Http1Options::builder().max_header_size(1024).build())
+                    .handshake(client_io)
+                    .await
+                    .unwrap();
+                let connection = tokio::spawn(connection);
+                let response = client
+                    .try_send_request(
+                        Request::get("/")
+                            .header("te", "trailers")
+                            .body(Empty::<Bytes>::new())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let result = crate::concat_with_trailers(response.into_body()).await;
+                if too_large {
+                    let error = result.expect_err("response trailers must respect byte limit");
+                    let source = std::error::Error::source(&error).expect("trailer decode error");
+                    assert_eq!(source.to_string(), "chunk trailers bytes over limit");
+                } else {
+                    let (body, trailers) = result.unwrap();
+                    assert_eq!(body, "hello");
+                    assert_eq!(
+                        trailers.expect("response has trailers")["x-large"]
+                            .as_bytes()
+                            .len(),
+                        header_len,
+                    );
+                }
+                let _ = connection.await.unwrap();
+                server.await.unwrap().unwrap();
+            }
+        })
+        .await
+        .expect("response trailer byte limit should finish");
+    }
+
+    #[tokio::test]
     async fn http1_max_buf_size_split_header_boundary() {
         // Split the Hyper response within a header value so parsing needs a
         // second read with an already partially filled buffer.
