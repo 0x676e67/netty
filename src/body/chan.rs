@@ -199,7 +199,6 @@ impl Drop for Sender {
         state.sender_open = false;
         let receiver_open = state.receiver_open;
         drop(state);
-        // A dropped receiver never polls again, so its stale waker needs no wake.
         if receiver_open {
             self.shared.receiver_waker.wake();
         }
@@ -212,7 +211,6 @@ impl Drop for Receiver {
         state.receiver_open = false;
         let sender_open = state.sender_open;
         drop(state);
-        // A dropped sender never polls again, so its stale waker needs no wake.
         if sender_open {
             self.shared.sender_waker.wake();
         }
