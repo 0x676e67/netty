@@ -27,7 +27,7 @@ use crate::{
 /// The sender side of an established connection.
 pub struct SendRequest<B> {
     dispatch: dispatch::UnboundedSender<Request<B>, Response<Incoming>>,
-    peer: http2::client::PeerSettings,
+    peer: Arc<proto::http2::client::PeerSettings>,
 }
 
 impl<B> Clone for SendRequest<B> {
@@ -130,7 +130,7 @@ impl<B> SendRequest<B> {
     /// [1]: https://datatracker.ietf.org/doc/html/rfc8441#section-3
     #[inline]
     pub fn is_extended_connect_protocol_enabled(&self) -> Option<bool> {
-        self.peer.is_extended_connect_protocol_enabled()
+        self.peer.extended_connect()
     }
 }
 

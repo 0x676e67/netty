@@ -4,6 +4,10 @@ use std::{
     future::Future,
     marker::PhantomData,
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
     task::{Context, Poll, ready},
 };
 
@@ -16,12 +20,13 @@ use futures_channel::{
 use futures_util::{
     future::{Either, FusedFuture},
     stream::{FusedStream, Stream},
+    task::AtomicWaker,
 };
 use http::{Method, Request, Response, StatusCode};
 use http_body::Body;
 use http2::{
     SendStream,
-    client::{Builder, Connection, PeerSettings, ResponseFuture, SendRequest},
+    client::{Builder, Connection, ResponseFuture, SendRequest},
     ext::Protocol,
 };
 use pin_project_lite::pin_project;
@@ -96,9 +101,10 @@ where
         conn,
         is_terminated: false,
     };
+    let peer = Arc::new(PeerSettings::new());
 
     exec.execute_h2_future(H2ClientFuture::Task {
-        task: ConnTask::new(conn, conn_drop_rx, cancel_tx),
+        task: ConnTask::new(conn, conn_drop_rx, cancel_tx, peer.clone()),
     });
 
     Ok(ClientTask {
@@ -106,7 +112,7 @@ where
         conn_drop_ref,
         conn_eof,
         executor: exec,
-        peer: h2_tx.peer_settings(),
+        peer,
         h2_tx,
         req_rx,
         parked: VecDeque::new(),
@@ -152,6 +158,17 @@ where
     }
 }
 
+impl<T, B> Conn<T, B>
+where
+    B: Body,
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    #[inline]
+    fn extended_connect_protocol(&self) -> Option<bool> {
+        self.conn.extended_connect_protocol()
+    }
+}
+
 pin_project! {
     struct ConnMapErr<T, B>
     where
@@ -190,6 +207,20 @@ where
     }
 }
 
+impl<T, B> ConnMapErr<T, B>
+where
+    B: Body,
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    #[inline]
+    fn extended_connect_protocol(&self) -> Option<bool> {
+        match &self.conn {
+            Either::Left(conn) => conn.extended_connect_protocol(),
+            Either::Right(conn) => conn.extended_connect_protocol(),
+        }
+    }
+}
+
 impl<T, B> FusedFuture for ConnMapErr<T, B>
 where
     B: Body,
@@ -198,6 +229,61 @@ where
     #[inline]
     fn is_terminated(&self) -> bool {
         self.is_terminated
+    }
+}
+
+/// Server SETTINGS published by the connection task, the only writer.
+///
+/// The dispatcher is the only waiter, and senders read it without locking.
+pub(crate) struct PeerSettings {
+    extended_connect: AtomicU8,
+    waker: AtomicWaker,
+}
+
+// ===== impl PeerSettings =====
+
+impl PeerSettings {
+    const UNKNOWN: u8 = 0;
+    const DISABLED: u8 = 1;
+    const ENABLED: u8 = 2;
+
+    fn new() -> Self {
+        Self {
+            extended_connect: AtomicU8::new(Self::UNKNOWN),
+            waker: AtomicWaker::new(),
+        }
+    }
+
+    /// Returns whether the server enabled extended CONNECT, or `None` before its SETTINGS.
+    pub(crate) fn extended_connect(&self) -> Option<bool> {
+        match self.extended_connect.load(Ordering::Acquire) {
+            Self::ENABLED => Some(true),
+            Self::DISABLED => Some(false),
+            _ => None,
+        }
+    }
+
+    fn publish(&self, enabled: bool) {
+        let state = if enabled {
+            Self::ENABLED
+        } else {
+            Self::DISABLED
+        };
+        self.extended_connect.store(state, Ordering::Release);
+        self.waker.wake();
+    }
+
+    /// Polls until the server's SETTINGS are known, registering the dispatcher.
+    fn poll_extended_connect(&self, cx: &mut Context<'_>) -> Poll<bool> {
+        if let Some(enabled) = self.extended_connect() {
+            return Poll::Ready(enabled);
+        }
+        self.waker.register(cx.waker());
+        // Recheck so a publish between the load and the registration is not missed.
+        match self.extended_connect() {
+            Some(enabled) => Poll::Ready(enabled),
+            None => Poll::Pending,
+        }
     }
 }
 
@@ -215,6 +301,8 @@ pin_project! {
         cancel_tx: Option<oneshot::Sender<Infallible>>,
         #[pin]
         conn: ConnMapErr<T, B>,
+        peer: Arc<PeerSettings>,
+        published: Option<bool>,
     }
 }
 
@@ -228,11 +316,14 @@ where
         conn: ConnMapErr<T, B>,
         drop_rx: Receiver<Infallible>,
         cancel_tx: oneshot::Sender<Infallible>,
+        peer: Arc<PeerSettings>,
     ) -> Self {
         Self {
             drop_rx,
             cancel_tx: Some(cancel_tx),
             conn,
+            peer,
+            published: None,
         }
     }
 }
@@ -250,6 +341,14 @@ where
         if !this.conn.is_terminated() && Pin::new(&mut this.conn).poll(cx).is_ready() {
             // ok or err, the `conn` has finished.
             return Poll::Ready(());
+        }
+
+        // The driver applies the server's SETTINGS while polled; only changes are published.
+        if let Some(enabled) = this.conn.extended_connect_protocol()
+            && *this.published != Some(enabled)
+        {
+            *this.published = Some(enabled);
+            this.peer.publish(enabled);
         }
 
         if !this.drop_rx.is_terminated() && Pin::new(&mut this.drop_rx).poll_next(cx).is_ready() {
@@ -333,8 +432,8 @@ where
     conn_drop_ref: ConnDropRef,
     conn_eof: ConnEof,
     executor: E,
-    /// Lock-free view of the server's SETTINGS.
-    peer: PeerSettings,
+    /// Server SETTINGS published by the connection task.
+    peer: Arc<PeerSettings>,
     h2_tx: SendRequest<SendBuf<B::Data>>,
     req_rx: ClientRx<B>,
     /// Extended CONNECT requests waiting for the server's initial SETTINGS.
@@ -475,10 +574,10 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     pub(crate) fn is_extended_connect_protocol_enabled(&self) -> bool {
-        self.peer.is_extended_connect_protocol_enabled() == Some(true)
+        self.peer.extended_connect() == Some(true)
     }
 
-    pub(crate) fn peer_settings(&self) -> PeerSettings {
+    pub(crate) fn peer_settings(&self) -> Arc<PeerSettings> {
         self.peer.clone()
     }
 
@@ -634,7 +733,7 @@ where
             // https://www.rfc-editor.org/rfc/rfc8441#section-3
             let parked = if self.parked.is_empty() {
                 None
-            } else if self.peer.poll_received(cx).is_ready() {
+            } else if self.peer.poll_extended_connect(cx).is_ready() {
                 self.parked.pop_front().and_then(|mut parked| parked.take())
             } else {
                 // Release callers that gave up while waiting.
@@ -665,15 +764,9 @@ where
             }
 
             if req.extensions().get::<Protocol>().is_some() {
-                // Readiness never reverts, so the state read after it is final.
-                if self.peer.poll_received(cx).is_pending() {
-                    trace!("extended CONNECT waits for peer SETTINGS");
-                    self.parked.push_back(Envelope::new(req, cb));
-                    continue;
-                }
-                match self.peer.is_extended_connect_protocol_enabled() {
-                    Some(true) => {}
-                    Some(false) => {
+                match self.peer.poll_extended_connect(cx) {
+                    Poll::Ready(true) => {}
+                    Poll::Ready(false) => {
                         debug!("peer did not enable extended CONNECT");
                         cb.send(Err(TrySendError {
                             error: Error::new_user_invalid_request(
@@ -683,12 +776,10 @@ where
                         }));
                         continue;
                     }
-                    // The connection ended before the server's SETTINGS.
-                    None => {
-                        cb.send(Err(TrySendError {
-                            error: Error::new_canceled().with("connection closed"),
-                            message: Some(req),
-                        }));
+                    // A connection that ends first returns parked requests unsent.
+                    Poll::Pending => {
+                        trace!("extended CONNECT waits for peer SETTINGS");
+                        self.parked.push_back(Envelope::new(req, cb));
                         continue;
                     }
                 }
