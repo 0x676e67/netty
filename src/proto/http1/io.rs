@@ -182,6 +182,7 @@ where
                     req_method: parse_ctx.req_method,
                     h1_parser_config: parse_ctx.h1_parser_config,
                     h1_max_headers: parse_ctx.h1_max_headers,
+                    h1_max_header_size: parse_ctx.h1_max_header_size,
                     h09_responses: parse_ctx.h09_responses,
                     on_informational: parse_ctx.on_informational,
                 },
@@ -192,8 +193,14 @@ where
                     return Poll::Ready(Ok(msg));
                 }
                 None => {
-                    let max = self.read_buf_strategy.max();
                     let curr_len = self.read_buf.len();
+                    if let Some(max_header_size) = parse_ctx.h1_max_header_size
+                        && curr_len >= max_header_size
+                    {
+                        debug!("max_header_size ({}) reached, closing", max_header_size);
+                        return Poll::Ready(Err(Error::new_too_large()));
+                    }
+                    let max = self.read_buf_strategy.max();
                     if curr_len >= max {
                         debug!("max_buf_size ({}) reached, closing", max);
                         return Poll::Ready(Err(Error::new_too_large()));
@@ -667,6 +674,7 @@ mod tests {
                 req_method: &mut None,
                 h1_parser_config: &Default::default(),
                 h1_max_headers: None,
+                h1_max_header_size: None,
                 h09_responses: false,
                 on_informational: &mut None,
             };
@@ -683,6 +691,33 @@ mod tests {
             buffered.read_buf,
             b"HTTP/1.1 200 OK\r\nServer: crate::core:\r\n"[..]
         );
+    }
+
+    #[tokio::test]
+    async fn parse_partial_head_reaches_max_header_size() {
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n";
+        let mock = Mock::new().read(head).build();
+        let mut buffered = Buffered::<_, Cursor<Vec<u8>>>::new(mock);
+
+        let err = std::future::poll_fn(|cx| {
+            buffered.parse::<super::super::role::Client>(
+                cx,
+                ParseContext {
+                    cached_headers: &mut None,
+                    req_method: &mut None,
+                    h1_parser_config: &Default::default(),
+                    h1_max_headers: None,
+                    h1_max_header_size: Some(head.len()),
+                    h09_responses: false,
+                    on_informational: &mut None,
+                },
+            )
+        })
+        .await
+        .unwrap_err();
+
+        assert!(err.is_parse());
+        assert_eq!(err.to_string(), "message head is too large");
     }
 
     #[test]
