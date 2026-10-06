@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791243762468,
+  "lastUpdate": 1791247254345,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -13283,6 +13283,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4536094,
             "range": "± 89196.20",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "22a2b4aa4fa8cfa532792ecfa6cc176d891fda10",
+          "message": "feat(http1): add max_header_size limit for server and client (#149)\n\nAdds max_header_size(val: usize) on both server and client HTTP/1 builders.\nThis allows configuring an explicit byte limit for request/response headers\n(including the start line and chunked trailers).\n\nWhen the limit is exceeded:\n- On server: responds with 431 Request Header Fields Too Large and closes the connection.\n- On client: returns a Parse::TooLarge error (is_parse_too_large).\n- On chunked decoder: replaces existing TODO in proto/h1/conn.rs with the configured h1_max_header_size.\n\nCloses #3832.\n\nLocal adaptation: expose the client setting through Http1OptionsBuilder and the existing owned-builder API; omit server-only code because netty has no server implementation. Keep the existing parser configuration borrow and error classifiers. Replace raw-socket client regressions with an upstream Hyper server and cover the existing chunked trailer decoder.\n\nLocal adaptation: use the repository's Rust 2024 let-chain form for the header-limit guards to satisfy local Clippy without changing the comparisons or error behavior.\n\nCo-authored-by: Dahale Aditya Dnyaneshwar <adityadahale96@gmail.com>",
+          "timestamp": "2026-10-06T08:36:34+08:00",
+          "tree_id": "cc89363f26b70bad7f83916d5c6ddef40d93bad9",
+          "url": "https://github.com/0x676e67/netty/commit/22a2b4aa4fa8cfa532792ecfa6cc176d891fda10"
+        },
+        "date": 1791247253312,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 93026,
+            "range": "± 2572.75",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 6720571,
+            "range": "± 509468.27",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 21753,
+            "range": "± 526.79",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 23921,
+            "range": "± 1201.00",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 34109,
+            "range": "± 538.87",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 110339,
+            "range": "± 7314.39",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 40999864,
+            "range": "± 9259.30",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 84419,
+            "range": "± 1586.23",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 16303834,
+            "range": "± 16432573.77",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 8269576,
+            "range": "± 255845.82",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 32668528,
+            "range": "± 8169328.36",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 97608982,
+            "range": "± 1782989.00",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 54692913,
+            "range": "± 1986756.08",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 5512541,
+            "range": "± 206565.78",
             "unit": "ns/iter"
           }
         ]
