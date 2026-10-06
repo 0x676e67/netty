@@ -218,7 +218,7 @@ async fn h2_extended_connect_peer_support() {
 
 #[tokio::test]
 async fn h2_extended_connect_waits_for_peer_settings() {
-    // `None` closes the connection before the server sends SETTINGS; the last case
+    // `None` breaks the connection before the server sends SETTINGS; the last case
     // drops every sender while the request is parked.
     let cases = [
         (None, true),
@@ -276,7 +276,13 @@ async fn h2_extended_connect_waits_for_peer_settings() {
                     .await;
             });
         } else {
-            drop(server_io);
+            driver.spawn(async move {
+                let mut server_io = server_io;
+                // Not an HTTP/2 frame: the client fails with FRAME_SIZE_ERROR.
+                let _ = server_io
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                    .await;
+            });
         }
 
         let result = assert_ready!(driver.poll(&mut connect));
@@ -290,6 +296,14 @@ async fn h2_extended_connect_waits_for_peer_settings() {
             assert_eq!(error.error().is_user(), settings.is_some());
             assert_eq!(error.error().is_canceled(), settings.is_none());
             assert!(error.message().is_some());
+            if settings.is_none() {
+                let cause = std::error::Error::source(error.error())
+                    .and_then(|cause| cause.downcast_ref::<::http2::Error>());
+                assert_eq!(
+                    cause.and_then(::http2::Error::reason),
+                    Some(::http2::Reason::FRAME_SIZE_ERROR)
+                );
+            }
         }
         assert_eq!(
             assert_ready!(driver.poll(&mut get)).is_ok(),

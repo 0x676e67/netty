@@ -482,6 +482,25 @@ where
         self.peer.clone()
     }
 
+    /// Returns parked extended CONNECT requests unsent, keeping the connection
+    /// failure as their cause.
+    fn release_parked(&mut self, err: &::http2::Error) {
+        for mut parked in self.parked.drain(..) {
+            let Some((req, cb)) = parked.take() else {
+                continue;
+            };
+            // `http2::Error` is not `Clone`; its reason carries the protocol failure.
+            let error = match err.reason() {
+                Some(reason) => Error::new_canceled().with(::http2::Error::from(reason)),
+                None => Error::new_canceled().with(err.to_string()),
+            };
+            cb.send(Err(TrySendError {
+                error,
+                message: Some(req),
+            }));
+        }
+    }
+
     pub(crate) fn current_max_send_streams(&self) -> usize {
         self.h2_tx.current_max_send_streams()
     }
@@ -594,6 +613,7 @@ where
                 Ok(()) => (),
                 Err(err) => {
                     self.ping.ensure_not_timed_out()?;
+                    self.release_parked(&err);
                     return if err.reason() == Some(::http2::Reason::NO_ERROR) {
                         trace!("connection gracefully shutdown");
                         Poll::Ready(Ok(Dispatched::Shutdown))
