@@ -129,3 +129,6 @@ incremental = false
 [profile.bench]
 codegen-units = 1
 incremental = false
+
+[patch.crates-io]
+http2 = { git = "https://github.com/0x676e67/http2", branch = "demo/extended-connect-state" }

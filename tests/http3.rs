@@ -783,6 +783,7 @@ async fn extended_connect_requires_peer_permission() {
         let error = tx.try_send_request(request).await.unwrap_err();
         assert!(error.error().is_user());
         assert!(error.message().is_some());
+        assert_eq!(tx.is_extended_connect_protocol_enabled(), Some(false));
         drop(tx);
         client_driver.as_mut().graceful_shutdown();
         client_driver.await.unwrap();

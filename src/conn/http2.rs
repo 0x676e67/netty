@@ -27,6 +27,7 @@ use crate::{
 /// The sender side of an established connection.
 pub struct SendRequest<B> {
     dispatch: dispatch::UnboundedSender<Request<B>, Response<Incoming>>,
+    peer: http2::client::PeerSettings,
 }
 
 impl<B> Clone for SendRequest<B> {
@@ -34,6 +35,7 @@ impl<B> Clone for SendRequest<B> {
     fn clone(&self) -> SendRequest<B> {
         SendRequest {
             dispatch: self.dispatch.clone(),
+            peer: self.peer.clone(),
         }
     }
 }
@@ -116,6 +118,19 @@ impl<B> SendRequest<B> {
     #[inline]
     pub fn is_closed(&self) -> bool {
         self.dispatch.is_closed()
+    }
+
+    /// Returns whether the server enabled [extended CONNECT][1].
+    ///
+    /// Returns `None` until the server's SETTINGS arrive, and keeps returning `None`
+    /// if the connection closes first. Extended CONNECT requests wait for those
+    /// SETTINGS and are returned unsent with an [`Error::is_user`] error if the
+    /// server did not enable the protocol.
+    ///
+    /// [1]: https://datatracker.ietf.org/doc/html/rfc8441#section-3
+    #[inline]
+    pub fn is_extended_connect_protocol_enabled(&self) -> Option<bool> {
+        self.peer.is_extended_connect_protocol_enabled()
     }
 }
 
@@ -349,6 +364,7 @@ where
         Ok((
             SendRequest {
                 dispatch: tx.unbound(),
+                peer: h2.peer_settings(),
             },
             Connection {
                 inner: (PhantomData, h2),

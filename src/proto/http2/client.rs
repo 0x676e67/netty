@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     convert::Infallible,
     future::Future,
     marker::PhantomData,
@@ -20,7 +21,8 @@ use http::{Method, Request, Response, StatusCode};
 use http_body::Body;
 use http2::{
     SendStream,
-    client::{Builder, Connection, ResponseFuture, SendRequest},
+    client::{Builder, Connection, PeerSettings, ResponseFuture, SendRequest},
+    ext::Protocol,
 };
 use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -32,7 +34,7 @@ use super::{
 use crate::{
     Error, Result,
     body::{self, Incoming},
-    dispatch::{self, Callback, SendWhen, TrySendError},
+    dispatch::{self, Callback, Envelope, SendWhen, TrySendError},
     error::BoxError,
     ext::OnPreserveHeader,
     proto::{Dispatched, headers},
@@ -104,8 +106,10 @@ where
         conn_drop_ref,
         conn_eof,
         executor: exec,
+        peer: h2_tx.peer_settings(),
         h2_tx,
         req_rx,
+        parked: VecDeque::new(),
         fut_ctx: None,
         marker: PhantomData,
     })
@@ -329,8 +333,12 @@ where
     conn_drop_ref: ConnDropRef,
     conn_eof: ConnEof,
     executor: E,
+    /// Lock-free view of the server's SETTINGS.
+    peer: PeerSettings,
     h2_tx: SendRequest<SendBuf<B::Data>>,
     req_rx: ClientRx<B>,
+    /// Extended CONNECT requests waiting for the server's initial SETTINGS.
+    parked: VecDeque<Envelope<Request<B>, Response<Incoming>>>,
     fut_ctx: Option<FutCtx<B>>,
     marker: PhantomData<T>,
 }
@@ -467,7 +475,11 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     pub(crate) fn is_extended_connect_protocol_enabled(&self) -> bool {
-        self.h2_tx.is_extended_connect_protocol_enabled()
+        self.peer.is_extended_connect_protocol_enabled() == Some(true)
+    }
+
+    pub(crate) fn peer_settings(&self) -> PeerSettings {
+        self.peer.clone()
     }
 
     pub(crate) fn current_max_send_streams(&self) -> usize {
@@ -598,100 +610,139 @@ where
                 continue;
             }
 
-            match self.req_rx.poll_recv(cx) {
-                Poll::Ready(Some((req, cb))) => {
-                    // Check that future hasn't been canceled already
-                    if cb.is_canceled() {
-                        trace!("request callback is canceled");
-                        continue;
+            // Extended CONNECT waits for the server's initial SETTINGS:
+            // https://www.rfc-editor.org/rfc/rfc8441#section-3
+            let parked = if self.parked.is_empty() {
+                None
+            } else if self.peer.poll_received(cx).is_ready() {
+                self.parked.pop_front().and_then(|mut parked| parked.take())
+            } else {
+                // Release callers that gave up while waiting.
+                self.parked
+                    .retain_mut(|parked| parked.poll_canceled(cx).is_pending());
+                None
+            };
+            let (req, cb) = match parked {
+                Some(parked) => parked,
+                None => match self.req_rx.poll_recv(cx) {
+                    Poll::Ready(Some(next)) => next,
+                    Poll::Ready(None) if self.parked.is_empty() => {
+                        trace!("client::dispatch::Sender dropped");
+                        return Poll::Ready(Ok(Dispatched::Shutdown));
                     }
-                    let (head, body) = req.into_parts();
-                    let mut req = ::http::Request::from_parts(head, ());
-                    headers::strip_connection_headers(req.headers_mut(), true);
-                    if let Some(len) = body.size_hint().exact()
-                        && (len != 0 || headers::method_has_defined_payload_semantics(req.method()))
-                    {
-                        headers::set_content_length_if_missing(req.headers_mut(), len);
-                    }
-
-                    // Sort headers
-                    if let Some(header_sort) = req.extensions_mut().remove::<OnPreserveHeader>() {
-                        header_sort.call(req.headers_mut());
-                    }
-
-                    let is_connect = req.method() == Method::CONNECT;
-                    let eos = body.is_end_stream();
-
-                    if is_connect
-                        && headers::content_length_parse_all(req.headers())
-                            .is_some_and(|len| len != 0)
-                    {
-                        debug!("h2 connect request with non-zero body not supported");
-                        cb.send(Err(TrySendError {
-                            error: Error::new_user_invalid_connect(),
-                            message: None,
-                        }));
-                        continue;
-                    }
-
-                    let (fut, body_tx) = match self.h2_tx.send_request(req, !is_connect && eos) {
-                        Ok(ok) => ok,
-                        Err(err) => {
-                            debug!("client send request error: {}", err);
-                            cb.send(Err(TrySendError {
-                                error: Error::new_h2(err),
-                                message: None,
-                            }));
-                            continue;
-                        }
-                    };
-
-                    let f = FutCtx {
-                        is_connect,
-                        eos,
-                        fut,
-                        body_tx,
-                        body,
-                        cb,
-                    };
-
-                    // Check poll_ready() again.
-                    // If the call to send_request() resulted in the new stream being pending open
-                    // we have to wait for the open to complete before accepting new requests.
-                    match self.h2_tx.poll_ready(cx) {
-                        Poll::Pending => {
-                            // Save Context
-                            self.fut_ctx = Some(f);
-                            return Poll::Pending;
-                        }
-                        Poll::Ready(Ok(())) => (),
-                        Poll::Ready(Err(err)) => {
-                            f.cb.send(Err(TrySendError {
-                                error: Error::new_h2(err),
-                                message: None,
-                            }));
-                            continue;
-                        }
-                    }
-                    self.poll_pipe(f, cx);
-                    continue;
-                }
-
-                Poll::Ready(None) => {
-                    trace!("client::dispatch::Sender dropped");
-                    return Poll::Ready(Ok(Dispatched::Shutdown));
-                }
-
-                Poll::Pending => match ready!(Pin::new(&mut self.conn_eof).poll(cx)) {
-                    // As of Rust 1.82, this pattern is no longer needed, and emits a warning.
-                    // But we cannot remove it as long as MSRV is less than that.
-                    Ok(never) => match never {},
-                    Err(_conn_is_eof) => {
+                    Poll::Ready(None) | Poll::Pending => {
+                        let Err(_conn_is_eof) = ready!(Pin::new(&mut self.conn_eof).poll(cx));
                         trace!("connection task is closed, closing dispatch task");
                         return Poll::Ready(Ok(Dispatched::Shutdown));
                     }
                 },
+            };
+
+            // Check that future hasn't been canceled already
+            if cb.is_canceled() {
+                trace!("request callback is canceled");
+                continue;
             }
+
+            if req.extensions().get::<Protocol>().is_some() {
+                // Readiness never reverts, so the state read after it is final.
+                if self.peer.poll_received(cx).is_pending() {
+                    trace!("extended CONNECT waits for peer SETTINGS");
+                    self.parked.push_back(Envelope::new(req, cb));
+                    continue;
+                }
+                match self.peer.is_extended_connect_protocol_enabled() {
+                    Some(true) => {}
+                    Some(false) => {
+                        debug!("peer did not enable extended CONNECT");
+                        cb.send(Err(TrySendError {
+                            error: Error::new_user_invalid_request(
+                                "peer did not enable Extended CONNECT",
+                            ),
+                            message: Some(req),
+                        }));
+                        continue;
+                    }
+                    // The connection ended before the server's SETTINGS.
+                    None => {
+                        cb.send(Err(TrySendError {
+                            error: Error::new_canceled().with("connection closed"),
+                            message: Some(req),
+                        }));
+                        continue;
+                    }
+                }
+            }
+
+            let (head, body) = req.into_parts();
+            let mut req = ::http::Request::from_parts(head, ());
+            headers::strip_connection_headers(req.headers_mut(), true);
+            if let Some(len) = body.size_hint().exact()
+                && (len != 0 || headers::method_has_defined_payload_semantics(req.method()))
+            {
+                headers::set_content_length_if_missing(req.headers_mut(), len);
+            }
+
+            // Sort headers
+            if let Some(header_sort) = req.extensions_mut().remove::<OnPreserveHeader>() {
+                header_sort.call(req.headers_mut());
+            }
+
+            let is_connect = req.method() == Method::CONNECT;
+            let eos = body.is_end_stream();
+
+            if is_connect
+                && headers::content_length_parse_all(req.headers()).is_some_and(|len| len != 0)
+            {
+                debug!("h2 connect request with non-zero body not supported");
+                cb.send(Err(TrySendError {
+                    error: Error::new_user_invalid_connect(),
+                    message: None,
+                }));
+                continue;
+            }
+
+            let (fut, body_tx) = match self.h2_tx.send_request(req, !is_connect && eos) {
+                Ok(ok) => ok,
+                Err(err) => {
+                    debug!("client send request error: {}", err);
+                    cb.send(Err(TrySendError {
+                        error: Error::new_h2(err),
+                        message: None,
+                    }));
+                    continue;
+                }
+            };
+
+            let f = FutCtx {
+                is_connect,
+                eos,
+                fut,
+                body_tx,
+                body,
+                cb,
+            };
+
+            // Check poll_ready() again.
+            // If the call to send_request() resulted in the new stream being pending open
+            // we have to wait for the open to complete before accepting new requests.
+            match self.h2_tx.poll_ready(cx) {
+                Poll::Pending => {
+                    // Save Context
+                    self.fut_ctx = Some(f);
+                    return Poll::Pending;
+                }
+                Poll::Ready(Ok(())) => (),
+                Poll::Ready(Err(err)) => {
+                    f.cb.send(Err(TrySendError {
+                        error: Error::new_h2(err),
+                        message: None,
+                    }));
+                    continue;
+                }
+            }
+            self.poll_pipe(f, cx);
+            continue;
         }
     }
 }
