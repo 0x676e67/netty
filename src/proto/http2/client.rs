@@ -302,7 +302,6 @@ pin_project! {
         #[pin]
         conn: ConnMapErr<T, B>,
         peer: Arc<PeerSettings>,
-        published: Option<bool>,
     }
 }
 
@@ -323,7 +322,6 @@ where
             cancel_tx: Some(cancel_tx),
             conn,
             peer,
-            published: None,
         }
     }
 }
@@ -338,17 +336,19 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
 
-        if !this.conn.is_terminated() && Pin::new(&mut this.conn).poll(cx).is_ready() {
-            // ok or err, the `conn` has finished.
-            return Poll::Ready(());
+        let finished = !this.conn.is_terminated() && Pin::new(&mut this.conn).poll(cx).is_ready();
+
+        // The driver applies the server's SETTINGS while polled, possibly in its final poll;
+        // this task is the only writer, so only changes are published.
+        if let Some(enabled) = this.conn.extended_connect_protocol()
+            && this.peer.extended_connect() != Some(enabled)
+        {
+            this.peer.publish(enabled);
         }
 
-        // The driver applies the server's SETTINGS while polled; only changes are published.
-        if let Some(enabled) = this.conn.extended_connect_protocol()
-            && *this.published != Some(enabled)
-        {
-            *this.published = Some(enabled);
-            this.peer.publish(enabled);
+        if finished {
+            // ok or err, the `conn` has finished.
+            return Poll::Ready(());
         }
 
         if !this.drop_rx.is_terminated() && Pin::new(&mut this.drop_rx).poll_next(cx).is_ready() {

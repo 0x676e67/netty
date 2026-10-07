@@ -350,6 +350,32 @@ async fn h2_extended_connect_waits_for_peer_settings() {
 }
 
 #[tokio::test]
+async fn h2_extended_connect_published_when_connection_ends() {
+    let (tx, rx) = mpsc::channel();
+    let executor = Executor(tx);
+    let mut driver = Driver {
+        executor: executor.clone(),
+        rx,
+        tasks: Vec::new(),
+    };
+    let (client_io, mut server_io) = tokio::io::duplex(64 * 1024);
+    let (client, conn) = driver
+        .finish(http2::Builder::new(executor).handshake::<_, Empty<Bytes>>(client_io))
+        .unwrap();
+    driver.spawn(async move {
+        let _ = conn.await;
+    });
+    driver.run();
+
+    // An empty SETTINGS frame followed by EOF: the driver applies it in its final poll.
+    assert_ready!(task::spawn(server_io.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0])).poll()).unwrap();
+    drop(server_io);
+    driver.run();
+    assert!(driver.tasks.is_empty());
+    assert_eq!(client.is_extended_connect_protocol_enabled(), Some(false));
+}
+
+#[tokio::test]
 async fn h2_extended_connect_follows_later_settings() {
     let (tx, rx) = mpsc::channel();
     let executor = Executor(tx);
