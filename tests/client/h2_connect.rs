@@ -360,19 +360,37 @@ async fn h2_extended_connect_published_when_connection_ends() {
     };
     let (client_io, mut server_io) = tokio::io::duplex(64 * 1024);
     let (client, conn) = driver
-        .finish(http2::Builder::new(executor).handshake::<_, Empty<Bytes>>(client_io))
+        .finish(http2::Builder::new(executor.clone()).handshake::<_, Empty<Bytes>>(client_io))
         .unwrap();
+    let (done_tx, mut done) = oneshot::channel();
     driver.spawn(async move {
         let _ = conn.await;
+        let _ = done_tx.send(());
+    });
+
+    // Hyper serves on its own pipe, so its SETTINGS can be relayed with the EOF at once.
+    let (hyper_io, mut relay_io) = tokio::io::duplex(64 * 1024);
+    let mut builder = hyper::server::conn::http2::Builder::new(executor);
+    builder.enable_connect_protocol();
+    driver.spawn(async move {
+        let service = service_fn(|_: Request<hyper::body::Incoming>| async {
+            Ok::<_, Infallible>(Response::new(Empty::<Bytes>::new()))
+        });
+        let _ = builder
+            .serve_connection(TokioIo::new(hyper_io), service)
+            .await;
     });
     driver.run();
+    let mut settings = vec![0; 1024];
+    let read = assert_ready!(task::spawn(relay_io.read(&mut settings)).poll()).unwrap();
+    assert!(read > 0);
 
-    // An empty SETTINGS frame followed by EOF: the driver applies it in its final poll.
-    assert_ready!(task::spawn(server_io.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0])).poll()).unwrap();
+    // Without running the client in between, it applies SETTINGS in its final poll.
+    assert_ready!(task::spawn(server_io.write_all(&settings[..read])).poll()).unwrap();
     drop(server_io);
     driver.run();
-    assert!(driver.tasks.is_empty());
-    assert_eq!(client.is_extended_connect_protocol_enabled(), Some(false));
+    assert!(done.try_recv().unwrap().is_some());
+    assert_eq!(client.is_extended_connect_protocol_enabled(), Some(true));
 }
 
 #[tokio::test]
