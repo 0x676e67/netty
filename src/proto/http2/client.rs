@@ -276,7 +276,7 @@ impl PeerSettings {
 }
 
 /// A request and the callback that completes it.
-type Pending<B> = (Request<B>, Callback<Request<B>, Response<Incoming>>);
+type Queued<B> = (Request<B>, Callback<Request<B>, Response<Incoming>>);
 
 /// Holds extended CONNECT requests until the server's SETTINGS allow or refuse them
 /// ([RFC 8441 §3](https://www.rfc-editor.org/rfc/rfc8441#section-3)).
@@ -303,12 +303,7 @@ impl<B> ConnectGate<B> {
     }
 
     /// Lets a request through, or parks or refuses an extended CONNECT.
-    fn admit(
-        &mut self,
-        req: Request<B>,
-        cb: Callback<Request<B>, Response<Incoming>>,
-        cx: &mut Context<'_>,
-    ) -> Option<Pending<B>> {
+    fn admit(&mut self, (req, cb): Queued<B>, cx: &mut Context<'_>) -> Option<Queued<B>> {
         if req.extensions().get::<Protocol>().is_none() {
             return Some((req, cb));
         }
@@ -349,7 +344,7 @@ impl<B> ConnectGate<B> {
     }
 
     /// Takes the oldest parked request once the server enabled the protocol.
-    fn pop_enabled(&mut self) -> Option<Pending<B>> {
+    fn pop_enabled(&mut self) -> Option<Queued<B>> {
         if self.peer.extended_connect() != Some(true) {
             return None;
         }
@@ -826,7 +821,7 @@ where
                         trace!("request callback is canceled");
                         continue;
                     }
-                    let Some((req, cb)) = self.gate.admit(req, cb, cx) else {
+                    let Some((req, cb)) = self.gate.admit((req, cb), cx) else {
                         continue;
                     };
                     let (head, body) = req.into_parts();

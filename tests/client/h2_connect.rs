@@ -163,14 +163,8 @@ fn connect_request(
     TokioIo<hyper::upgrade::Upgraded>,
     http2::SendRequest<Empty<Bytes>>,
 ) {
-    let (tx, rx) = mpsc::channel();
-    let executor = Executor(tx);
-    let mut driver = Driver {
-        executor: executor.clone(),
-        rx,
-        tasks: Vec::new(),
-    };
-    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let mut driver = Driver::new();
+    let executor = driver.executor.clone();
     let (server_tx, server_rx) = oneshot::channel();
     let server_tx = std::sync::Mutex::new(Some(server_tx));
     let upgrade_executor = executor.clone();
@@ -197,17 +191,11 @@ fn connect_request(
         async { Ok::<_, std::convert::Infallible>(Response::new(Empty::<Bytes>::new())) }
     });
     let server_executor = executor.clone();
-    let (mut client, conn) = driver
-        .finish(
-            http2::Builder::new(executor)
-                .options(
-                    netty::http2::Http2Options::builder()
-                        .initial_window_size(1024)
-                        .build(),
-                )
-                .handshake::<_, Empty<Bytes>>(client_io),
-        )
-        .unwrap();
+    let (mut client, conn, server_io) = driver.handshake(
+        netty::http2::Http2Options::builder()
+            .initial_window_size(1024)
+            .build(),
+    );
     assert!(!conn.is_extended_connect_protocol_enabled());
     driver.spawn(async move {
         let mut builder = hyper::server::conn::http2::Builder::new(server_executor);
@@ -405,6 +393,37 @@ async fn h2_extended_connect_published_when_connection_ends() {
 }
 
 #[tokio::test]
+async fn h2_extended_connect_follows_later_settings() {
+    let mut driver = Driver::new();
+    let (mut client, conn, server_io) = driver.handshake(Default::default());
+    driver.spawn(async move {
+        let _ = conn.await;
+    });
+    let mut server = driver.finish(h2::server::handshake(server_io)).unwrap();
+    let drive = |driver: &mut Driver, server: &mut h2::server::Connection<_, Bytes>| {
+        let mut closed = task::spawn(std::future::poll_fn(|cx| server.poll_closed(cx)));
+        assert_pending!(driver.poll(&mut closed));
+    };
+
+    drive(&mut driver, &mut server);
+    assert_eq!(client.is_extended_connect_protocol_enabled(), Some(false));
+    let error = driver
+        .finish(client.try_send_request(extended_connect("/chat")))
+        .unwrap_err();
+    assert!(error.error().is_user());
+
+    // RFC 8441 §3 only forbids withdrawing the setting; a later SETTINGS may enable it.
+    server.enable_connect_protocol().unwrap();
+    drive(&mut driver, &mut server);
+    assert_eq!(client.is_extended_connect_protocol_enabled(), Some(true));
+    let mut connect = task::spawn(client.try_send_request(extended_connect("/chat")));
+    assert_pending!(driver.poll(&mut connect));
+    let (request, _respond) = driver.finish(server.accept()).unwrap().unwrap();
+    assert_eq!(request.method(), Method::CONNECT);
+    assert!(request.extensions().get::<h2::ext::Protocol>().is_some());
+}
+
+#[tokio::test]
 async fn h2_extended_connect_refusal_ignores_open_backpressure() {
     let mut driver = Driver::new();
     let (mut client, conn, server_io) = driver.handshake(
@@ -485,13 +504,8 @@ async fn h2_idle_upgraded_does_not_pin_connection_window() {
     // https://www.rfc-editor.org/rfc/rfc9113.html#section-6.9.2
     const STREAM_A_LEN: usize = 65534;
 
-    let (tx, rx) = mpsc::channel();
-    let executor = Executor(tx);
-    let mut driver = Driver {
-        executor: executor.clone(),
-        rx,
-        tasks: Vec::new(),
-    };
+    let mut driver = Driver::new();
+    let executor = driver.executor.clone();
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let (server_tx, server_rx) = oneshot::channel();
     let server_tx = std::sync::Mutex::new(Some(server_tx));
