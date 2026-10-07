@@ -13,7 +13,7 @@ use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::service::service_fn;
 use netty::{conn::http2, rt::Executor as _, upgrade::Upgraded};
-use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, DuplexStream};
 use tokio_test::{assert_pending, assert_ready, task};
 
 use crate::support::TokioIo;
@@ -55,6 +55,35 @@ where
 // ===== impl Driver =====
 
 impl Driver {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            executor: Executor(tx),
+            rx,
+            tasks: Vec::new(),
+        }
+    }
+
+    /// Completes a client handshake over a new pipe, returning its server end.
+    fn handshake(
+        &mut self,
+        options: netty::http2::Http2Options,
+    ) -> (
+        http2::SendRequest<Empty<Bytes>>,
+        http2::Connection<DuplexStream, Empty<Bytes>, Executor>,
+        DuplexStream,
+    ) {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client, conn) = self
+            .finish(
+                http2::Builder::new(self.executor.clone())
+                    .options(options)
+                    .handshake(client_io),
+            )
+            .unwrap();
+        (client, conn, server_io)
+    }
+
     fn run(&mut self) {
         loop {
             let mut progressed = false;
@@ -251,17 +280,8 @@ async fn h2_extended_connect_waits_for_peer_settings() {
             Peer::Settings(enabled) => Some(enabled),
             Peer::Garbage | Peer::Eof => None,
         };
-        let (tx, rx) = mpsc::channel();
-        let executor = Executor(tx);
-        let mut driver = Driver {
-            executor: executor.clone(),
-            rx,
-            tasks: Vec::new(),
-        };
-        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-        let (mut client, conn) = driver
-            .finish(http2::Builder::new(executor.clone()).handshake::<_, Empty<Bytes>>(client_io))
-            .unwrap();
+        let mut driver = Driver::new();
+        let (mut client, conn, server_io) = driver.handshake(Default::default());
         assert_eq!(client.is_extended_connect_protocol_enabled(), None);
         driver.spawn(async move {
             let _ = conn.await;
@@ -291,7 +311,7 @@ async fn h2_extended_connect_waits_for_peer_settings() {
                     seen.lock().unwrap().push(request.uri().path().to_owned());
                     async { Ok::<_, Infallible>(Response::new(Empty::<Bytes>::new())) }
                 });
-                let mut builder = hyper::server::conn::http2::Builder::new(executor.clone());
+                let mut builder = hyper::server::conn::http2::Builder::new(driver.executor.clone());
                 if enabled {
                     builder.enable_connect_protocol();
                 }
@@ -351,17 +371,8 @@ async fn h2_extended_connect_waits_for_peer_settings() {
 
 #[tokio::test]
 async fn h2_extended_connect_published_when_connection_ends() {
-    let (tx, rx) = mpsc::channel();
-    let executor = Executor(tx);
-    let mut driver = Driver {
-        executor: executor.clone(),
-        rx,
-        tasks: Vec::new(),
-    };
-    let (client_io, mut server_io) = tokio::io::duplex(64 * 1024);
-    let (client, conn) = driver
-        .finish(http2::Builder::new(executor.clone()).handshake::<_, Empty<Bytes>>(client_io))
-        .unwrap();
+    let mut driver = Driver::new();
+    let (client, conn, mut server_io) = driver.handshake(Default::default());
     let (done_tx, mut done) = oneshot::channel();
     driver.spawn(async move {
         let _ = conn.await;
@@ -370,7 +381,7 @@ async fn h2_extended_connect_published_when_connection_ends() {
 
     // Hyper serves on its own pipe, so its SETTINGS can be relayed with the EOF at once.
     let (hyper_io, mut relay_io) = tokio::io::duplex(64 * 1024);
-    let mut builder = hyper::server::conn::http2::Builder::new(executor);
+    let mut builder = hyper::server::conn::http2::Builder::new(driver.executor.clone());
     builder.enable_connect_protocol();
     driver.spawn(async move {
         let service = service_fn(|_: Request<hyper::body::Incoming>| async {
@@ -395,25 +406,12 @@ async fn h2_extended_connect_published_when_connection_ends() {
 
 #[tokio::test]
 async fn h2_extended_connect_refusal_ignores_open_backpressure() {
-    let (tx, rx) = mpsc::channel();
-    let executor = Executor(tx);
-    let mut driver = Driver {
-        executor: executor.clone(),
-        rx,
-        tasks: Vec::new(),
-    };
-    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-    let (mut client, conn) = driver
-        .finish(
-            http2::Builder::new(executor.clone())
-                .options(
-                    netty::http2::Http2Options::builder()
-                        .initial_max_send_streams(1)
-                        .build(),
-                )
-                .handshake::<_, Empty<Bytes>>(client_io),
-        )
-        .unwrap();
+    let mut driver = Driver::new();
+    let (mut client, conn, server_io) = driver.handshake(
+        netty::http2::Http2Options::builder()
+            .initial_max_send_streams(1)
+            .build(),
+    );
     driver.spawn(async move {
         let _ = conn.await;
     });
@@ -437,7 +435,7 @@ async fn h2_extended_connect_refusal_ignores_open_backpressure() {
         }
         Ok::<_, Infallible>(Response::new(Empty::<Bytes>::new()))
     });
-    let mut builder = hyper::server::conn::http2::Builder::new(executor);
+    let mut builder = hyper::server::conn::http2::Builder::new(driver.executor.clone());
     builder.max_concurrent_streams(1);
     driver.spawn(async move {
         let _ = builder
@@ -455,17 +453,8 @@ async fn h2_extended_connect_refusal_ignores_open_backpressure() {
 
 #[tokio::test]
 async fn h2_extended_connect_cancel_while_parked_releases_connection() {
-    let (tx, rx) = mpsc::channel();
-    let executor = Executor(tx);
-    let mut driver = Driver {
-        executor: executor.clone(),
-        rx,
-        tasks: Vec::new(),
-    };
-    let (client_io, _server_io) = tokio::io::duplex(64 * 1024);
-    let (mut client, conn) = driver
-        .finish(http2::Builder::new(executor).handshake::<_, Empty<Bytes>>(client_io))
-        .unwrap();
+    let mut driver = Driver::new();
+    let (mut client, conn, _server_io) = driver.handshake(Default::default());
     let (done_tx, mut done) = oneshot::channel();
     driver.spawn(async move {
         let _ = conn.await;
