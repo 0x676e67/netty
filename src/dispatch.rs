@@ -32,6 +32,10 @@ pub(crate) fn channel<T, U>() -> (Sender<T, U>, Receiver<T, U>) {
 /// time that a request is queued and when it is actually written to the IO
 /// transport. If that happens, it is safe to return the request back to the
 /// caller, as it was never fully sent.
+///
+/// A returned request was never sent. [`Error::is_user`] errors, such as Extended
+/// CONNECT to a server that did not enable it, are final; other errors mean this
+/// connection could not take the request.
 #[derive(Debug)]
 pub struct TrySendError<T> {
     pub(crate) error: Error,
@@ -183,6 +187,27 @@ impl<T, U> Drop for Receiver<T, U> {
 /// If dropped before that handoff, returns the unsent request through the callback
 /// with a cancellation error.
 pub(crate) struct Envelope<T, U>(Option<(T, Callback<T, U>)>);
+
+impl<T, U> Envelope<T, U> {
+    #[inline]
+    pub(crate) fn new(message: T, callback: Callback<T, U>) -> Self {
+        Self(Some((message, callback)))
+    }
+
+    #[inline]
+    pub(crate) fn take(&mut self) -> Option<(T, Callback<T, U>)> {
+        self.0.take()
+    }
+
+    /// Polls whether the caller stopped waiting for the response.
+    #[inline]
+    pub(crate) fn poll_canceled(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        match &mut self.0 {
+            Some((_, callback)) => callback.poll_canceled(cx),
+            None => Poll::Ready(()),
+        }
+    }
+}
 
 impl<T, U> Drop for Envelope<T, U> {
     fn drop(&mut self) {

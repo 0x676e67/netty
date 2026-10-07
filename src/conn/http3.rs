@@ -184,6 +184,18 @@ impl<B> SendRequest<B> {
     pub fn is_closed(&self) -> bool {
         self.shared.is_draining()
     }
+
+    /// Returns whether the server enabled [extended CONNECT][1].
+    ///
+    /// Returns `None` until the server's SETTINGS arrive, and keeps returning `None`
+    /// if the connection closes first. Extended CONNECT requests wait for those
+    /// SETTINGS and are returned unsent with an [`Error::is_user`] error if the
+    /// server did not enable the protocol.
+    ///
+    /// [1]: https://www.rfc-editor.org/rfc/rfc9220#section-3
+    pub fn is_extended_connect_protocol_enabled(&self) -> Option<bool> {
+        self.shared.peer_extended_connect.get().copied()
+    }
 }
 
 impl<B> SendRequest<B>

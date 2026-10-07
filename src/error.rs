@@ -89,7 +89,7 @@ pub(crate) enum Header {
 #[derive(Debug)]
 #[cfg_attr(feature = "http3", derive(Clone, Copy))]
 pub(super) enum User {
-    #[cfg(feature = "http3")]
+    /// A request the protocol or peer settings do not allow.
     InvalidRequest,
     /// Error calling user's Body::poll_data().
     Body,
@@ -134,6 +134,9 @@ impl Error {
     ///
     /// For example, this can be returned when the user's `Body` stream
     /// yields an error.
+    ///
+    /// It also covers requests the protocol or the peer's SETTINGS do not allow,
+    /// such as Extended CONNECT to a server that did not enable it.
     #[inline]
     pub fn is_user(&self) -> bool {
         matches!(self.inner.kind, Kind::User(_))
@@ -379,7 +382,6 @@ impl Error {
         Error::new(cause.inner.kind).with(cause)
     }
 
-    #[cfg(feature = "http3")]
     pub(super) fn new_user_invalid_request<E: Into<Cause>>(cause: E) -> Error {
         Error::new_user(User::InvalidRequest).with(cause)
     }
@@ -420,9 +422,8 @@ impl Error {
             #[cfg(feature = "http3")]
             Kind::Http3 => "http3 error",
             Kind::Io => "connection error",
-            #[cfg(feature = "http3")]
-            Kind::User(User::InvalidRequest) => "invalid HTTP/3 request",
 
+            Kind::User(User::InvalidRequest) => "invalid request",
             Kind::User(User::Body) => "error from user's Body stream",
             Kind::User(User::BodyWriteAborted) => "user body write aborted",
             Kind::User(User::InvalidConnectWithBody) => {

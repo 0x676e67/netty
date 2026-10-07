@@ -102,6 +102,7 @@ async fn last_sender_drop_preserves_connect_waiting_for_settings() {
             .insert(http3::ext::Protocol::CONNECT_UDP);
         let mut waiting = tokio_test::task::spawn(tx.try_send_request(request));
         assert!(waiting.poll().is_pending());
+        assert_eq!(tx.is_extended_connect_protocol_enabled(), None);
         drop(tx);
         assert!(waiting.poll().is_pending());
         let mut drive = Box::pin(driver);
