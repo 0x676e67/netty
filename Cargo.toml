@@ -1,6 +1,6 @@
 [package]
 name = "netty"
-version = "0.2.5"
+version = "0.2.6"
 description = "Async network clients, down to the wire"
 keywords = ["http", "client"]
 categories = ["web-programming::http-client"]

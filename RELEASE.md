@@ -1,3 +1,38 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## netty [0.2.6](https://github.com/0x676e67/netty/compare/v0.2.5...v0.2.6) - 2026-10-07
+
+
+
+### 🚀 Features
+
+- *(http1)* Add max_header_size limit for server and client ([#149](https://github.com/0x676e67/netty/issues/149)) - ([22a2b4a](https://github.com/0x676e67/netty/commit/22a2b4aa4fa8cfa532792ecfa6cc176d891fda10))
+- *(http2)* Gate extended CONNECT on peer SETTINGS ([#151](https://github.com/0x676e67/netty/issues/151)) - ([3703f25](https://github.com/0x676e67/netty/commit/3703f250846b832f222dc284e84af771c7e855a2))
+
+### 🐛 Bug Fixes
+
+- *(http1)* Let a Connection close token win over a later keep-alive ([#147](https://github.com/0x676e67/netty/issues/147)) - ([a5ec550](https://github.com/0x676e67/netty/commit/a5ec55002583e16c0730247e1a3a406e76d3bd24))
+- *(http1)* Close canceled connections without flushing ([#145](https://github.com/0x676e67/netty/issues/145)) - ([f8652dd](https://github.com/0x676e67/netty/commit/f8652ddf5e386d66b7f03cceedbc6b319d849762))
+- *(http2)* Do not reserve capacity for idle Upgraded streams ([#140](https://github.com/0x676e67/netty/issues/140)) - ([f598a3e](https://github.com/0x676e67/netty/commit/f598a3edfcc72c4ad0ca7e1a0aff884ee1cff3d7))
+
+### ⚡ Performance
+
+- *(body)* Skip waking a closed peer when a channel end drops ([#150](https://github.com/0x676e67/netty/issues/150)) - ([663b094](https://github.com/0x676e67/netty/commit/663b094fe80389c393880d8d5168c73131629336))
+
+### 🎨 Styling
+
+- *(lib)* Address cast-possible-truncation clippy findings ([#148](https://github.com/0x676e67/netty/issues/148)) - ([3fa9152](https://github.com/0x676e67/netty/commit/3fa91527201cd138ad3c20ef50547cfc17b734a2))
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump MSRV to 1.98 and edition to 2024 ([#142](https://github.com/0x676e67/netty/issues/142)) - ([0b1799b](https://github.com/0x676e67/netty/commit/0b1799b6459a72186108bd8808f9ed11e0402999))
 ## [0.2.5] - 2026-09-25
 
 ### 🚀 Features
