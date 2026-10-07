@@ -33,9 +33,9 @@ pub(crate) fn channel<T, U>() -> (Sender<T, U>, Receiver<T, U>) {
 /// transport. If that happens, it is safe to return the request back to the
 /// caller, as it was never fully sent.
 ///
-/// A returned request was not sent, but only [`Error::is_canceled`] errors are
-/// worth retrying. Others are final, such as Extended CONNECT to a server that did
-/// not enable it.
+/// A returned request was never sent. [`Error::is_user`] errors, such as Extended
+/// CONNECT to a server that did not enable it, are final; other errors mean this
+/// connection could not take the request.
 #[derive(Debug)]
 pub struct TrySendError<T> {
     pub(crate) error: Error,

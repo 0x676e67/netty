@@ -588,10 +588,13 @@ where
             let Some((req, cb)) = parked.take() else {
                 continue;
             };
-            // `http2::Error` is not `Clone`; its reason carries the protocol failure.
-            let error = match err.reason() {
-                Some(reason) => Error::new_canceled().with(::http2::Error::from(reason)),
-                None => Error::new_canceled().with(err.to_string()),
+            // `http2::Error` is not `Clone`; rebuild the protocol reason or I/O kind.
+            let error = match (err.reason(), err.get_io()) {
+                (Some(reason), _) => Error::new_canceled().with(::http2::Error::from(reason)),
+                (None, Some(io)) => {
+                    Error::new_canceled().with(std::io::Error::new(io.kind(), io.to_string()))
+                }
+                (None, None) => Error::new_canceled().with(err.to_string()),
             };
             cb.send(Err(TrySendError {
                 error,

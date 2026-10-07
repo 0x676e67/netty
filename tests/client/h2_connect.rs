@@ -101,6 +101,16 @@ impl Driver {
     }
 }
 
+fn extended_connect(path: &str) -> Request<Empty<Bytes>> {
+    let mut request = Request::connect(format!("https://localhost:443{path}"))
+        .body(Empty::<Bytes>::new())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(::http2::ext::Protocol::from_static("websocket"));
+    request
+}
+
 fn connect() -> (
     Driver,
     Upgraded,
@@ -218,15 +228,29 @@ async fn h2_extended_connect_peer_support() {
 
 #[tokio::test]
 async fn h2_extended_connect_waits_for_peer_settings() {
-    // `None` breaks the connection before the server sends SETTINGS; the last case
-    // drops every sender while the request is parked.
+    /// How the server answers while extended CONNECT requests are parked.
+    #[derive(Clone, Copy)]
+    enum Peer {
+        /// Writes bytes that are not an HTTP/2 frame (FRAME_SIZE_ERROR).
+        Garbage,
+        /// Closes the transport before sending SETTINGS.
+        Eof,
+        /// Sends SETTINGS with or without extended CONNECT.
+        Settings(bool),
+    }
+    // The last case drops every sender while the requests are parked.
     let cases = [
-        (None, true),
-        (Some(false), true),
-        (Some(true), true),
-        (Some(true), false),
+        (Peer::Garbage, true),
+        (Peer::Eof, true),
+        (Peer::Settings(false), true),
+        (Peer::Settings(true), true),
+        (Peer::Settings(true), false),
     ];
-    for (settings, keep_sender) in cases {
+    for (peer, keep_sender) in cases {
+        let settings = match peer {
+            Peer::Settings(enabled) => Some(enabled),
+            Peer::Garbage | Peer::Eof => None,
+        };
         let (tx, rx) = mpsc::channel();
         let executor = Executor(tx);
         let mut driver = Driver {
@@ -243,14 +267,14 @@ async fn h2_extended_connect_waits_for_peer_settings() {
             let _ = conn.await;
         });
 
-        let mut request = Request::connect("https://localhost:443/chat")
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-        request
-            .extensions_mut()
-            .insert(::http2::ext::Protocol::from_static("websocket"));
-        let mut connect = task::spawn(client.try_send_request(request));
-        assert_pending!(driver.poll(&mut connect));
+        // The server has not sent SETTINGS, so these wait; one caller gives up.
+        let mut connects = ["/a", "/canceled", "/b"]
+            .map(|path| task::spawn(client.try_send_request(extended_connect(path))));
+        for connect in &mut connects {
+            assert_pending!(driver.poll(connect));
+        }
+        let [first, canceled, last] = connects;
+        drop(canceled);
         // A parked extended CONNECT must not hold back other requests.
         let get = Request::get("https://localhost/")
             .body(Empty::<Bytes>::new())
@@ -259,63 +283,110 @@ async fn h2_extended_connect_waits_for_peer_settings() {
         let client = keep_sender.then_some(client);
         assert_pending!(driver.poll(&mut get));
 
-        let methods = Arc::new(Mutex::new(Vec::new()));
-        if let Some(enabled) = settings {
-            let seen = methods.clone();
-            let service = service_fn(move |request: Request<hyper::body::Incoming>| {
-                seen.lock().unwrap().push(request.method().clone());
-                async { Ok::<_, Infallible>(Response::new(Empty::<Bytes>::new())) }
-            });
-            let mut builder = hyper::server::conn::http2::Builder::new(executor.clone());
-            if enabled {
-                builder.enable_connect_protocol();
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        match peer {
+            Peer::Settings(enabled) => {
+                let seen = paths.clone();
+                let service = service_fn(move |request: Request<hyper::body::Incoming>| {
+                    seen.lock().unwrap().push(request.uri().path().to_owned());
+                    async { Ok::<_, Infallible>(Response::new(Empty::<Bytes>::new())) }
+                });
+                let mut builder = hyper::server::conn::http2::Builder::new(executor.clone());
+                if enabled {
+                    builder.enable_connect_protocol();
+                }
+                driver.spawn(async move {
+                    let _ = builder
+                        .serve_connection(TokioIo::new(server_io), service)
+                        .await;
+                });
             }
-            driver.spawn(async move {
-                let _ = builder
-                    .serve_connection(TokioIo::new(server_io), service)
-                    .await;
-            });
-        } else {
-            driver.spawn(async move {
+            Peer::Garbage => driver.spawn(async move {
                 let mut server_io = server_io;
-                // Not an HTTP/2 frame: the client fails with FRAME_SIZE_ERROR.
                 let _ = server_io
                     .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
                     .await;
-            });
+            }),
+            Peer::Eof => drop(server_io),
         }
 
-        let result = assert_ready!(driver.poll(&mut connect));
-        if let Some(client) = &client {
-            assert_eq!(client.is_extended_connect_protocol_enabled(), settings);
-        }
-        if settings == Some(true) {
-            assert_eq!(result.unwrap().status(), StatusCode::OK);
-        } else {
-            let error = result.unwrap_err();
+        // Parked requests leave in order, each caller getting its own request back.
+        for (mut connect, path) in [(first, "/a"), (last, "/b")] {
+            let result = assert_ready!(driver.poll(&mut connect));
+            if settings == Some(true) {
+                assert_eq!(result.unwrap().status(), StatusCode::OK);
+                continue;
+            }
+            let mut error = result.unwrap_err();
             assert_eq!(error.error().is_user(), settings.is_some());
             assert_eq!(error.error().is_canceled(), settings.is_none());
-            assert!(error.message().is_some());
-            if settings.is_none() {
-                let cause = std::error::Error::source(error.error())
-                    .and_then(|cause| cause.downcast_ref::<::http2::Error>());
-                assert_eq!(
-                    cause.and_then(::http2::Error::reason),
+            assert_eq!(error.take_message().unwrap().uri().path(), path);
+            let cause = std::error::Error::source(error.error());
+            match peer {
+                Peer::Garbage => assert_eq!(
+                    cause
+                        .and_then(|cause| cause.downcast_ref::<::http2::Error>())
+                        .and_then(::http2::Error::reason),
                     Some(::http2::Reason::FRAME_SIZE_ERROR)
-                );
+                ),
+                Peer::Eof => assert!(cause.is_some_and(|cause| cause.is::<io::Error>())),
+                Peer::Settings(_) => {}
             }
+        }
+        if let Some(client) = &client {
+            assert_eq!(client.is_extended_connect_protocol_enabled(), settings);
         }
         assert_eq!(
             assert_ready!(driver.poll(&mut get)).is_ok(),
             settings.is_some()
         );
-        let expected: &[Method] = match settings {
+        let expected: &[&str] = match settings {
             None => &[],
-            Some(false) => &[Method::GET],
-            Some(true) => &[Method::GET, Method::CONNECT],
+            Some(false) => &["/"],
+            Some(true) => &["/", "/a", "/b"],
         };
-        assert_eq!(*methods.lock().unwrap(), expected);
+        assert_eq!(*paths.lock().unwrap(), expected);
     }
+}
+
+#[tokio::test]
+async fn h2_extended_connect_follows_later_settings() {
+    let (tx, rx) = mpsc::channel();
+    let executor = Executor(tx);
+    let mut driver = Driver {
+        executor: executor.clone(),
+        rx,
+        tasks: Vec::new(),
+    };
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (mut client, conn) = driver
+        .finish(http2::Builder::new(executor).handshake::<_, Empty<Bytes>>(client_io))
+        .unwrap();
+    driver.spawn(async move {
+        let _ = conn.await;
+    });
+    let mut server = driver.finish(h2::server::handshake(server_io)).unwrap();
+    let drive = |driver: &mut Driver, server: &mut h2::server::Connection<_, Bytes>| {
+        let mut closed = task::spawn(std::future::poll_fn(|cx| server.poll_closed(cx)));
+        assert_pending!(driver.poll(&mut closed));
+    };
+
+    drive(&mut driver, &mut server);
+    assert_eq!(client.is_extended_connect_protocol_enabled(), Some(false));
+    let error = driver
+        .finish(client.try_send_request(extended_connect("/chat")))
+        .unwrap_err();
+    assert!(error.error().is_user());
+
+    // RFC 8441 §3 only forbids withdrawing the setting; a later SETTINGS may enable it.
+    server.enable_connect_protocol().unwrap();
+    drive(&mut driver, &mut server);
+    assert_eq!(client.is_extended_connect_protocol_enabled(), Some(true));
+    let mut connect = task::spawn(client.try_send_request(extended_connect("/chat")));
+    assert_pending!(driver.poll(&mut connect));
+    let (request, _respond) = driver.finish(server.accept()).unwrap().unwrap();
+    assert_eq!(request.method(), Method::CONNECT);
+    assert!(request.extensions().get::<h2::ext::Protocol>().is_some());
 }
 
 #[tokio::test]
@@ -337,13 +408,7 @@ async fn h2_extended_connect_cancel_while_parked_releases_connection() {
         let _ = done_tx.send(());
     });
 
-    let mut request = Request::connect("https://localhost:443/chat")
-        .body(Empty::<Bytes>::new())
-        .unwrap();
-    request
-        .extensions_mut()
-        .insert(::http2::ext::Protocol::from_static("websocket"));
-    let mut connect = task::spawn(client.try_send_request(request));
+    let mut connect = task::spawn(client.try_send_request(extended_connect("/chat")));
     assert_pending!(driver.poll(&mut connect));
     drop(client);
     driver.run();
@@ -353,6 +418,7 @@ async fn h2_extended_connect_cancel_while_parked_releases_connection() {
     drop(connect);
     driver.run();
     assert!(done.try_recv().unwrap().is_some());
+    assert!(driver.tasks.is_empty());
 }
 
 // https://github.com/hyperium/hyper/issues/4003, for HTTP/2 CONNECT

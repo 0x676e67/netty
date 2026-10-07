@@ -122,12 +122,14 @@ impl<B> SendRequest<B> {
 
     /// Returns whether the server enabled [extended CONNECT][1].
     ///
-    /// Returns `None` until the server's SETTINGS arrive, and keeps returning `None`
-    /// if the connection closes first. Extended CONNECT requests wait for those
-    /// SETTINGS and are returned unsent with an [`Error::is_user`] error if the
-    /// server did not enable the protocol.
+    /// Returns `None` until the server's [`SETTINGS_ENABLE_CONNECT_PROTOCOL`][2] arrives,
+    /// and keeps returning `None` if the connection closes first. Extended CONNECT
+    /// requests wait for those SETTINGS and are returned unsent: with an
+    /// [`Error::is_user`] error if the server did not enable the protocol, or an
+    /// [`Error::is_canceled`] error if the connection closes first.
     ///
-    /// [1]: https://datatracker.ietf.org/doc/html/rfc8441#section-3
+    /// [1]: https://datatracker.ietf.org/doc/html/rfc8441#section-4
+    /// [2]: https://datatracker.ietf.org/doc/html/rfc8441#section-3
     #[inline]
     pub fn is_extended_connect_protocol_enabled(&self) -> Option<bool> {
         self.peer.extended_connect()
@@ -214,7 +216,9 @@ where
 {
     /// Returns whether the server enabled [extended CONNECT][1].
     ///
-    /// Reflects the current [`SETTINGS_ENABLE_CONNECT_PROTOCOL`][2] value received from the peer.
+    /// Reflects the current [`SETTINGS_ENABLE_CONNECT_PROTOCOL`][2] value received from the peer,
+    /// and returns `false` until it arrives; see
+    /// [`SendRequest::is_extended_connect_protocol_enabled`] to tell the two apart.
     ///
     /// [1]: https://datatracker.ietf.org/doc/html/rfc8441#section-4
     /// [2]: https://datatracker.ietf.org/doc/html/rfc8441#section-3
