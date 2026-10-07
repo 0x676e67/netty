@@ -422,8 +422,8 @@ impl Error {
             #[cfg(feature = "http3")]
             Kind::Http3 => "http3 error",
             Kind::Io => "connection error",
-            Kind::User(User::InvalidRequest) => "invalid request",
 
+            Kind::User(User::InvalidRequest) => "invalid request",
             Kind::User(User::Body) => "error from user's Body stream",
             Kind::User(User::BodyWriteAborted) => "user body write aborted",
             Kind::User(User::InvalidConnectWithBody) => {
