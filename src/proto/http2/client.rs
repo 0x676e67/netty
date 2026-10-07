@@ -112,10 +112,9 @@ where
         conn_drop_ref,
         conn_eof,
         executor: exec,
-        peer,
+        gate: ConnectGate::new(peer),
         h2_tx,
         req_rx,
-        parked: VecDeque::new(),
         fut_ctx: None,
         marker: PhantomData,
     })
@@ -287,6 +286,118 @@ impl PeerSettings {
     }
 }
 
+/// Holds extended CONNECT requests until the server's SETTINGS allow or refuse them
+/// ([RFC 8441 §3](https://www.rfc-editor.org/rfc/rfc8441#section-3)).
+///
+/// Only the dispatcher uses it. Refusing needs no stream capacity, so it settles before
+/// the dispatcher waits to open a stream; admitted requests take the normal send path.
+struct ConnectGate<B> {
+    peer: Arc<PeerSettings>,
+    parked: VecDeque<Envelope<Request<B>, Response<Incoming>>>,
+}
+
+/// A request and the callback that completes it.
+type Pending<B> = (Request<B>, Callback<Request<B>, Response<Incoming>>);
+
+// ===== impl ConnectGate =====
+
+impl<B> ConnectGate<B> {
+    fn new(peer: Arc<PeerSettings>) -> Self {
+        Self {
+            peer,
+            parked: VecDeque::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.parked.is_empty()
+    }
+
+    /// Lets a request through, or parks or refuses an extended CONNECT.
+    fn admit(
+        &mut self,
+        req: Request<B>,
+        cb: Callback<Request<B>, Response<Incoming>>,
+        cx: &mut Context<'_>,
+    ) -> Option<Pending<B>> {
+        if req.extensions().get::<Protocol>().is_none() {
+            return Some((req, cb));
+        }
+        match self.peer.poll_extended_connect(cx) {
+            Poll::Ready(true) => Some((req, cb)),
+            Poll::Ready(false) => {
+                cb.send(Err(refused(req)));
+                None
+            }
+            // A connection that ends first returns parked requests unsent.
+            Poll::Pending => {
+                trace!("extended CONNECT waits for peer SETTINGS");
+                self.parked.push_back(Envelope::new(req, cb));
+                None
+            }
+        }
+    }
+
+    /// Refuses parked requests once the server is known not to support the protocol,
+    /// and drops callers that stopped waiting while that is still unknown.
+    fn poll_settle(&mut self, cx: &mut Context<'_>) {
+        if self.parked.is_empty() {
+            return;
+        }
+        match self.peer.poll_extended_connect(cx) {
+            Poll::Ready(true) => {}
+            Poll::Ready(false) => {
+                for mut parked in self.parked.drain(..) {
+                    if let Some((req, cb)) = parked.take() {
+                        cb.send(Err(refused(req)));
+                    }
+                }
+            }
+            Poll::Pending => self
+                .parked
+                .retain_mut(|parked| parked.poll_canceled(cx).is_pending()),
+        }
+    }
+
+    /// Takes the oldest parked request once the server enabled the protocol.
+    fn pop_enabled(&mut self) -> Option<Pending<B>> {
+        if self.peer.extended_connect() != Some(true) {
+            return None;
+        }
+        self.parked.pop_front().and_then(|mut parked| parked.take())
+    }
+
+    /// Returns parked requests unsent, keeping the connection failure as their cause.
+    fn release(&mut self, err: &::http2::Error) {
+        for mut parked in self.parked.drain(..) {
+            let Some((req, cb)) = parked.take() else {
+                continue;
+            };
+            // `http2::Error` is not `Clone`; rebuild the protocol reason or I/O kind.
+            let error = match (err.reason(), err.get_io()) {
+                (Some(reason), _) => Error::new_canceled().with(::http2::Error::from(reason)),
+                (None, Some(io)) => {
+                    Error::new_canceled().with(std::io::Error::new(io.kind(), io.to_string()))
+                }
+                (None, None) => Error::new_canceled().with(err.to_string()),
+            };
+            cb.send(Err(TrySendError {
+                error,
+                message: Some(req),
+            }));
+        }
+    }
+}
+
+/// Rejects extended CONNECT to a server that did not enable it.
+fn refused<B>(req: Request<B>) -> TrySendError<Request<B>> {
+    debug!("peer did not enable extended CONNECT");
+    TrySendError {
+        error: Error::new_user_invalid_request("peer did not enable Extended CONNECT"),
+        message: Some(req),
+    }
+}
+
 pin_project! {
     pub struct ConnTask<T, B>
     where
@@ -432,12 +543,10 @@ where
     conn_drop_ref: ConnDropRef,
     conn_eof: ConnEof,
     executor: E,
-    /// Server SETTINGS published by the connection task.
-    peer: Arc<PeerSettings>,
+    /// Extended CONNECT requests waiting on the server's SETTINGS.
+    gate: ConnectGate<B>,
     h2_tx: SendRequest<SendBuf<B::Data>>,
     req_rx: ClientRx<B>,
-    /// Extended CONNECT requests waiting for the server's initial SETTINGS.
-    parked: VecDeque<Envelope<Request<B>, Response<Incoming>>>,
     fut_ctx: Option<FutCtx<B>>,
     marker: PhantomData<T>,
 }
@@ -574,33 +683,11 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     pub(crate) fn is_extended_connect_protocol_enabled(&self) -> bool {
-        self.peer.extended_connect() == Some(true)
+        self.gate.peer.extended_connect() == Some(true)
     }
 
     pub(crate) fn peer_settings(&self) -> Arc<PeerSettings> {
-        self.peer.clone()
-    }
-
-    /// Returns parked extended CONNECT requests unsent, keeping the connection
-    /// failure as their cause.
-    fn release_parked(&mut self, err: &::http2::Error) {
-        for mut parked in self.parked.drain(..) {
-            let Some((req, cb)) = parked.take() else {
-                continue;
-            };
-            // `http2::Error` is not `Clone`; rebuild the protocol reason or I/O kind.
-            let error = match (err.reason(), err.get_io()) {
-                (Some(reason), _) => Error::new_canceled().with(::http2::Error::from(reason)),
-                (None, Some(io)) => {
-                    Error::new_canceled().with(std::io::Error::new(io.kind(), io.to_string()))
-                }
-                (None, None) => Error::new_canceled().with(err.to_string()),
-            };
-            cb.send(Err(TrySendError {
-                error,
-                message: Some(req),
-            }));
-        }
+        self.gate.peer.clone()
     }
 
     pub(crate) fn current_max_send_streams(&self) -> usize {
@@ -711,11 +798,14 @@ where
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
+            // Refusals need no stream capacity, so they must not wait behind open backpressure.
+            self.gate.poll_settle(cx);
+
             match ready!(self.h2_tx.poll_ready(cx)) {
                 Ok(()) => (),
                 Err(err) => {
                     self.ping.ensure_not_timed_out()?;
-                    self.release_parked(&err);
+                    self.gate.release(&err);
                     return if err.reason() == Some(::http2::Reason::NO_ERROR) {
                         trace!("connection gracefully shutdown");
                         Poll::Ready(Ok(Dispatched::Shutdown))
@@ -732,23 +822,12 @@ where
                 continue;
             }
 
-            // Extended CONNECT waits for the server's initial SETTINGS:
-            // https://www.rfc-editor.org/rfc/rfc8441#section-3
-            let parked = if self.parked.is_empty() {
-                None
-            } else if self.peer.poll_extended_connect(cx).is_ready() {
-                self.parked.pop_front().and_then(|mut parked| parked.take())
-            } else {
-                // Release callers that gave up while waiting.
-                self.parked
-                    .retain_mut(|parked| parked.poll_canceled(cx).is_pending());
-                None
-            };
+            let parked = self.gate.pop_enabled();
             let (req, cb) = match parked {
                 Some(parked) => parked,
                 None => match self.req_rx.poll_recv(cx) {
                     Poll::Ready(Some(next)) => next,
-                    Poll::Ready(None) if self.parked.is_empty() => {
+                    Poll::Ready(None) if self.gate.is_empty() => {
                         trace!("client::dispatch::Sender dropped");
                         return Poll::Ready(Ok(Dispatched::Shutdown));
                     }
@@ -766,27 +845,9 @@ where
                 continue;
             }
 
-            if req.extensions().get::<Protocol>().is_some() {
-                match self.peer.poll_extended_connect(cx) {
-                    Poll::Ready(true) => {}
-                    Poll::Ready(false) => {
-                        debug!("peer did not enable extended CONNECT");
-                        cb.send(Err(TrySendError {
-                            error: Error::new_user_invalid_request(
-                                "peer did not enable Extended CONNECT",
-                            ),
-                            message: Some(req),
-                        }));
-                        continue;
-                    }
-                    // A connection that ends first returns parked requests unsent.
-                    Poll::Pending => {
-                        trace!("extended CONNECT waits for peer SETTINGS");
-                        self.parked.push_back(Envelope::new(req, cb));
-                        continue;
-                    }
-                }
-            }
+            let Some((req, cb)) = self.gate.admit(req, cb, cx) else {
+                continue;
+            };
 
             let (head, body) = req.into_parts();
             let mut req = ::http::Request::from_parts(head, ());

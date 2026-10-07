@@ -376,7 +376,7 @@ async fn h2_extended_connect_published_when_connection_ends() {
 }
 
 #[tokio::test]
-async fn h2_extended_connect_follows_later_settings() {
+async fn h2_extended_connect_refusal_ignores_open_backpressure() {
     let (tx, rx) = mpsc::channel();
     let executor = Executor(tx);
     let mut driver = Driver {
@@ -386,33 +386,53 @@ async fn h2_extended_connect_follows_later_settings() {
     };
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let (mut client, conn) = driver
-        .finish(http2::Builder::new(executor).handshake::<_, Empty<Bytes>>(client_io))
+        .finish(
+            http2::Builder::new(executor.clone())
+                .options(
+                    netty::http2::Http2Options::builder()
+                        .initial_max_send_streams(1)
+                        .build(),
+                )
+                .handshake::<_, Empty<Bytes>>(client_io),
+        )
         .unwrap();
     driver.spawn(async move {
         let _ = conn.await;
     });
-    let mut server = driver.finish(h2::server::handshake(server_io)).unwrap();
-    let drive = |driver: &mut Driver, server: &mut h2::server::Connection<_, Bytes>| {
-        let mut closed = task::spawn(std::future::poll_fn(|cx| server.poll_closed(cx)));
-        assert_pending!(driver.poll(&mut closed));
-    };
 
-    drive(&mut driver, &mut server);
-    assert_eq!(client.is_extended_connect_protocol_enabled(), Some(false));
-    let error = driver
-        .finish(client.try_send_request(extended_connect("/chat")))
-        .unwrap_err();
-    assert!(error.error().is_user());
-
-    // RFC 8441 §3 only forbids withdrawing the setting; a later SETTINGS may enable it.
-    server.enable_connect_protocol().unwrap();
-    drive(&mut driver, &mut server);
-    assert_eq!(client.is_extended_connect_protocol_enabled(), Some(true));
     let mut connect = task::spawn(client.try_send_request(extended_connect("/chat")));
     assert_pending!(driver.poll(&mut connect));
-    let (request, _respond) = driver.finish(server.accept()).unwrap().unwrap();
-    assert_eq!(request.method(), Method::CONNECT);
-    assert!(request.extensions().get::<h2::ext::Protocol>().is_some());
+    // One stream is held open, so the next GET waits to open.
+    let get = |path: &str| {
+        Request::get(format!("https://localhost{path}"))
+            .body(Empty::<Bytes>::new())
+            .unwrap()
+    };
+    let mut held = task::spawn(client.try_send_request(get("/held")));
+    assert_pending!(driver.poll(&mut held));
+    let mut queued = task::spawn(client.try_send_request(get("/queued")));
+    assert_pending!(driver.poll(&mut queued));
+
+    let service = service_fn(|request: Request<hyper::body::Incoming>| async move {
+        if request.uri().path() == "/held" {
+            std::future::pending::<()>().await;
+        }
+        Ok::<_, Infallible>(Response::new(Empty::<Bytes>::new()))
+    });
+    let mut builder = hyper::server::conn::http2::Builder::new(executor);
+    builder.max_concurrent_streams(1);
+    driver.spawn(async move {
+        let _ = builder
+            .serve_connection(TokioIo::new(server_io), service)
+            .await;
+    });
+
+    // The refusal needs no stream capacity, so it is not held behind the queued GET.
+    let mut error = assert_ready!(driver.poll(&mut connect)).unwrap_err();
+    assert!(error.error().is_user());
+    assert_eq!(error.take_message().unwrap().uri().path(), "/chat");
+    assert_eq!(client.is_extended_connect_protocol_enabled(), Some(false));
+    assert_pending!(driver.poll(&mut queued));
 }
 
 #[tokio::test]
