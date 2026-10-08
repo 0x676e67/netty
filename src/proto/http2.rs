@@ -173,8 +173,22 @@ where
                             continue;
                         }
 
-                        // Reserve a minimal claim on the connection-level
-                        // flow-control window rather than the whole chunk. The
+                        if is_eos {
+                            // Nothing follows the final chunk, so there is no
+                            // backpressure to apply: http2 buffers it and sends
+                            // it as window opens, claiming its full length. A
+                            // body already in memory thus finishes on the
+                            // connection task without a pipe task of its own.
+                            me.body_tx
+                                .send_data(SendBuf::Buf(chunk), true)
+                                .map_err(Error::new_body_write)?;
+                            return Poll::Ready(Ok(()));
+                        }
+
+                        // A later chunk follows, so wait for capacity before
+                        // polling for it. Reserve a minimal claim on the
+                        // connection-level flow-control window rather than the
+                        // whole chunk. The
                         // chunk is already in hand, so this still cannot pin
                         // capacity against a body that never produces data
                         // (#4003), and http2 raises the request to the buffered

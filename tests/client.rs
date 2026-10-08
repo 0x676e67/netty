@@ -4358,6 +4358,74 @@ mod conn {
         assert!(got_rst, "server should receive RST_STREAM");
     }
 
+    // A body whose last chunk is in hand is sent from the connection task, so each request
+    // spawns only its response future and no separate pipe for the body.
+    #[tokio::test]
+    async fn h2_final_body_chunk_needs_no_pipe_task() {
+        #[derive(Clone)]
+        struct CountingExec(Arc<AtomicUsize>);
+
+        impl<F> netty::rt::Executor<F> for CountingExec
+        where
+            F: std::future::Future<Output = ()> + Send + 'static,
+        {
+            fn execute(&self, future: F) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(future);
+            }
+        }
+
+        const REQUESTS: usize = 4;
+        let (client_io, server_io, _) = setup_duplex_test_server();
+        tokio::spawn(async move {
+            let mut h2 = h2::server::handshake(server_io).await.unwrap();
+            while let Some(result) = h2.accept().await {
+                let (req, mut respond) = result.unwrap();
+                tokio::spawn(async move {
+                    let mut body = req.into_body();
+                    let mut received = 0;
+                    while let Some(Ok(data)) = body.data().await {
+                        received += data.len();
+                        let _ = body.flow_control().release_capacity(data.len());
+                    }
+                    let mut send = respond.send_response(Response::new(()), false).unwrap();
+                    let _ = send.send_data(Bytes::from(received.to_string()), true);
+                });
+            }
+        });
+
+        let spawned = Arc::new(AtomicUsize::new(0));
+        let io = TokioIo::new(client_io);
+        let (mut client, conn) = conn::http2::Builder::new(CountingExec(spawned.clone()))
+            .handshake(TokioIo::new(io))
+            .await
+            .expect("http handshake");
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        // Larger than the default 65,535 byte windows, so the chunk outlives the initial
+        // capacity and is still delivered in full.
+        let len = 100_000;
+        let mut before = 0;
+        // The first request also starts connection-level work; count from the second.
+        for i in 0..=REQUESTS {
+            if i == 1 {
+                before = spawned.load(Ordering::SeqCst);
+            }
+            let req = Request::post("http://localhost/")
+                .body(Full::new(Bytes::from(vec![b'x'; len])))
+                .unwrap();
+            let res = tokio::time::timeout(Duration::from_secs(5), client.try_send_request(req))
+                .await
+                .expect("response in time")
+                .expect("response");
+            let body = res.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(body, len.to_string());
+        }
+        assert_eq!(spawned.load(Ordering::SeqCst) - before, REQUESTS);
+    }
+
     // https://github.com/hyperium/hyper/issues/4003
     //
     // An idle `PipeToSendStream` must not reserve any connection-level flow
