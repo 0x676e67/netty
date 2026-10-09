@@ -1,4 +1,4 @@
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -159,6 +159,14 @@ impl<T, U> Receiver<T, U> {
     pub(crate) fn close(&mut self) {
         self.taker.cancel();
         self.inner.close();
+    }
+
+    pub(crate) fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        self.close();
+        // A send that started before close may still be publishing its envelope.
+        // Keep the receiver alive until all such envelopes have been canceled.
+        while ready!(self.inner.poll_recv(cx)).is_some() {}
+        Poll::Ready(())
     }
 
     #[inline]
