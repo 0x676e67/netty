@@ -1,6 +1,9 @@
 //! SOCKS4/4a and SOCKS5/5h connectors.
 //!
-//! The handshakes are delegated to [tokio-socks](https://docs.rs/tokio-socks).
+//! The CONNECT handshakes are delegated to [tokio-socks](https://docs.rs/tokio-socks);
+//! [`udp`] implements SOCKS5 UDP ASSOCIATE.
+
+pub mod udp;
 
 use std::{
     borrow::Cow,
