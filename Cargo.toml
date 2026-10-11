@@ -127,6 +127,11 @@ name = "http3"
 path = "tests/http3.rs"
 required-features = ["http3"]
 
+[[test]]
+name = "proxy"
+path = "tests/proxy.rs"
+required-features = ["socks"]
+
 [workspace]
 resolver = "3"
 

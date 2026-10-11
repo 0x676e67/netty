@@ -11,13 +11,15 @@ pub mod tunnel;
 
 use std::{
     fmt,
-    future::Future,
+    future::{Future, poll_fn},
+    io,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use futures_util::future::BoxFuture;
 use http::{Uri, uri::Scheme};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 /// Future returned by the proxy connectors.
 #[must_use = "futures do nothing unless polled"]
@@ -80,4 +82,31 @@ impl fmt::Debug for ProxyDst<'_> {
                 .map_or(authority, |(_, host)| host),
         )
     }
+}
+
+/// Writes all of `buf` and flushes, so a request reaches the proxy before its reply is awaited.
+async fn send<T>(io: &mut T, mut buf: &[u8]) -> io::Result<()>
+where
+    T: AsyncWrite + Unpin,
+{
+    while !buf.is_empty() {
+        let n = poll_fn(|cx| Pin::new(&mut *io).poll_write(cx, buf)).await?;
+        if n == 0 {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        buf = &buf[n..];
+    }
+    poll_fn(|cx| Pin::new(&mut *io).poll_flush(cx)).await
+}
+
+async fn read<T>(io: &mut T, buf: &mut [u8]) -> io::Result<usize>
+where
+    T: AsyncRead + Unpin,
+{
+    poll_fn(|cx| {
+        let mut buf = ReadBuf::new(&mut *buf);
+        ready!(Pin::new(&mut *io).poll_read(cx, &mut buf))?;
+        Poll::Ready(Ok(buf.filled().len()))
+    })
+    .await
 }
