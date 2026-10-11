@@ -112,7 +112,22 @@ impl Sender {
         cx: &mut Context<'_>,
         payload: &Bytes,
     ) -> Poll<Result<(), SendErrorKind>> {
-        let result = self.state.try_send(payload);
+        self.poll_admit(cx, |state| state.try_send(payload))
+    }
+
+    /// Waits until a payload of the current maximum size would be admitted.
+    /// Readiness is a hint, not a reservation: a cloned sender may take the room first.
+    pub fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), SendErrorKind>> {
+        self.poll_admit(cx, RequestState::ready)
+    }
+
+    /// Retries `attempt` until it is not `Full`, waiting on connection-wide capacity.
+    fn poll_admit(
+        &mut self,
+        cx: &mut Context<'_>,
+        mut attempt: impl FnMut(&RequestState) -> Result<(), SendErrorKind>,
+    ) -> Poll<Result<(), SendErrorKind>> {
+        let result = attempt(&self.state);
         if result != Err(SendErrorKind::Full) {
             self.waiting = None;
             return Poll::Ready(result);
@@ -127,7 +142,7 @@ impl Sender {
         }
         // Register before rechecking capacity so a concurrent dequeue cannot
         // leave this sender asleep with room available.
-        match self.state.try_send(payload) {
+        match attempt(&self.state) {
             Err(SendErrorKind::Full) => Poll::Pending,
             result => {
                 self.waiting = None;

@@ -21,7 +21,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 [features]
 default = []
 
-full = ["tracing", "http3", "http3-datagram", "tunnel", "socks"]
+full = ["tracing", "http3", "http3-datagram", "tunnel", "socks", "masque"]
 
 # HTTP/3 over an externally established QUIC connection.
 http3 = ["dep:http3", "dep:http-body-util"]
@@ -34,6 +34,9 @@ tunnel = ["dep:tower-service"]
 
 # SOCKS4/4a and SOCKS5/5h proxies as a tower connector.
 socks = ["dep:tower-service", "dep:tokio-socks"]
+
+# MASQUE CONNECT-UDP (RFC 9298) over HTTP/3 and HTTP/2 as a tower connector.
+masque = ["http3-datagram", "dep:tower-service"]
 
 # Enable tracing logging.
 tracing = ["dep:tracing", "http2/tracing", "tracing?/std", "http3?/tracing"]

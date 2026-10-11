@@ -19,6 +19,9 @@ mod datagram_close;
 mod finish;
 #[path = "http3/headers.rs"]
 mod headers;
+#[cfg(feature = "masque")]
+#[path = "http3/masque.rs"]
+mod masque;
 #[path = "http3/pause.rs"]
 mod pause;
 #[path = "http3/soak.rs"]
