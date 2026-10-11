@@ -16,7 +16,8 @@
 //! Much of this codebase is adapted and refined from [hyper](https://github.com/hyperium/hyper),
 //! aiming to match its performance and reliability for asynchronous HTTP/1 and HTTP/2.
 //! HTTP/3 over a QUIC connection the caller establishes is available with the `http3`
-//! feature, and HTTP Datagram sessions with `http3-datagram`.
+//! feature, and HTTP Datagram sessions with `http3-datagram`. Proxy connectors live in
+//! the `proxy` module: HTTP CONNECT tunnels with the `tunnel` feature.
 //!
 //! # Cancel safety
 //!
@@ -55,6 +56,8 @@ mod proto;
 pub mod body;
 pub mod conn;
 pub mod ext;
+#[cfg(feature = "tunnel")]
+pub mod proxy;
 pub mod rt;
 pub mod upgrade;
 #[cfg(feature = "http3")]
