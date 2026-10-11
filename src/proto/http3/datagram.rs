@@ -312,6 +312,29 @@ impl RequestState {
         }
     }
 
+    /// Checks that a payload of the current maximum size would be admitted, so a
+    /// ready sender's next `try_send` does not fail with `Full`.
+    pub(crate) fn ready(&self) -> std::result::Result<(), SendErrorKind> {
+        let state = self.registry.lock();
+        let Some(entry) = state.streams.get(&self.id.into_inner()) else {
+            return Err(SendErrorKind::Closed);
+        };
+        if !entry.send_open {
+            return Err(SendErrorKind::Closed);
+        }
+        let Some(max) = state.max_size.filter(|_| state.negotiated) else {
+            return Err(SendErrorKind::Unavailable);
+        };
+        let size = max.min(SESSION_BYTES);
+        if entry.outgoing.len() == PACKETS
+            || size > SESSION_BYTES - entry.outgoing_bytes
+            || size > CONNECTION_BYTES - state.outgoing
+        {
+            return Err(SendErrorKind::Full);
+        }
+        Ok(())
+    }
+
     /// Tries to frame and queue one payload within the session and connection
     /// budgets. Returns `Full` immediately when either queue has no capacity.
     pub(crate) fn try_send(&self, payload: &Bytes) -> std::result::Result<(), SendErrorKind> {
@@ -595,6 +618,47 @@ mod tests {
             Poll::Ready(Err(SendErrorKind::Closed))
         );
         assert!(registry.next().is_none());
+    }
+
+    #[test]
+    fn ready_waits_for_room_for_a_max_size_payload_without_enqueuing() {
+        use crate::conn::http3::datagram::Sender;
+        let registry = registry();
+        let request = registry.register(
+            StreamId::try_from(0).unwrap(),
+            true,
+            CancellationToken::new(),
+        );
+        let mut sender = Sender::new(request.0.clone());
+        let wakes = Arc::new(Wakes::default());
+        let waker = futures_util::task::waker(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        let queued = || registry.lock().streams[&0].outgoing.len();
+
+        // 64 KiB of the 128 KiB session budget leaves room for one more max-size packet.
+        request.0.try_send(&Bytes::from(vec![0; 65535])).unwrap();
+        assert_eq!(sender.poll_ready(&mut cx), Poll::Ready(Ok(())));
+        request.0.try_send(&Bytes::from_static(b"small")).unwrap();
+        assert!(sender.poll_ready(&mut cx).is_pending());
+        // Readiness is for the largest payload: a small one still fits.
+        request.0.try_send(&Bytes::from_static(b"small")).unwrap();
+        assert_eq!(queued(), 3);
+
+        registry.next().unwrap();
+        assert!(wakes.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        assert_eq!(sender.poll_ready(&mut cx), Poll::Ready(Ok(())));
+        assert_eq!(queued(), 2);
+
+        registry.negotiated(false);
+        assert_eq!(
+            sender.poll_ready(&mut cx),
+            Poll::Ready(Err(SendErrorKind::Unavailable))
+        );
+        request.0.close_send();
+        assert_eq!(
+            sender.poll_ready(&mut cx),
+            Poll::Ready(Err(SendErrorKind::Closed))
+        );
     }
 
     #[test]

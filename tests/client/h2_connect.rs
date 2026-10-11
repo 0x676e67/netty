@@ -664,3 +664,60 @@ async fn h2_connect_reset_during_backpressure() {
             .is_some()
     );
 }
+
+#[cfg(feature = "masque")]
+#[tokio::test]
+async fn h2_connect_udp_carries_capsules() {
+    use netty::proxy::masque::{self, Template, UdpTunnel};
+
+    let mut driver = Driver::new();
+    let executor = driver.executor.clone();
+    let (server_tx, server_rx) = oneshot::channel();
+    let server_tx = Mutex::new(Some(server_tx));
+    let upgrade_executor = executor.clone();
+    let service = service_fn(move |request: Request<hyper::body::Incoming>| {
+        assert_eq!(request.method(), Method::CONNECT);
+        let protocol = request.extensions().get::<hyper::ext::Protocol>().unwrap();
+        assert_eq!(protocol.as_str(), "connect-udp");
+        assert_eq!(request.uri(), "https://localhost:443/masque/192.0.2.1/53/");
+        assert_eq!(request.headers()["capsule-protocol"], "?1");
+        let upgrade = hyper::upgrade::on(request);
+        let tx = server_tx.lock().unwrap().take().unwrap();
+        upgrade_executor.execute(async move {
+            tx.send(upgrade.await.unwrap()).unwrap();
+        });
+        async { Ok::<_, Infallible>(Response::new(Empty::<Bytes>::new())) }
+    });
+    let (mut client, conn, server_io) =
+        driver.handshake(netty::http2::Http2Options::builder().build());
+    driver.spawn(async move {
+        let mut builder = hyper::server::conn::http2::Builder::new(executor);
+        builder.enable_connect_protocol();
+        builder
+            .serve_connection(TokioIo::new(server_io), service)
+            .await
+            .unwrap();
+    });
+    driver.run();
+    driver.spawn(async move {
+        conn.await.unwrap();
+    });
+
+    let template = Template::new("https://localhost:443/masque/{target_host}/{target_port}/");
+    let uri = template.unwrap().expand("192.0.2.1", 53).unwrap();
+    let response = driver
+        .finish(client.try_send_request(masque::http2_request(uri)))
+        .unwrap();
+    let mut tunnel = driver.finish(UdpTunnel::from_http2(response)).unwrap();
+    let mut server = TokioIo::new(driver.finish(server_rx).unwrap());
+    assert_eq!(tunnel.max_payload_size(), 65527);
+    tunnel.try_send(b"ping").unwrap();
+    let mut capsule = [0; 7];
+    driver.finish(server.read_exact(&mut capsule)).unwrap();
+    assert_eq!(&capsule, b"\0\x05\0ping");
+    driver.finish(server.write_all(b"\0\x05\0pong")).unwrap();
+    driver.finish(server.shutdown()).unwrap();
+    let mut recv = || driver.finish(std::future::poll_fn(|cx| tunnel.poll_recv(cx)));
+    assert_eq!(recv().unwrap().unwrap(), "pong");
+    assert!(recv().unwrap().is_none());
+}

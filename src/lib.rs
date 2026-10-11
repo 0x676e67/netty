@@ -17,8 +17,8 @@
 //! aiming to match its performance and reliability for asynchronous HTTP/1 and HTTP/2.
 //! HTTP/3 over a QUIC connection the caller establishes is available with the `http3`
 //! feature, and HTTP Datagram sessions with `http3-datagram`. Proxy connectors live in
-//! the `proxy` module: HTTP CONNECT tunnels with the `tunnel` feature and SOCKS with
-//! `socks`.
+//! the `proxy` module: HTTP CONNECT tunnels with the `tunnel` feature, SOCKS with
+//! `socks` and MASQUE CONNECT-UDP with `masque`.
 //!
 //! # Cancel safety
 //!
@@ -57,7 +57,7 @@ mod proto;
 pub mod body;
 pub mod conn;
 pub mod ext;
-#[cfg(any(feature = "tunnel", feature = "socks"))]
+#[cfg(any(feature = "tunnel", feature = "socks", feature = "masque"))]
 pub mod proxy;
 pub mod rt;
 pub mod upgrade;

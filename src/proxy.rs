@@ -4,6 +4,8 @@
 //! then runs the proxy handshake for the destination passed to `call`. TLS and the transport
 //! stay with the inner connector; SOCKS local DNS goes through a caller-supplied resolver.
 
+#[cfg(feature = "masque")]
+pub mod masque;
 #[cfg(feature = "socks")]
 pub mod socks;
 #[cfg(feature = "tunnel")]
@@ -11,15 +13,16 @@ pub mod tunnel;
 
 use std::{
     fmt,
-    future::{Future, poll_fn},
-    io,
+    future::Future,
     pin::Pin,
-    task::{Context, Poll, ready},
+    task::{Context, Poll},
 };
 
 use futures_util::future::BoxFuture;
 use http::{Uri, uri::Scheme};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+#[cfg(any(feature = "tunnel", feature = "socks"))]
+use self::io::{read, send};
 
 /// Future returned by the proxy connectors.
 #[must_use = "futures do nothing unless polled"]
@@ -68,8 +71,10 @@ fn port_or_default(uri: &Uri) -> u16 {
 }
 
 /// Debug view of a proxy URI without its userinfo, which may hold credentials.
+#[cfg(any(feature = "tunnel", feature = "socks"))]
 struct ProxyDst<'a>(&'a Uri);
 
+#[cfg(any(feature = "tunnel", feature = "socks"))]
 impl fmt::Debug for ProxyDst<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(scheme) = self.0.scheme_str() {
@@ -84,29 +89,42 @@ impl fmt::Debug for ProxyDst<'_> {
     }
 }
 
-/// Writes all of `buf` and flushes, so a request reaches the proxy before its reply is awaited.
-async fn send<T>(io: &mut T, mut buf: &[u8]) -> io::Result<()>
-where
-    T: AsyncWrite + Unpin,
-{
-    while !buf.is_empty() {
-        let n = poll_fn(|cx| Pin::new(&mut *io).poll_write(cx, buf)).await?;
-        if n == 0 {
-            return Err(io::ErrorKind::WriteZero.into());
-        }
-        buf = &buf[n..];
-    }
-    poll_fn(|cx| Pin::new(&mut *io).poll_flush(cx)).await
-}
+/// Byte-stream helpers for handshakes over the caller's IO.
+#[cfg(any(feature = "tunnel", feature = "socks"))]
+mod io {
+    use std::{
+        future::poll_fn,
+        io,
+        pin::Pin,
+        task::{Poll, ready},
+    };
 
-async fn read<T>(io: &mut T, buf: &mut [u8]) -> io::Result<usize>
-where
-    T: AsyncRead + Unpin,
-{
-    poll_fn(|cx| {
-        let mut buf = ReadBuf::new(&mut *buf);
-        ready!(Pin::new(&mut *io).poll_read(cx, &mut buf))?;
-        Poll::Ready(Ok(buf.filled().len()))
-    })
-    .await
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+    /// Writes all of `buf` and flushes, so a request reaches the proxy before its reply is awaited.
+    pub(super) async fn send<T>(io: &mut T, mut buf: &[u8]) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin,
+    {
+        while !buf.is_empty() {
+            let n = poll_fn(|cx| Pin::new(&mut *io).poll_write(cx, buf)).await?;
+            if n == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            buf = &buf[n..];
+        }
+        poll_fn(|cx| Pin::new(&mut *io).poll_flush(cx)).await
+    }
+
+    pub(super) async fn read<T>(io: &mut T, buf: &mut [u8]) -> io::Result<usize>
+    where
+        T: AsyncRead + Unpin,
+    {
+        poll_fn(|cx| {
+            let mut buf = ReadBuf::new(&mut *buf);
+            ready!(Pin::new(&mut *io).poll_read(cx, &mut buf))?;
+            Poll::Ready(Ok(buf.filled().len()))
+        })
+        .await
+    }
 }
