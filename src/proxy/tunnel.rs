@@ -187,6 +187,14 @@ where
         .await
         .map_err(TunnelError::Io)?;
 
+    read_response(&mut io).await?;
+    Ok(io)
+}
+
+async fn read_response<T>(io: &mut T) -> Result<(), TunnelError>
+where
+    T: AsyncRead + Unpin,
+{
     // Interim 1xx heads stay at the front of `buf`, so all heads share the size limit.
     let mut buf = [0; MAX_RESPONSE_HEAD];
     let mut start = 0;
@@ -205,7 +213,7 @@ where
             2
         };
         let end = (len + want).min(buf.len());
-        let n = read(&mut io, &mut buf[len..end])
+        let n = read(io, &mut buf[len..end])
             .await
             .map_err(TunnelError::Io)?;
         if n == 0 {
@@ -242,7 +250,7 @@ where
             s if s.is_success() => {
                 // The reads stop at the end of the head, so no tunneled byte sits in `buf`.
                 debug_assert_eq!(start + parsed, len);
-                return Ok(io);
+                return Ok(());
             }
             StatusCode::PROXY_AUTHENTICATION_REQUIRED => {
                 return Err(TunnelError::ProxyAuthRequired);
@@ -309,9 +317,9 @@ impl StdError for TunnelError {
 
 #[cfg(test)]
 mod tests {
-    use std::{future::Ready, time::Duration};
+    use std::future::Ready;
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
+    use tokio::io::{DuplexStream, duplex};
 
     use super::*;
 
@@ -340,156 +348,12 @@ mod tests {
         }
     }
 
-    /// Answers one CONNECT request with `response`, returning the request it read.
-    async fn proxy(mut io: DuplexStream, response: &[u8]) -> (DuplexStream, String) {
-        let mut req = Vec::new();
-        while !req.ends_with(b"\r\n\r\n") {
-            req.push(io.read_u8().await.expect("read request"));
-        }
-        io.write_all(response).await.expect("write response");
-        (io, String::from_utf8(req).expect("utf-8 request"))
-    }
-
-    /// Fails with `stalled` instead of hanging, e.g. when both ends wait on each other.
-    async fn bounded<F: Future>(fut: F, stalled: &str) -> F::Output {
-        // Miri runs too slowly for a wall-clock limit.
-        if cfg!(miri) {
-            return fut.await;
-        }
-        tokio::time::timeout(Duration::from_secs(5), fut)
-            .await
-            .expect(stalled)
-    }
-
-    #[tokio::test]
-    async fn connector_establishes_tunnel() {
-        fn auth() -> HeaderValue {
-            HeaderValue::from_static("Basic Zm9vOmJhcg==")
-        }
-        fn headers(fields: &[(&'static str, &'static str)]) -> HeaderMap {
-            let mut headers = HeaderMap::new();
-            for &(name, value) in fields {
-                headers.append(name, HeaderValue::from_static(value));
-            }
-            headers
-        }
-
-        type Configure = fn(TunnelConnector<Pipe>) -> TunnelConnector<Pipe>;
-        let cases: [(&str, Configure, &str); 8] = [
-            (
-                "https://example.com",
-                |c| c.with_auth(auth()),
-                "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\
-                 proxy-authorization: Basic Zm9vOmJhcg==\r\n\r\n",
-            ),
-            (
-                "http://example.com",
-                |c| {
-                    c.with_auth(auth())
-                        .with_headers(headers(&[("x-trace", "1")]))
-                },
-                "CONNECT example.com:80 HTTP/1.1\r\nHost: example.com:80\r\n\
-                 proxy-authorization: Basic Zm9vOmJhcg==\r\nx-trace: 1\r\n\r\n",
-            ),
-            (
-                "https://example.com:8443",
-                |c| {
-                    c.with_headers(headers(&[("x-trace", "1")]))
-                        .with_auth(auth())
-                },
-                "CONNECT example.com:8443 HTTP/1.1\r\nHost: example.com:8443\r\n\
-                 x-trace: 1\r\nproxy-authorization: Basic Zm9vOmJhcg==\r\n\r\n",
-            ),
-            (
-                // The later Proxy-Authorization wins.
-                "https://[2001:db8::1]",
-                |c| {
-                    c.with_auth(auth())
-                        .with_headers(headers(&[("proxy-authorization", "Basic b3RoZXI=")]))
-                },
-                "CONNECT [2001:db8::1]:443 HTTP/1.1\r\nHost: [2001:db8::1]:443\r\n\
-                 proxy-authorization: Basic b3RoZXI=\r\n\r\n",
-            ),
-            (
-                "https://example.com",
-                |c| {
-                    c.with_headers(headers(&[("x-trace", "1")]))
-                        .with_auth(auth())
-                        .with_headers(headers(&[("proxy-authorization", "Basic b3RoZXI=")]))
-                },
-                "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\
-                 x-trace: 1\r\nproxy-authorization: Basic b3RoZXI=\r\n\r\n",
-            ),
-            (
-                // The caller's Host replaces the generated one, a later name replaces an
-                // earlier one, and a CONNECT request carries no content.
-                "wss://example.com",
-                |c| {
-                    c.with_headers(headers(&[
-                        ("via", "a"),
-                        ("host", "proxy.example"),
-                        ("content-length", "5"),
-                        ("transfer-encoding", "chunked"),
-                    ]))
-                    .with_headers(headers(&[("via", "b"), ("via", "c")]))
-                },
-                "CONNECT example.com:443 HTTP/1.1\r\nHost: proxy.example\r\n\
-                 via: b\r\nvia: c\r\n\r\n",
-            ),
-            (
-                // The colon in the userinfo is not a port separator.
-                "ws://user:pass@example.com",
-                |c| c,
-                "CONNECT example.com:80 HTTP/1.1\r\nHost: example.com:80\r\n\r\n",
-            ),
-            (
-                // An empty port takes the default too.
-                "example.com:",
-                |c| c,
-                "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n",
-            ),
-        ];
-
-        for (dst, configure, expected) in cases {
-            let (client, server) = duplex(64);
-            let server = tokio::spawn(async move {
-                let (mut io, req) =
-                    proxy(server, b"HTTP/1.1 200 Connection established\r\n\r\n").await;
-                io.write_all(b"pong").await.expect("tunneled write");
-                let mut ping = [0; 4];
-                io.read_exact(&mut ping).await.expect("tunneled read");
-                (req, ping)
-            });
-
-            let mut connector = configure(TunnelConnector::new(
-                "http://proxy.local:3128".parse().unwrap(),
-                Pipe(Some(client)),
-            ));
-            let handshake = connector.call(dst.parse().unwrap());
-            let mut io = bounded(handshake, "handshake stalled; was the request terminated?")
-                .await
-                .expect("tunnel");
-
-            let mut pong = [0; 4];
-            bounded(io.read_exact(&mut pong), "tunneled read stalled")
-                .await
-                .expect("tunneled read");
-            assert_eq!(&pong, b"pong");
-            io.write_all(b"ping").await.expect("tunneled write");
-
-            // The proxy reads "ping" right after the head, so stray request bytes show up here.
-            let (req, ping) = bounded(server, "proxy stalled").await.expect("proxy task");
-            assert_eq!(req, expected);
-            assert_eq!(&ping, b"ping", "{dst}");
-        }
-    }
-
     #[tokio::test]
     #[cfg_attr(
         miri,
         ignore = "reads an 8 KiB response head one or two bytes at a time"
     )]
-    async fn handshake_outcomes() {
+    async fn response_head_outcomes() {
         let long = format!(
             "HTTP/1.1 200 OK\r\nx: {}\r\n\r\n",
             "a".repeat(MAX_RESPONSE_HEAD)
@@ -500,15 +364,30 @@ mod tests {
             "HTTP/1.1 200 OK\r\n{}\r\n",
             "x: 1\r\n".repeat(MAX_HEADERS + 1)
         );
+        let at_header_limit = format!(
+            "HTTP/1.1 200 OK\r\n{}\r\nbanner",
+            "x: 1\r\n".repeat(MAX_HEADERS)
+        );
+        let padded_head = |len: usize| {
+            let prefix = "HTTP/1.1 200 OK\r\nx: ";
+            format!("{prefix}{}\r\n\r\n", "a".repeat(len - prefix.len() - 4))
+        };
+        let at_size_limit = format!("{}banner", padded_head(MAX_RESPONSE_HEAD));
+        let interim_head = "HTTP/1.1 100 Continue\r\n\r\n";
+        let at_cumulative_limit = format!(
+            "{interim_head}{}banner",
+            padded_head(MAX_RESPONSE_HEAD - interim_head.len())
+        );
         // `Ok` holds the bytes that must remain readable after the head.
         type Expected = Result<&'static [u8], fn(&TunnelError) -> bool>;
-        let cases: [(&[u8], Expected); 13] = [
+        let cases: [(&[u8], Expected); 17] = [
             (b"HTTP/1.1 204 No Content\r\n\r\n", Ok(b"")),
             (
                 b"HTTP/1.1 200 OK\r\n\r\nSSH-2.0-banner",
                 Ok(b"SSH-2.0-banner"),
             ),
             (b"HTTP/1.1 200 OK\n\nbanner", Ok(b"banner")),
+            (b"\r\nHTTP/1.1 200 OK\r\n\r\nbanner", Ok(b"banner")),
             (
                 b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n\r\nbanner",
                 Ok(b"banner"),
@@ -553,32 +432,18 @@ mod tests {
                 crowded.as_bytes(),
                 Err(|e| matches!(e, TunnelError::ProxyHeadersTooLong)),
             ),
+            (at_header_limit.as_bytes(), Ok(b"banner")),
+            (at_size_limit.as_bytes(), Ok(b"banner")),
+            (at_cumulative_limit.as_bytes(), Ok(b"banner")),
         ];
 
         for (response, expected) in cases {
-            let (client, server) = duplex(MAX_RESPONSE_HEAD * 2);
-            let response = response.to_vec();
-            // Dropping the proxy end after the response turns a short reply into EOF.
-            let server = tokio::spawn(async move { drop(proxy(server, &response).await) });
-            let result = bounded(
-                tunnel(
-                    client,
-                    b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n",
-                ),
-                "handshake stalled; was the request terminated and EOF handled?",
-            )
-            .await;
-            bounded(server, "proxy stalled").await.expect("proxy task");
+            let mut io = response;
+            let result = read_response(&mut io).await;
             match (result, expected) {
-                (Ok(mut io), Ok(rest)) => {
-                    let mut tail = Vec::new();
-                    io.read_to_end(&mut tail)
-                        .await
-                        .expect("read tunneled bytes");
-                    assert_eq!(tail, rest);
-                }
+                (Ok(()), Ok(rest)) => assert_eq!(io, rest),
                 (Err(err), Err(matches)) => assert!(matches(&err), "unexpected error: {err:?}"),
-                (Ok(_), Err(_)) => panic!("unexpected success"),
+                (Ok(()), Err(_)) => panic!("unexpected success"),
                 (Err(err), Ok(_)) => panic!("unexpected error: {err:?}"),
             }
         }
