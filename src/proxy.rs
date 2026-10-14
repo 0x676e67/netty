@@ -18,7 +18,7 @@ use std::{
 };
 
 use futures_util::future::BoxFuture;
-use http::{Uri, uri::Scheme};
+use http::Uri;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 /// Future returned by the proxy connectors.
@@ -53,22 +53,36 @@ impl<T, E> fmt::Debug for Tunneling<T, E> {
     }
 }
 
-/// Returns the destination host, rejecting an empty one (RFC 9110 §4.2.1).
+/// Returns the destination host, rejecting an empty one
+/// ([RFC 9110 §4.2.1](https://www.rfc-editor.org/rfc/rfc9110#section-4.2.1)).
 fn dst_host(uri: &Uri) -> Option<&str> {
     uri.host().filter(|host| !matches!(*host, "" | "[]"))
 }
 
-/// Returns the destination port, defaulting by scheme.
-fn port_or_default(uri: &Uri) -> u16 {
-    match uri.port_u16() {
-        Some(port) => port,
-        None if uri.scheme() == Some(&Scheme::HTTPS) => 443,
-        None => 80,
+/// Returns the destination port, or `None` if it is zero or not a valid `u16`.
+///
+/// Without a port, `http` and `ws` default to 80 and anything else, no scheme included, to 443.
+fn dst_port(uri: &Uri) -> Option<u16> {
+    let authority = uri.authority()?;
+    if let Some(port) = authority.port_u16() {
+        return (port != 0).then_some(port);
     }
+    // `port_u16` is also `None` for a port `Uri` accepts but a u16 cannot hold, so only an
+    // absent or empty port, right after the host, takes the default.
+    let host_port = authority.as_str().rsplit('@').next()?;
+    if !matches!(host_port.strip_prefix(authority.host())?, "" | ":") {
+        return None;
+    }
+    let insecure = uri.scheme_str().is_some_and(|scheme| {
+        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("ws")
+    });
+    Some(if insecure { 80 } else { 443 })
 }
 
 /// Debug view of a proxy URI without its userinfo, which may hold credentials.
 struct ProxyDst<'a>(&'a Uri);
+
+// ===== impl ProxyDst =====
 
 impl fmt::Debug for ProxyDst<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
