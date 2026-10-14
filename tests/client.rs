@@ -6,6 +6,10 @@ mod support;
 #[path = "client/h2_connect.rs"]
 mod h2_connect;
 
+#[cfg(feature = "tunnel")]
+#[path = "client/tunnel.rs"]
+mod tunnel;
+
 use std::{
     convert::Infallible,
     fmt,
