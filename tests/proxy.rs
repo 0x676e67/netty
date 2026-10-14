@@ -8,24 +8,23 @@ use std::{
     io::{self, IoSliceMut},
     net::{Ipv4Addr, SocketAddr},
     pin::Pin,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
     task::{Context, Poll, ready},
     time::Duration,
 };
 
+use fast_socks5::{
+    Socks5Command,
+    server::{Socks5ServerProtocol, run_udp_proxy},
+    util::target_addr::TargetAddr,
+};
 use netty::proxy::socks::udp::{self, Address, UdpAssociation};
 use quinn::{
     AsyncUdpSocket, Endpoint, EndpointConfig, Runtime, TokioRuntime, UdpPoller,
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
     udp::{RecvMeta, Transmit},
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream, UdpSocket},
-};
+use tokio::net::{TcpListener, TcpStream};
 
 /// A quinn socket that tunnels every datagram through a SOCKS5 UDP association.
 #[derive(Debug)]
@@ -134,66 +133,32 @@ impl AsyncUdpSocket for Socks5UdpSocket {
     }
 }
 
-/// Minimal IPv4 SOCKS5 proxy: username/password auth, then UDP ASSOCIATE relaying for `client`.
-async fn socks5_relay(listener: TcpListener, client: SocketAddr, relayed: Arc<AtomicUsize>) {
-    // IPv4 ADDR(4) PORT(2), as in requests and datagram headers.
-    let ipv4 = |b: &[u8]| {
-        SocketAddr::from((
-            Ipv4Addr::new(b[0], b[1], b[2], b[3]),
-            u16::from_be_bytes([b[4], b[5]]),
-        ))
-    };
-
-    let (mut control, _) = listener.accept().await.unwrap();
-    let mut greeting = [0; 4];
-    control.read_exact(&mut greeting).await.unwrap();
+/// `fast-socks5` proxy: username/password auth, then UDP ASSOCIATE relaying for `client`.
+async fn socks5_proxy(listener: TcpListener, client: SocketAddr) {
+    let (control, _) = listener.accept().await.unwrap();
+    let (proto, _) = Socks5ServerProtocol::accept_password_auth(control, |user, password| {
+        user == "user" && password == "secret"
+    })
+    .await
+    .unwrap();
+    let (proto, command, declared) = proto.read_command().await.unwrap();
+    assert_eq!(command, Socks5Command::UDPAssociate);
     assert_eq!(
-        greeting,
-        [5, 2, 0, 2],
-        "offers no-auth and username/password"
+        declared,
+        TargetAddr::Ip(client),
+        "declares the client's address"
     );
-    control.write_all(&[5, 2]).await.unwrap();
-    let mut auth = [0; 13];
-    control.read_exact(&mut auth).await.unwrap();
-    assert_eq!(&auth, b"\x01\x04user\x06secret");
-    control.write_all(&[1, 0]).await.unwrap();
-    let mut request = [0; 10];
-    control.read_exact(&mut request).await.unwrap();
-    assert_eq!(
-        &request[..4],
-        &[5, 3, 0, 1],
-        "UDP ASSOCIATE with an IPv4 address"
-    );
-    assert_eq!(ipv4(&request[4..]), client, "declares the client's address");
-
     // Bind loopback but report 0.0.0.0, as many proxies do, so the client must substitute.
-    let relay = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let port = relay.local_addr().unwrap().port().to_be_bytes();
-    control
-        .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, port[0], port[1]])
-        .await
-        .unwrap();
-
-    let mut buf = vec![0; 65536];
-    loop {
-        let (len, from) = relay.recv_from(&mut buf).await.unwrap();
-        if from == client {
-            // From the client: RSV(2) FRAG(1) ATYP(1)=IPv4 ADDR(4) PORT(2) DATA.
-            assert_eq!(&buf[..4], &[0, 0, 0, 1], "unfragmented IPv4 datagram");
-            relay.send_to(&buf[10..len], ipv4(&buf[4..])).await.unwrap();
-            relayed.fetch_add(1, Ordering::Relaxed);
-        } else {
-            // From the target: wrap with its address and pass to the client.
-            let SocketAddr::V4(from) = from else {
-                unreachable!("IPv4 only")
-            };
-            let mut datagram = vec![0, 0, 0, 1];
-            datagram.extend_from_slice(&from.ip().octets());
-            datagram.extend_from_slice(&from.port().to_be_bytes());
-            datagram.extend_from_slice(&buf[..len]);
-            relay.send_to(&datagram, client).await.unwrap();
-        }
-    }
+    let loopback = Some(Ipv4Addr::LOCALHOST.into());
+    run_udp_proxy(
+        proto,
+        &declared,
+        loopback,
+        Ipv4Addr::UNSPECIFIED.into(),
+        loopback,
+    )
+    .await
+    .unwrap();
 }
 
 fn tls() -> (quinn::ServerConfig, quinn::ClientConfig) {
@@ -246,8 +211,7 @@ async fn quic_over_socks5_udp() {
     // Bound first so the association can declare where datagrams come from.
     let inner = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let client_addr = inner.local_addr().unwrap();
-    let relayed = Arc::new(AtomicUsize::new(0));
-    tokio::spawn(socks5_relay(socks, client_addr, relayed.clone()));
+    tokio::spawn(socks5_proxy(socks, client_addr));
 
     let exchange = async {
         let control = TcpStream::connect(socks_addr).await.unwrap();
@@ -286,19 +250,12 @@ async fn quic_over_socks5_udp() {
         assert_eq!(echoed, body);
         conn.close(0u32.into(), b"done");
         // The server finishes once the close arrives through the relay.
-        (relay, echo.await.unwrap())
+        echo.await.unwrap()
     };
-    let (relay, peer) = tokio::time::timeout(Duration::from_secs(20), exchange)
+    let peer = tokio::time::timeout(Duration::from_secs(20), exchange)
         .await
         .expect("QUIC exchange through the relay timed out");
 
-    assert_eq!(
-        peer.port(),
-        relay.port(),
-        "server saw the relay, not the client"
-    );
-    assert!(
-        relayed.load(Ordering::Relaxed) > 100,
-        "datagrams went through the relay"
-    );
+    // The proxy reaches the target from its own outbound socket.
+    assert_ne!(peer, client_addr, "server saw the proxy, not the client");
 }
