@@ -13,7 +13,7 @@
 use std::{
     error::Error as StdError,
     fmt, io,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, SocketAddr, SocketAddrV6},
     pin::Pin,
     str,
     task::{Context, Poll, ready},
@@ -263,8 +263,9 @@ pub struct Unframed {
 /// datagrams may come from several targets: each call returns the leading run from one source,
 /// and unframing `buf[consumed..]` yields the next. Fragmented or malformed datagrams are
 /// skipped. Returns `None`, so the caller drops the rest of `buf`, if `from` is not `relay` or
-/// `buf` holds no further datagram. A link-local `relay` with a scope only matches that
-/// interface; one without, as [`UdpAssociation::relay_addr`] returns, matches any.
+/// `buf` holds no further datagram. A link-local `relay` with a scope, as
+/// [`UdpAssociation::relay_addr`] keeps the control connection's, only matches that interface;
+/// one without matches any.
 ///
 /// IPv4-mapped addresses, as a dual-stack socket reports them, match their IPv4 form, and the
 /// source is returned as IPv4; map it back with
@@ -460,16 +461,26 @@ impl<T> UdpAssociation<T> {
 
     /// Returns where to send datagrams; resolve it first if it is a domain name.
     ///
-    /// Proxies often bind an unspecified address such as `0.0.0.0`; it then means the
-    /// proxy's own IP, which only the caller knows from the control connection. An IPv4-mapped
-    /// `proxy_ip` is used as IPv4.
-    pub fn relay_addr(&self, proxy_ip: IpAddr) -> Address {
-        match &self.bound {
-            Address::Ip(addr) if addr.ip().is_unspecified() => {
-                Address::Ip(SocketAddr::new(proxy_ip.to_canonical(), addr.port()))
+    /// `proxy` is the control connection's peer address. Proxies often bind an unspecified
+    /// address such as `0.0.0.0`; it then means `proxy`'s IP. A relay at `proxy`'s IP keeps its
+    /// IPv6 scope, which a link-local relay needs; another IP gets none, as it may be on another
+    /// link. The port is always BND.PORT, and an IPv4-mapped `proxy` is used as IPv4.
+    pub fn relay_addr(&self, proxy: SocketAddr) -> Address {
+        let Address::Ip(bound) = &self.bound else {
+            return self.bound.clone();
+        };
+        let proxy_ip = proxy.ip().to_canonical();
+        let ip = if bound.ip().is_unspecified() {
+            proxy_ip
+        } else {
+            bound.ip()
+        };
+        Address::Ip(match (ip, proxy) {
+            (IpAddr::V6(ip), SocketAddr::V6(proxy)) if IpAddr::V6(ip) == proxy_ip => {
+                SocketAddr::V6(SocketAddrV6::new(ip, bound.port(), 0, proxy.scope_id()))
             }
-            bound => bound.clone(),
-        }
+            _ => SocketAddr::new(ip, bound.port()),
+        })
     }
 
     /// Returns the control connection.
@@ -556,7 +567,6 @@ impl StdError for HeaderError {}
 mod tests {
     use std::{
         future::poll_fn,
-        net::SocketAddrV6,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -770,8 +780,8 @@ mod tests {
             let unframed = unframe(relay, from.parse().unwrap(), &mut datagram, stride);
             assert_eq!(unframed, None, "{case}");
         }
-        // A link-local relay with a scope must reply on that interface; one without, as
-        // `relay_addr` returns, and a global one match any. `flowinfo` is ignored.
+        // A link-local relay with a scope must reply on that interface; one without, and a
+        // global one, match any. `flowinfo` is ignored.
         let v6 = |ip: &str, flowinfo, scope| {
             SocketAddr::V6(SocketAddrV6::new(
                 ip.parse().unwrap(),
@@ -803,7 +813,7 @@ mod tests {
         // UDP ASSOCIATE from `client_addr`.
         const REQUEST: &[u8] = &[5, 3, 0, 1, 192, 0, 2, 5, 0x11, 0x51];
         let client_addr: SocketAddr = "192.0.2.5:4433".parse().unwrap();
-        let proxy_ip: IpAddr = "198.51.100.7".parse().unwrap();
+        let proxy: SocketAddr = "198.51.100.7:1080".parse().unwrap();
         let user = Some(("user", "secret"));
         let limit = Duration::from_secs(5);
 
@@ -932,7 +942,7 @@ mod tests {
             match (result, expected) {
                 (Ok(mut association), Ok((bound, relay))) => {
                     assert_eq!(*association.bound_addr(), bound);
-                    assert_eq!(association.relay_addr(proxy_ip), relay);
+                    assert_eq!(association.relay_addr(proxy), relay);
                     // The script has ended, so the proxy closed the control connection.
                     timeout(limit, poll_fn(|cx| association.poll_closed(cx)))
                         .await
@@ -944,16 +954,25 @@ mod tests {
             }
         }
 
-        // An IPv4-mapped proxy IP, as a dual-stack control socket names its peer, is used as IPv4.
-        let association = UdpAssociation {
-            io: (),
-            bound: ip("0.0.0.0:8080"),
-        };
-        let mapped_proxy_ip = "::ffff:198.51.100.7".parse().unwrap();
-        assert_eq!(
-            association.relay_addr(mapped_proxy_ip),
-            ip("198.51.100.7:8080")
-        );
+        // A relay at the peer's IP keeps the control connection's scope, another IP gets none,
+        // and the port is BND.PORT. An IPv4-mapped peer, as a dual-stack socket names it, is IPv4.
+        for (bound, proxy, relay) in [
+            (
+                "0.0.0.0:8080",
+                "[::ffff:198.51.100.7]:1080",
+                "198.51.100.7:8080",
+            ),
+            ("[::]:8080", "[fe80::1%4]:1080", "[fe80::1%4]:8080"),
+            ("[fe80::1]:9000", "[fe80::1%4]:1080", "[fe80::1%4]:9000"),
+            ("[fe80::2]:9000", "[fe80::1%4]:1080", "[fe80::2]:9000"),
+        ] {
+            let association = UdpAssociation {
+                io: (),
+                bound: ip(bound),
+            };
+            let relay_addr = association.relay_addr(proxy.parse().unwrap());
+            assert_eq!(relay_addr, ip(relay), "{bound} via {proxy}");
+        }
 
         // A reset control connection ends the association too.
         let mut reset = UdpAssociation {
