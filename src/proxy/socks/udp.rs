@@ -262,8 +262,9 @@ pub struct Unframed {
 /// shorter; otherwise `stride` is `buf.len()`. GRO only matches the outer addresses, so the
 /// datagrams may come from several targets: each call returns the leading run from one source,
 /// and unframing `buf[consumed..]` yields the next. Fragmented or malformed datagrams are
-/// skipped. Returns `None`, so the caller drops the rest of `buf`, if it did not come from
-/// `relay` or holds no further datagram.
+/// skipped. Returns `None`, so the caller drops the rest of `buf`, if `from` is not `relay` or
+/// `buf` holds no further datagram. A link-local `relay` with a scope only matches that
+/// interface; one without, as [`UdpAssociation::relay_addr`] returns, matches any.
 ///
 /// IPv4-mapped addresses, as a dual-stack socket reports them, match their IPv4 form, and the
 /// source is returned as IPv4; map it back with
@@ -275,8 +276,14 @@ pub fn unframe(
     buf: &mut [u8],
     stride: usize,
 ) -> Option<Unframed> {
-    let canonical = |addr: SocketAddr| SocketAddr::new(addr.ip().to_canonical(), addr.port());
-    if canonical(from) != canonical(relay) {
+    // Only a link-local address names an interface, and received addresses carry no
+    // `flowinfo`, so any set on `relay` is ignored.
+    let zone = |addr: SocketAddr| match addr {
+        SocketAddr::V6(addr) if addr.ip().is_unicast_link_local() => addr.scope_id(),
+        _ => 0,
+    };
+    let canonical = |addr: SocketAddr| (addr.ip().to_canonical(), addr.port());
+    if canonical(from) != canonical(relay) || ![0, zone(from)].contains(&zone(relay)) {
         return None;
     }
     let stride = if stride == 0 { buf.len() } else { stride };
@@ -549,6 +556,7 @@ impl StdError for HeaderError {}
 mod tests {
     use std::{
         future::poll_fn,
+        net::SocketAddrV6,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -762,6 +770,26 @@ mod tests {
             let unframed = unframe(relay, from.parse().unwrap(), &mut datagram, stride);
             assert_eq!(unframed, None, "{case}");
         }
+        // A link-local relay with a scope must reply on that interface; one without, as
+        // `relay_addr` returns, and a global one match any. `flowinfo` is ignored.
+        let v6 = |ip: &str, flowinfo, scope| {
+            SocketAddr::V6(SocketAddrV6::new(
+                ip.parse().unwrap(),
+                1080,
+                flowinfo,
+                scope,
+            ))
+        };
+        for (relay, from, accepted) in [
+            (v6("fe80::1", 7, 4), v6("fe80::1", 0, 4), true),
+            (v6("fe80::1", 0, 4), v6("fe80::1", 0, 5), false),
+            (v6("fe80::1", 0, 0), v6("fe80::1", 0, 4), true),
+            (v6("2001:db8::1", 0, 4), v6("2001:db8::1", 0, 0), true),
+        ] {
+            let unframed = unframe(relay, from, &mut quic.clone(), 14);
+            assert_eq!(unframed.is_some(), accepted, "{relay} from {from}");
+        }
+
         // Without a stride, the buffer is one datagram.
         let mut single = quic.clone();
         let unframed = unframe(relay, relay, &mut single, 0).expect("relayed");
