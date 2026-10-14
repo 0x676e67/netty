@@ -4,6 +4,7 @@
 //! the runtime's UDP socket, framing every datagram for the relay and unframing replies.
 
 use std::{
+    collections::VecDeque,
     io::{self, IoSliceMut},
     net::{Ipv4Addr, SocketAddr},
     pin::Pin,
@@ -32,6 +33,8 @@ struct Socks5UdpSocket {
     inner: Arc<dyn AsyncUdpSocket>,
     relay: SocketAddr,
     control: Mutex<UdpAssociation<TcpStream>>,
+    /// Runs queued to keep arrival order, delivered before the next receive.
+    pending: Mutex<VecDeque<(RecvMeta, Vec<u8>)>>,
 }
 
 impl AsyncUdpSocket for Socks5UdpSocket {
@@ -65,28 +68,55 @@ impl AsyncUdpSocket for Socks5UdpSocket {
         if self.control.lock().unwrap().poll_closed(cx).is_ready() {
             return Poll::Ready(Err(io::Error::other("SOCKS5 UDP association closed")));
         }
+        let mut pending = self.pending.lock().unwrap();
         loop {
+            if !pending.is_empty() {
+                let mut n = 0;
+                while n < bufs.len()
+                    && let Some((unframed, payload)) = pending.pop_front()
+                {
+                    bufs[n][..payload.len()].copy_from_slice(&payload);
+                    meta[n] = unframed;
+                    n += 1;
+                }
+                return Poll::Ready(Ok(n));
+            }
+
             let n = ready!(self.inner.poll_recv(cx, bufs, meta))?;
             let mut kept = 0;
             for i in 0..n {
+                let (from, stride) = (meta[i].addr, meta[i].stride);
                 let received = &mut bufs[i][..meta[i].len];
-                let Some(udp::Unframed {
-                    source: Address::Ip(source),
-                    len,
-                    stride,
-                }) = udp::unframe(self.relay, meta[i].addr, received, meta[i].stride)
-                else {
+                // GRO only matches the relay's address, so a batch may hold several targets. First
+                // runs stay in place until one has to wait in `pending`; every later run then
+                // waits too, keeping arrival order.
+                let mut first = None;
+                let mut offset = 0;
+                while let Some(run) =
+                    udp::unframe(self.relay, from, &mut received[offset..], stride)
+                {
+                    // A dual-stack inner socket would map the source back to IPv6 here.
+                    if let Address::Ip(source) = run.source {
+                        let mut unframed = meta[i];
+                        (unframed.addr, unframed.len, unframed.stride) =
+                            (source, run.len, run.stride);
+                        if offset == 0 && pending.is_empty() {
+                            first = Some(unframed);
+                        } else {
+                            let payload = received[offset..offset + run.len].to_vec();
+                            pending.push_back((unframed, payload));
+                        }
+                    }
+                    offset += run.consumed;
+                }
+                let Some(unframed) = first else {
                     continue;
                 };
-                // A dual-stack inner socket would map the source back to IPv6 here.
-                meta[i].addr = source;
-                meta[i].len = len;
-                meta[i].stride = stride;
                 if kept != i {
                     let (front, back) = bufs.split_at_mut(i);
-                    front[kept][..meta[i].len].copy_from_slice(&back[0][..meta[i].len]);
-                    meta[kept] = meta[i];
+                    front[kept][..unframed.len].copy_from_slice(&back[0][..unframed.len]);
                 }
+                meta[kept] = unframed;
                 kept += 1;
             }
             if kept > 0 {
@@ -235,6 +265,7 @@ async fn quic_over_socks5_udp() {
             inner: runtime.wrap_udp_socket(inner).unwrap(),
             relay,
             control: Mutex::new(association),
+            pending: Mutex::default(),
         });
         let mut client =
             Endpoint::new_with_abstract_socket(EndpointConfig::default(), None, socket, runtime)
