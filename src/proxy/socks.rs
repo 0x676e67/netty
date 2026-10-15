@@ -410,13 +410,15 @@ impl StdError for SocksError {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        future::Ready,
-        net::{Ipv4Addr, Ipv6Addr},
-        time::Duration,
-        vec,
-    };
+    use std::{future::Ready, net::Ipv4Addr, time::Duration, vec};
 
+    use fast_socks5::{
+        ReplyError, Socks5Command,
+        server::{
+            AuthMethodSuccessState, Socks5ServerProtocol, StandardAuthentication,
+            StandardAuthenticationStarted,
+        },
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter, DuplexStream, duplex};
 
     use super::*;
@@ -509,12 +511,6 @@ mod tests {
             .expect(stalled)
     }
 
-    async fn read_vec(io: &mut DuplexStream, len: usize) -> Vec<u8> {
-        let mut buf = vec![0; len];
-        io.read_exact(&mut buf).await.expect("read");
-        buf
-    }
-
     async fn read_cstr(io: &mut DuplexStream) -> String {
         let mut buf = Vec::new();
         loop {
@@ -525,61 +521,42 @@ mod tests {
         }
     }
 
-    /// SOCKS5 proxy answering a CONNECT, with username/password auth if offered.
-    async fn socks5_proxy(mut io: DuplexStream, grant: bool) -> (DuplexStream, String) {
-        let mut greeting = read_vec(&mut io, 2).await;
-        greeting.extend(read_vec(&mut io, greeting[1].into()).await);
-        let creds = match greeting[..] {
-            [0x05, 0x01, 0x00] => {
-                io.write_all(&[0x05, 0x00]).await.expect("method");
-                String::new()
-            }
-            [0x05, 0x02, 0x00, 0x02] => {
-                io.write_all(&[0x05, 0x02]).await.expect("method");
-                // VER ULEN UNAME PLEN PASSWD: https://www.rfc-editor.org/rfc/rfc1929#section-2
-                let ulen = read_vec(&mut io, 2).await[1];
-                let user = read_vec(&mut io, ulen.into()).await;
-                let plen = read_vec(&mut io, 1).await[0];
-                let pass = read_vec(&mut io, plen.into()).await;
-                io.write_all(&[0x01, 0x00]).await.expect("auth");
-                format!(
-                    "{}:{}@",
-                    String::from_utf8_lossy(&user),
-                    String::from_utf8_lossy(&pass)
-                )
-            }
-            _ => panic!("unexpected greeting {greeting:?}"),
-        };
-
-        let req = read_vec(&mut io, 4).await;
-        assert_eq!(&req[..3], &[0x05, 0x01, 0x00], "CONNECT");
-        // ATYP: https://www.rfc-editor.org/rfc/rfc1928#section-5
-        let host = match req[3] {
-            0x01 => {
-                Ipv4Addr::from(<[u8; 4]>::try_from(read_vec(&mut io, 4).await).unwrap()).to_string()
-            }
-            0x04 => {
-                let ip = <[u8; 16]>::try_from(read_vec(&mut io, 16).await).unwrap();
-                format!("[{}]", Ipv6Addr::from(ip))
-            }
-            _ => {
-                let len = read_vec(&mut io, 1).await[0];
-                String::from_utf8(read_vec(&mut io, len.into()).await).expect("utf-8")
-            }
-        };
-        let port = u16::from_be_bytes(read_vec(&mut io, 2).await.try_into().unwrap());
-        // REP 0x05 is "connection refused": https://www.rfc-editor.org/rfc/rfc1928#section-6
-        let rep = if grant { 0x00 } else { 0x05 };
-        io.write_all(&[0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+    /// fast-socks5 proxy answering a CONNECT, with username/password auth if offered.
+    /// Returns the tunnel end if granted and the target with any credentials it saw.
+    async fn socks5_proxy(io: DuplexStream, grant: bool) -> (Option<DuplexStream>, String) {
+        let auth = Socks5ServerProtocol::start(io)
+            .negotiate_auth(StandardAuthentication::allow_no_auth(true))
             .await
-            .expect("reply");
-
-        (io, format!("{creds}{host}:{port}"))
+            .expect("method");
+        let (proto, creds) = match auth {
+            StandardAuthenticationStarted::NoAuthentication(auth) => {
+                (auth.finish_auth(), String::new())
+            }
+            StandardAuthenticationStarted::PasswordAuthentication(auth) => {
+                let (user, pass, auth) = auth.read_username_password().await.expect("auth");
+                let auth = auth.accept().await.expect("auth reply");
+                (auth.finish_auth(), format!("{user}:{pass}@"))
+            }
+        };
+        let (proto, cmd, target) = proto.read_command().await.expect("request");
+        assert_eq!(cmd, Socks5Command::TCPConnect);
+        let seen = format!("{creds}{target}");
+        if !grant {
+            proto
+                .reply_error(&ReplyError::ConnectionRefused)
+                .await
+                .expect("reply");
+            return (None, seen);
+        }
+        let bound = SocketAddr::from(([0, 0, 0, 0], 0));
+        (Some(proto.reply_success(bound).await.expect("reply")), seen)
     }
 
     /// SOCKS4 proxy accepting a user ID and a CONNECT to an address or, as SOCKS4a, a domain.
-    async fn socks4_proxy(mut io: DuplexStream) -> (DuplexStream, String) {
-        let req = read_vec(&mut io, 8).await;
+    /// fast-socks5 has no SOCKS4 server.
+    async fn socks4_proxy(mut io: DuplexStream) -> (Option<DuplexStream>, String) {
+        let mut req = [0; 8];
+        io.read_exact(&mut req).await.expect("request");
         assert_eq!(&req[..2], &[0x04, 0x01], "CONNECT");
         let port = u16::from_be_bytes([req[2], req[3]]);
         let ip = Ipv4Addr::new(req[4], req[5], req[6], req[7]);
@@ -592,7 +569,7 @@ mod tests {
         io.write_all(&[0x00, 0x5A, 0, 0, 0, 0, 0, 0])
             .await
             .expect("reply");
-        (io, format!("{user}@{host}:{port}"))
+        (Some(io), format!("{user}@{host}:{port}"))
     }
 
     #[tokio::test]
@@ -832,10 +809,11 @@ mod tests {
                 "{dst} {version:?}: {result:?}"
             );
 
-            let (mut server, seen) = bounded(proxy, "proxy stalled").await.expect("proxy task");
+            let (server, seen) = bounded(proxy, "proxy stalled").await.expect("proxy task");
             let (Ok(want) | Err(want)) = expected;
             assert_eq!(seen, want);
             if let Ok(mut io) = result {
+                let mut server = server.expect("granted tunnel");
                 server.write_all(b"pong").await.expect("tunneled write");
                 let mut pong = [0; 4];
                 io.read_exact(&mut pong).await.expect("tunneled read");
