@@ -1,0 +1,1074 @@
+//! SOCKS5 UDP ASSOCIATE.
+//!
+//! See [RFC 1928](https://www.rfc-editor.org/rfc/rfc1928): §4 for the UDP ASSOCIATE
+//! command and §7 for the header prepended to every relayed datagram, and
+//! [RFC 1929](https://www.rfc-editor.org/rfc/rfc1929) for username/password authentication.
+//!
+//! This module only speaks the protocol (sans-IO). The caller owns the UDP socket and
+//! resolves domain names, sends datagrams framed with [`encode_header`] to
+//! [`UdpAssociation::relay_addr`], and unframes received ones with [`unframe`], which also
+//! drops datagrams that bypass the relay. IPv4-mapped addresses are read and written in their
+//! IPv4 form.
+
+use std::{
+    error::Error as StdError,
+    fmt, io,
+    net::{IpAddr, SocketAddr, SocketAddrV6},
+    pin::Pin,
+    str,
+    task::{Context, Poll, ready},
+};
+
+use bytes::BufMut;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+use crate::proxy::{read, send};
+
+const VERSION: u8 = 0x05;
+const AUTH_VERSION: u8 = 0x01;
+const NO_AUTH: u8 = 0x00;
+const USERNAME_PASSWORD: u8 = 0x02;
+const NO_ACCEPTABLE_METHODS: u8 = 0xFF;
+const CMD_UDP_ASSOCIATE: u8 = 0x03;
+const ATYP_IPV4: u8 = 0x01;
+const ATYP_DOMAIN: u8 = 0x03;
+const ATYP_IPV6: u8 = 0x04;
+
+/// A SOCKS5 address (RFC 1928 §5): an IP address or a domain name, with a port.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Address {
+    /// An IPv4 or IPv6 address and port.
+    Ip(SocketAddr),
+    /// A domain name of 1 to 255 bytes and a port.
+    Domain(Box<str>, u16),
+}
+
+/// A borrowed [`Address`], as [`decode_header`] returns it without allocating.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AddressRef<'a> {
+    /// An IPv4 or IPv6 address and port.
+    Ip(SocketAddr),
+    /// A domain name of 1 to 255 bytes and a port.
+    Domain(&'a str, u16),
+}
+
+/// A UDP association, alive as long as its TCP control connection.
+///
+/// RFC 1928 ends the association when the control connection closes, so keep this value
+/// for the association's lifetime and watch [`poll_closed`](Self::poll_closed).
+#[derive(Debug)]
+pub struct UdpAssociation<T> {
+    io: T,
+    bound: Address,
+}
+
+/// Errors from the UDP ASSOCIATE handshake.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum AssociateError {
+    /// An I/O error occurred on the control connection.
+    Io(io::Error),
+    /// The username or password is empty or longer than 255 bytes.
+    InvalidCredentials,
+    /// The proxy accepted none of the offered authentication methods.
+    NoAcceptableAuth,
+    /// The proxy rejected the username and password.
+    AuthFailed,
+    /// The proxy sent a malformed response, including a relay address with port 0.
+    InvalidResponse,
+    /// The proxy refused the association with this reply code.
+    Reply(u8),
+}
+
+/// Errors from encoding or decoding a datagram header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HeaderError {
+    /// The datagram is shorter than its header.
+    Truncated,
+    /// The reserved bytes are not zero.
+    Reserved,
+    /// The datagram is a fragment; fragmentation is not supported.
+    Fragmented,
+    /// The address type is unknown.
+    UnsupportedAddress,
+    /// The domain name is empty, longer than 255 bytes or not UTF-8.
+    InvalidDomain,
+}
+
+/// Performs the UDP ASSOCIATE handshake over a connected control stream.
+///
+/// `client_addr` is the address the caller will send datagrams from; many proxies accept
+/// an unspecified address such as `0.0.0.0:0` when it is not yet known.
+pub async fn associate<T>(
+    mut io: T,
+    auth: Option<(&str, &str)>,
+    client_addr: SocketAddr,
+) -> Result<UdpAssociation<T>, AssociateError>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    // RFC 1929 lengths are one byte and must be non-zero.
+    let auth = match auth {
+        Some((username, password)) => {
+            let len = |s: &str| {
+                u8::try_from(s.len())
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .ok_or(AssociateError::InvalidCredentials)
+            };
+            Some((username, len(username)?, password, len(password)?))
+        }
+        None => None,
+    };
+
+    let methods: &[u8] = match auth {
+        Some(_) => &[VERSION, 2, NO_AUTH, USERNAME_PASSWORD],
+        None => &[VERSION, 1, NO_AUTH],
+    };
+    send(&mut io, methods).await?;
+    let [version, method] = read_array(&mut io).await?;
+    if version != VERSION {
+        return Err(AssociateError::InvalidResponse);
+    }
+    match (method, auth) {
+        (NO_AUTH, _) => {}
+        (USERNAME_PASSWORD, Some((username, ulen, password, plen))) => {
+            let mut req = Vec::with_capacity(3 + username.len() + password.len());
+            req.extend_from_slice(&[AUTH_VERSION, ulen]);
+            req.extend_from_slice(username.as_bytes());
+            req.push(plen);
+            req.extend_from_slice(password.as_bytes());
+            send(&mut io, &req).await?;
+            let [version, status] = read_array(&mut io).await?;
+            if version != AUTH_VERSION {
+                return Err(AssociateError::InvalidResponse);
+            }
+            if status != 0 {
+                return Err(AssociateError::AuthFailed);
+            }
+        }
+        (NO_ACCEPTABLE_METHODS, _) => return Err(AssociateError::NoAcceptableAuth),
+        _ => return Err(AssociateError::InvalidResponse),
+    }
+
+    let mut req = Vec::with_capacity(22);
+    req.extend_from_slice(&[VERSION, CMD_UDP_ASSOCIATE, 0x00]);
+    put_ip(&mut req, client_addr);
+    send(&mut io, &req).await?;
+
+    let [version, reply, rsv, atyp] = read_array(&mut io).await?;
+    if version != VERSION || rsv != 0 {
+        return Err(AssociateError::InvalidResponse);
+    }
+    if reply != 0 {
+        return Err(AssociateError::Reply(reply));
+    }
+    // BND.ADDR and BND.PORT; a domain name is prefixed with its length.
+    let mut addr = [0; 1 + 255 + 2];
+    let (start, end) = match atyp {
+        ATYP_IPV4 => (0, 4 + 2),
+        ATYP_IPV6 => (0, 16 + 2),
+        ATYP_DOMAIN => {
+            read_exact(&mut io, &mut addr[..1]).await?;
+            (1, 1 + usize::from(addr[0]) + 2)
+        }
+        _ => return Err(AssociateError::InvalidResponse),
+    };
+    read_exact(&mut io, &mut addr[start..end]).await?;
+    match decode_addr(atyp, &addr[..end]) {
+        // Datagrams cannot be sent to port 0.
+        Ok((bound, _)) if bound.port() != 0 => Ok(UdpAssociation {
+            io,
+            bound: bound.into(),
+        }),
+        _ => Err(AssociateError::InvalidResponse),
+    }
+}
+
+/// Length of the header [`encode_header`] writes for `target`: 10 bytes for IPv4, 22 for
+/// IPv6, and 7 plus the name for a domain.
+///
+/// Subtract it from the path MTU to size payloads.
+pub fn header_len<'a>(target: impl Into<AddressRef<'a>>) -> usize {
+    match target.into() {
+        AddressRef::Ip(addr) => match addr.ip().to_canonical() {
+            IpAddr::V4(_) => 10,
+            IpAddr::V6(_) => 22,
+        },
+        AddressRef::Domain(name, _) => 7 + name.len(),
+    }
+}
+
+/// Writes the header for a datagram relayed to `target`; append the payload after it.
+///
+/// An IPv4-mapped IPv6 `target`, as a dual-stack socket names IPv4 peers, is written as IPv4.
+/// A domain name, as `socks5h` sends, is resolved by the proxy. Nothing is written on error.
+pub fn encode_header<'a, B: BufMut>(
+    target: impl Into<AddressRef<'a>>,
+    buf: &mut B,
+) -> Result<(), HeaderError> {
+    // RSV (2 bytes) and FRAG (1 byte) lead; only unfragmented datagrams are sent.
+    match target.into() {
+        AddressRef::Ip(addr) => {
+            buf.put_slice(&[0, 0, 0]);
+            put_ip(buf, addr);
+        }
+        AddressRef::Domain(name, port) => {
+            let len = u8::try_from(name.len())
+                .ok()
+                .filter(|&len| len > 0)
+                .ok_or(HeaderError::InvalidDomain)?;
+            buf.put_slice(&[0, 0, 0, ATYP_DOMAIN, len]);
+            buf.put_slice(name.as_bytes());
+            buf.put_u16(port);
+        }
+    }
+    Ok(())
+}
+
+/// Splits a relayed datagram into its source address and payload, borrowing both.
+///
+/// An IPv4-mapped source, as a dual-stack relay may name an IPv4 peer, is returned as IPv4.
+pub fn decode_header(datagram: &[u8]) -> Result<(AddressRef<'_>, &[u8]), HeaderError> {
+    let [rsv0, rsv1, frag, atyp, rest @ ..] = datagram else {
+        return Err(HeaderError::Truncated);
+    };
+    if (*rsv0, *rsv1) != (0, 0) {
+        return Err(HeaderError::Reserved);
+    }
+    if *frag != 0 {
+        return Err(HeaderError::Fragmented);
+    }
+    decode_addr(*atyp, rest)
+}
+
+/// Payloads from one source, unframed in place by [`unframe`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unframed {
+    /// The target that sent the payloads.
+    pub source: Address,
+    /// Total length of the payloads, now packed at the front of the buffer.
+    pub len: usize,
+    /// Length of each payload; only the last may be shorter.
+    pub stride: usize,
+    /// Bytes of the buffer this call used up; the datagrams after them are still framed.
+    pub consumed: usize,
+}
+
+/// Unframes what the socket received from `from`, moving payloads to the front of `buf`.
+///
+/// With UDP GRO, `buf` holds datagrams of `stride` bytes back to back, the last possibly
+/// shorter; otherwise `stride` is `buf.len()`. GRO only matches the outer addresses, so the
+/// datagrams may come from several targets: each call returns the leading run from one source,
+/// and unframing `buf[consumed..]` yields the next. Fragmented or malformed datagrams are
+/// skipped. Returns `None`, so the caller drops the rest of `buf`, if `from` is not `relay` or
+/// `buf` holds no further datagram. A link-local `relay` with a scope, as
+/// [`UdpAssociation::relay_addr`] keeps the control connection's, only matches that interface;
+/// one without matches any.
+///
+/// IPv4-mapped addresses, as a dual-stack socket reports them, match their IPv4 form, and the
+/// source is returned as IPv4; map it back with
+/// [`Ipv4Addr::to_ipv6_mapped`](std::net::Ipv4Addr::to_ipv6_mapped) if the socket names peers
+/// that way.
+pub fn unframe(
+    relay: SocketAddr,
+    from: SocketAddr,
+    buf: &mut [u8],
+    stride: usize,
+) -> Option<Unframed> {
+    // Only a link-local address names an interface, and received addresses carry no
+    // `flowinfo`, so any set on `relay` is ignored.
+    let zone = |addr: SocketAddr| match addr {
+        SocketAddr::V6(addr) if addr.ip().is_unicast_link_local() => addr.scope_id(),
+        _ => 0,
+    };
+    let canonical = |addr: SocketAddr| (addr.ip().to_canonical(), addr.port());
+    if canonical(from) != canonical(relay) || ![0, zone(from)].contains(&zone(relay)) {
+        return None;
+    }
+    let stride = if stride == 0 { buf.len() } else { stride };
+    let (mut read, mut write) = (0, 0);
+    let mut run: Option<(Address, usize)> = None;
+    while read < buf.len() {
+        let end = read.saturating_add(stride).min(buf.len());
+        let Ok((source, payload)) = decode_header(&buf[read..end]) else {
+            read = end;
+            continue;
+        };
+        let len = payload.len();
+        match &run {
+            None => run = Some((Address::from(source), len)),
+            // Another source, or a payload too long to split at the run's stride, starts the
+            // next run.
+            Some((first, stride)) if AddressRef::from(first) != source || len > *stride => break,
+            Some(_) => {}
+        }
+        buf.copy_within(end - len..end, write);
+        (read, write) = (end, write + len);
+        // A shorter payload ends the run, as the last datagram of a GRO batch does.
+        if run.as_ref().is_some_and(|&(_, stride)| len < stride) {
+            break;
+        }
+    }
+    let (source, stride) = run?;
+    Some(Unframed {
+        source,
+        len: write,
+        stride,
+        consumed: read,
+    })
+}
+
+/// Parses ATYP's address and the port at the front of `bytes`, returning the rest.
+fn decode_addr(atyp: u8, bytes: &[u8]) -> Result<(AddressRef<'_>, &[u8]), HeaderError> {
+    let (addr, rest) = match atyp {
+        ATYP_IPV4 => {
+            let (ip, rest) = bytes
+                .split_first_chunk::<4>()
+                .ok_or(HeaderError::Truncated)?;
+            (IpAddr::from(*ip), rest)
+        }
+        ATYP_IPV6 => {
+            let (ip, rest) = bytes
+                .split_first_chunk::<16>()
+                .ok_or(HeaderError::Truncated)?;
+            (IpAddr::from(*ip), rest)
+        }
+        ATYP_DOMAIN => {
+            let (&len, rest) = bytes.split_first().ok_or(HeaderError::Truncated)?;
+            let (name, rest) = rest
+                .split_at_checked(usize::from(len))
+                .ok_or(HeaderError::Truncated)?;
+            let (port, rest) = rest.split_first_chunk().ok_or(HeaderError::Truncated)?;
+            let name = str::from_utf8(name)
+                .ok()
+                .filter(|name| !name.is_empty())
+                .ok_or(HeaderError::InvalidDomain)?;
+            return Ok((AddressRef::Domain(name, u16::from_be_bytes(*port)), rest));
+        }
+        _ => return Err(HeaderError::UnsupportedAddress),
+    };
+    let (port, rest) = rest.split_first_chunk().ok_or(HeaderError::Truncated)?;
+    let port = u16::from_be_bytes(*port);
+    Ok((
+        AddressRef::Ip(SocketAddr::new(addr.to_canonical(), port)),
+        rest,
+    ))
+}
+
+/// Writes ATYP, the IP address and the port; IPv4-mapped addresses as IPv4.
+fn put_ip<B: BufMut>(buf: &mut B, addr: SocketAddr) {
+    match addr.ip().to_canonical() {
+        IpAddr::V4(ip) => {
+            buf.put_u8(ATYP_IPV4);
+            buf.put_slice(&ip.octets());
+        }
+        IpAddr::V6(ip) => {
+            buf.put_u8(ATYP_IPV6);
+            buf.put_slice(&ip.octets());
+        }
+    }
+    buf.put_u16(addr.port());
+}
+
+async fn read_exact<T>(io: &mut T, buf: &mut [u8]) -> io::Result<()>
+where
+    T: AsyncRead + Unpin,
+{
+    let mut filled = 0;
+    while filled < buf.len() {
+        match read(io, &mut buf[filled..]).await? {
+            0 => return Err(io::ErrorKind::UnexpectedEof.into()),
+            n => filled += n,
+        }
+    }
+    Ok(())
+}
+
+async fn read_array<T, const N: usize>(io: &mut T) -> io::Result<[u8; N]>
+where
+    T: AsyncRead + Unpin,
+{
+    let mut buf = [0; N];
+    read_exact(io, &mut buf).await?;
+    Ok(buf)
+}
+
+// ===== impl Address =====
+
+impl Address {
+    /// Returns the port.
+    pub fn port(&self) -> u16 {
+        match self {
+            Address::Ip(addr) => addr.port(),
+            Address::Domain(_, port) => *port,
+        }
+    }
+}
+
+impl From<SocketAddr> for Address {
+    fn from(addr: SocketAddr) -> Self {
+        Address::Ip(addr)
+    }
+}
+
+impl From<AddressRef<'_>> for Address {
+    fn from(addr: AddressRef<'_>) -> Self {
+        match addr {
+            AddressRef::Ip(addr) => Address::Ip(addr),
+            AddressRef::Domain(name, port) => Address::Domain(name.into(), port),
+        }
+    }
+}
+
+// ===== impl AddressRef =====
+
+impl AddressRef<'_> {
+    /// Returns the port.
+    pub fn port(&self) -> u16 {
+        match self {
+            AddressRef::Ip(addr) => addr.port(),
+            AddressRef::Domain(_, port) => *port,
+        }
+    }
+}
+
+impl From<SocketAddr> for AddressRef<'_> {
+    fn from(addr: SocketAddr) -> Self {
+        AddressRef::Ip(addr)
+    }
+}
+
+impl<'a> From<&'a Address> for AddressRef<'a> {
+    fn from(addr: &'a Address) -> Self {
+        match addr {
+            Address::Ip(addr) => AddressRef::Ip(*addr),
+            Address::Domain(name, port) => AddressRef::Domain(name, *port),
+        }
+    }
+}
+
+// ===== impl UdpAssociation =====
+
+impl<T> UdpAssociation<T> {
+    /// Returns the relay address as bound by the proxy (BND.ADDR and BND.PORT).
+    ///
+    /// An IPv4-mapped address is returned as IPv4.
+    pub fn bound_addr(&self) -> &Address {
+        &self.bound
+    }
+
+    /// Returns where to send datagrams; resolve it first if it is a domain name.
+    ///
+    /// `proxy` is the control connection's peer address. Proxies often bind an unspecified
+    /// address such as `0.0.0.0`; it then means `proxy`'s IP. A relay at `proxy`'s IP keeps its
+    /// IPv6 scope, which a link-local relay needs; another IP gets none, as it may be on another
+    /// link. The port is always BND.PORT, and an IPv4-mapped `proxy` is used as IPv4.
+    pub fn relay_addr(&self, proxy: SocketAddr) -> Address {
+        let Address::Ip(bound) = &self.bound else {
+            return self.bound.clone();
+        };
+        let proxy_ip = proxy.ip().to_canonical();
+        let ip = if bound.ip().is_unspecified() {
+            proxy_ip
+        } else {
+            bound.ip()
+        };
+        Address::Ip(match (ip, proxy) {
+            (IpAddr::V6(ip), SocketAddr::V6(proxy)) if IpAddr::V6(ip) == proxy_ip => {
+                SocketAddr::V6(SocketAddrV6::new(ip, bound.port(), 0, proxy.scope_id()))
+            }
+            _ => SocketAddr::new(ip, bound.port()),
+        })
+    }
+
+    /// Returns the control connection.
+    pub fn get_ref(&self) -> &T {
+        &self.io
+    }
+
+    /// Consumes the association, returning the control connection.
+    pub fn into_inner(self) -> T {
+        self.io
+    }
+}
+
+impl<T> UdpAssociation<T>
+where
+    T: AsyncRead + Unpin,
+{
+    /// Polls until the proxy closes the control connection, ending the association.
+    ///
+    /// Bytes the proxy sends on it are discarded.
+    pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // Bound the work per call: a proxy that keeps writing must not hold the task.
+        let mut buf = [0; 512];
+        for _ in 0..16 {
+            let mut buf = ReadBuf::new(&mut buf);
+            ready!(Pin::new(&mut self.io).poll_read(cx, &mut buf))?;
+            if buf.filled().is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
+// ===== impl AssociateError =====
+
+impl From<io::Error> for AssociateError {
+    fn from(err: io::Error) -> Self {
+        AssociateError::Io(err)
+    }
+}
+
+impl fmt::Display for AssociateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SOCKS5 UDP ASSOCIATE error: ")?;
+        match self {
+            AssociateError::Io(_) => f.write_str("io error on the control connection"),
+            AssociateError::InvalidCredentials => f.write_str("invalid username or password"),
+            AssociateError::NoAcceptableAuth => f.write_str("no acceptable auth methods"),
+            AssociateError::AuthFailed => f.write_str("authentication failed"),
+            AssociateError::InvalidResponse => f.write_str("invalid proxy response"),
+            AssociateError::Reply(code) => write!(f, "proxy replied with code {code:#04x}"),
+        }
+    }
+}
+
+impl StdError for AssociateError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            AssociateError::Io(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+// ===== impl HeaderError =====
+
+impl fmt::Display for HeaderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            HeaderError::Truncated => "truncated SOCKS5 UDP header",
+            HeaderError::Reserved => "non-zero reserved bytes in SOCKS5 UDP header",
+            HeaderError::Fragmented => "fragmented SOCKS5 UDP datagram",
+            HeaderError::UnsupportedAddress => "unsupported SOCKS5 UDP address type",
+            HeaderError::InvalidDomain => "invalid domain name in SOCKS5 UDP header",
+        })
+    }
+}
+
+impl StdError for HeaderError {}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        future::poll_fn,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::{Wake, Waker},
+        time::Duration,
+    };
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt, BufWriter, duplex},
+        time::timeout,
+    };
+    use tokio_test::io::Builder;
+
+    use super::*;
+
+    #[test]
+    fn datagram_header() {
+        // RFC 1928 §7: RSV, FRAG, ATYP, DST.ADDR, DST.PORT.
+        let v4 = [0, 0, 0, 1, 192, 0, 2, 1, 0x01, 0xbb];
+        let v6 = [
+            0, 0, 0, 4, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x20, 0xfb,
+        ];
+        let domain = |name: &str| {
+            [
+                &[0, 0, 0, 3, name.len() as u8][..],
+                name.as_bytes(),
+                &[0, 80],
+            ]
+            .concat()
+        };
+        let longest = "a".repeat(255);
+        let cases = [
+            (Address::Ip("192.0.2.1:443".parse().unwrap()), v4.to_vec()),
+            (
+                Address::Ip("[2001:db8::1]:8443".parse().unwrap()),
+                v6.to_vec(),
+            ),
+            (
+                Address::Domain("example.com".into(), 80),
+                domain("example.com"),
+            ),
+            (
+                Address::Domain(longest.as_str().into(), 80),
+                domain(&longest),
+            ),
+        ];
+        for (target, header) in cases {
+            let mut encoded = Vec::new();
+            encode_header(&target, &mut encoded).unwrap();
+            assert_eq!(encoded, header);
+            assert_eq!(header_len(&target), header.len());
+
+            let datagram = [&header[..], b"quic"].concat();
+            let decoded = Ok((AddressRef::from(&target), &b"quic"[..]));
+            assert_eq!(decode_header(&datagram), decoded);
+            // Every cut inside the header is detected.
+            for len in 0..header.len() {
+                assert_eq!(decode_header(&datagram[..len]), Err(HeaderError::Truncated));
+            }
+        }
+
+        // An IPv4-mapped target, as a dual-stack socket names it, goes out as IPv4, and a
+        // relay naming a source that way is read as IPv4.
+        let mapped: SocketAddr = "[::ffff:192.0.2.1]:443".parse().unwrap();
+        let mut encoded = Vec::new();
+        encode_header(mapped, &mut encoded).unwrap();
+        assert_eq!(encoded, v4);
+        assert_eq!(header_len(mapped), v4.len());
+        let mut mapped_header = [0; 22];
+        mapped_header[3] = 4;
+        mapped_header[14..].copy_from_slice(&[0xff, 0xff, 192, 0, 2, 1, 0x01, 0xbb]);
+        assert_eq!(
+            decode_header(&mapped_header),
+            Ok((AddressRef::Ip("192.0.2.1:443".parse().unwrap()), &[][..]))
+        );
+
+        // A domain name that does not fit its length octet writes nothing.
+        for name in ["", &"a".repeat(256)] {
+            let mut encoded = Vec::new();
+            assert_eq!(
+                encode_header(AddressRef::Domain(name, 80), &mut encoded),
+                Err(HeaderError::InvalidDomain)
+            );
+            assert!(encoded.is_empty());
+        }
+
+        for (datagram, err) in [
+            (
+                &[1, 0, 0, 1, 192, 0, 2, 1, 0, 80][..],
+                HeaderError::Reserved,
+            ),
+            (&[0, 1, 0, 1, 192, 0, 2, 1, 0, 80], HeaderError::Reserved),
+            (&[0, 0, 1, 1, 192, 0, 2, 1, 0, 80], HeaderError::Fragmented),
+            (
+                &[0, 0, 0, 9, 192, 0, 2, 1, 0, 80],
+                HeaderError::UnsupportedAddress,
+            ),
+            (&[0, 0, 0, 3, 0, 0, 80], HeaderError::InvalidDomain),
+            (&[0, 0, 0, 3, 1, 0xff, 0, 80], HeaderError::InvalidDomain),
+        ] {
+            assert_eq!(decode_header(datagram), Err(err), "{datagram:?}");
+        }
+    }
+
+    #[test]
+    fn unframe_relayed_datagrams() {
+        let relay: SocketAddr = "127.0.0.1:1080".parse().unwrap();
+        let target: SocketAddr = "192.0.2.1:443".parse().unwrap();
+        let header = [0, 0, 0, 1, 192, 0, 2, 1, 0x01, 0xbb];
+        let frame = |source: &[u8], payload: &[u8]| [source, payload].concat();
+
+        // GRO packs equal-size datagrams back to back; only the last may be shorter. A
+        // dual-stack socket reports the relay IPv4-mapped.
+        let mut buf = [
+            frame(&header, &[1; 20]),
+            frame(&header, &[2; 20]),
+            frame(&header, &[3; 7]),
+        ]
+        .concat();
+        for from in [relay, "[::ffff:127.0.0.1]:1080".parse().unwrap()] {
+            let mut buf = buf.clone();
+            let unframed = unframe(relay, from, &mut buf, 30).expect("relayed");
+            assert_eq!(
+                unframed,
+                Unframed {
+                    source: Address::Ip(target),
+                    len: 47,
+                    stride: 20,
+                    consumed: 77,
+                }
+            );
+            assert_eq!(buf[..47], [[1; 20].as_slice(), &[2; 20], &[3; 7]].concat());
+        }
+
+        // A relay may name the source by domain, as `socks5h` targets are.
+        let mut named = frame(&[0, 0, 0, 3, 1, b'a', 0, 80], b"quic");
+        let unframed = unframe(relay, relay, &mut named, 12).expect("relayed");
+        assert_eq!(unframed.source, Address::Domain("a".into(), 80));
+        assert_eq!(&named[..unframed.len], b"quic");
+
+        // GRO only matches the relay's address, so one batch can hold several targets: each
+        // call unframes the run from one source. Another port is another target, and a broken
+        // datagram is skipped alone. The same target named IPv4-mapped has a longer header, so
+        // a run splits wherever payloads could not split at its stride: a longer payload
+        // starts the next run and a shorter one ends the current.
+        let other_host = [0, 0, 0, 1, 192, 0, 2, 2, 0x01, 0xbb];
+        let other_port = [0, 0, 0, 1, 192, 0, 2, 1, 0x20, 0xfb];
+        let fragmented = [0, 0, 1, 1, 192, 0, 2, 1, 0x01, 0xbb];
+        let mut mapped = [0; 22];
+        mapped[3] = 4;
+        mapped[14..].copy_from_slice(&[0xff, 0xff, 192, 0, 2, 1, 0x01, 0xbb]);
+        let mut batch = [
+            frame(&header, &[1; 20]),
+            frame(&fragmented, &[0; 20]),
+            frame(&header, &[2; 20]),
+            frame(&other_port, &[3; 20]),
+            frame(&other_host, &[4; 20]),
+            frame(&mapped, &[5; 8]),
+            frame(&header, &[6; 20]),
+            frame(&mapped, &[7; 8]),
+            frame(&header, &[8; 20]),
+            frame(&mapped, &[9; 2]),
+        ]
+        .concat();
+        let mut runs = Vec::new();
+        let mut offset = 0;
+        while let Some(run) = unframe(relay, relay, &mut batch[offset..], 30) {
+            runs.push((
+                run.source,
+                batch[offset..offset + run.len].to_vec(),
+                run.stride,
+            ));
+            offset += run.consumed;
+        }
+        assert_eq!(offset, batch.len(), "every datagram consumed");
+        let ip = |addr: &str| Address::Ip(addr.parse().unwrap());
+        let payload = |runs: &[(u8, usize)]| -> Vec<u8> {
+            runs.iter().flat_map(|&(b, n)| [b].repeat(n)).collect()
+        };
+        assert_eq!(
+            runs,
+            [
+                (ip("192.0.2.1:443"), payload(&[(1, 20), (2, 20)]), 20),
+                (ip("192.0.2.1:8443"), payload(&[(3, 20)]), 20),
+                (ip("192.0.2.2:443"), payload(&[(4, 20)]), 20),
+                (ip("192.0.2.1:443"), payload(&[(5, 8)]), 8),
+                (ip("192.0.2.1:443"), payload(&[(6, 20), (7, 8)]), 20),
+                (ip("192.0.2.1:443"), payload(&[(8, 20), (9, 2)]), 20),
+            ]
+        );
+
+        let quic = frame(&header, b"quic");
+        let cases: [(&str, Vec<u8>, &str, usize); 4] = [
+            ("bypassing the relay", quic.clone(), "192.0.2.1:443", 14),
+            (
+                "from another relay port",
+                quic.clone(),
+                "127.0.0.1:1081",
+                14,
+            ),
+            (
+                "fragmented",
+                frame(&fragmented, b"quic"),
+                "127.0.0.1:1080",
+                14,
+            ),
+            ("truncated", quic[..9].to_vec(), "127.0.0.1:1080", 9),
+        ];
+        for (case, mut datagram, from, stride) in cases {
+            let unframed = unframe(relay, from.parse().unwrap(), &mut datagram, stride);
+            assert_eq!(unframed, None, "{case}");
+        }
+        // A link-local relay with a scope must reply on that interface; one without, and a
+        // global one, match any. `flowinfo` is ignored.
+        let v6 = |ip: &str, flowinfo, scope| {
+            SocketAddr::V6(SocketAddrV6::new(
+                ip.parse().unwrap(),
+                1080,
+                flowinfo,
+                scope,
+            ))
+        };
+        for (relay, from, accepted) in [
+            (v6("fe80::1", 7, 4), v6("fe80::1", 0, 4), true),
+            (v6("fe80::1", 0, 4), v6("fe80::1", 0, 5), false),
+            (v6("fe80::1", 0, 0), v6("fe80::1", 0, 4), true),
+            (v6("2001:db8::1", 0, 4), v6("2001:db8::1", 0, 0), true),
+        ] {
+            let unframed = unframe(relay, from, &mut quic.clone(), 14);
+            assert_eq!(unframed.is_some(), accepted, "{relay} from {from}");
+        }
+
+        // Without a stride, the buffer is one datagram.
+        let mut single = quic.clone();
+        let unframed = unframe(relay, relay, &mut single, 0).expect("relayed");
+        assert_eq!((unframed.len, unframed.consumed), (4, 14));
+        buf.clear();
+        assert_eq!(unframe(relay, relay, &mut buf, 30), None, "empty");
+    }
+
+    #[tokio::test]
+    async fn associate_handshake() {
+        // UDP ASSOCIATE from `client_addr`.
+        const REQUEST: &[u8] = &[5, 3, 0, 1, 192, 0, 2, 5, 0x11, 0x51];
+        let client_addr: SocketAddr = "192.0.2.5:4433".parse().unwrap();
+        let proxy: SocketAddr = "198.51.100.7:1080".parse().unwrap();
+        let user = Some(("user", "secret"));
+        let limit = Duration::from_secs(5);
+
+        // Scripts check what the client writes and must be used up, so an error reply ends
+        // where the client stops reading.
+        let login = |reply: &[u8]| {
+            let mut io = Builder::new();
+            io.write(&[5, 2, 0, 2])
+                .read(&[5, 2])
+                .write(b"\x01\x04user\x06secret")
+                .read(reply);
+            io
+        };
+        let greet = |method: &[u8]| Builder::new().write(&[5, 1, 0]).read(method).build();
+        let no_auth = |reply: &[u8]| {
+            Builder::new()
+                .write(&[5, 1, 0])
+                .read(&[5, 0])
+                .write(REQUEST)
+                .read(reply)
+                .build()
+        };
+        let mut split = login(&[1, 0]);
+        split.write(REQUEST);
+        for byte in [5, 0, 0, 1, 192, 0, 2, 9, 0x23, 0x28] {
+            split.read(&[byte]);
+        }
+        let ipv6 = [
+            5, 0, 0, 4, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0x23, 0x28,
+        ];
+        let domain = [&[5, 0, 0, 3, 13][..], b"relay.example", &[0x23, 0x28]].concat();
+        let ip = |addr: &str| Address::Ip(addr.parse().unwrap());
+        let relay = Address::Domain("relay.example".into(), 9000);
+
+        let cases = [
+            // An unspecified relay address stands for the proxy's IP.
+            (
+                None,
+                no_auth(&[5, 0, 0, 1, 0, 0, 0, 0, 0x1f, 0x90]),
+                Ok((ip("0.0.0.0:8080"), ip("198.51.100.7:8080"))),
+            ),
+            (
+                None,
+                no_auth(&[&[5, 0, 0, 4][..], &[0; 16], &[0x1f, 0x90]].concat()),
+                Ok((ip("[::]:8080"), ip("198.51.100.7:8080"))),
+            ),
+            // An IPv4-mapped address, as a dual-stack relay reports it, is read as IPv4.
+            (
+                None,
+                no_auth(
+                    &[
+                        &[5, 0, 0, 4][..],
+                        &[0; 10],
+                        &[0xff, 0xff, 0, 0, 0, 0, 0x1f, 0x90],
+                    ]
+                    .concat(),
+                ),
+                Ok((ip("0.0.0.0:8080"), ip("198.51.100.7:8080"))),
+            ),
+            (
+                None,
+                no_auth(
+                    &[
+                        &[5, 0, 0, 4][..],
+                        &[0; 10],
+                        &[0xff, 0xff, 192, 0, 2, 9, 0x23, 0x28],
+                    ]
+                    .concat(),
+                ),
+                Ok((ip("192.0.2.9:9000"), ip("192.0.2.9:9000"))),
+            ),
+            // A specific one is used as is, as is a domain name for the caller to resolve.
+            (
+                None,
+                no_auth(&ipv6),
+                Ok((ip("[2001:db8::9]:9000"), ip("[2001:db8::9]:9000"))),
+            ),
+            (None, no_auth(&domain), Ok((relay.clone(), relay))),
+            // After logging in, the reply arrives one byte per read.
+            (
+                user,
+                split.build(),
+                Ok((ip("192.0.2.9:9000"), ip("192.0.2.9:9000"))),
+            ),
+            // Credentials are offered, but the proxy needs none: no login follows.
+            (
+                user,
+                Builder::new()
+                    .write(&[5, 2, 0, 2])
+                    .read(&[5, 0])
+                    .write(REQUEST)
+                    .read(&[5, 0, 0, 1, 192, 0, 2, 9, 0x23, 0x28])
+                    .build(),
+                Ok((ip("192.0.2.9:9000"), ip("192.0.2.9:9000"))),
+            ),
+            (user, login(&[1, 1]).build(), Err("AuthFailed")),
+            // RFC 1929 replies carry version 1.
+            (user, login(&[5, 0]).build(), Err("InvalidResponse")),
+            (None, greet(&[5, 0xff]), Err("NoAcceptableAuth")),
+            // The proxy picks a method that was not offered.
+            (None, greet(&[5, 2]), Err("InvalidResponse")),
+            // Not SOCKS5 replies.
+            (None, greet(&[4, 0]), Err("InvalidResponse")),
+            (None, no_auth(&[4, 0, 0, 1]), Err("InvalidResponse")),
+            // Refused: command not supported.
+            (None, no_auth(&[5, 7, 0, 1]), Err("Reply(7)")),
+            // Non-zero RSV, an unknown address type, an empty domain name, and a relay on
+            // port 0.
+            (None, no_auth(&[5, 0, 1, 1]), Err("InvalidResponse")),
+            (None, no_auth(&[5, 0, 0, 9]), Err("InvalidResponse")),
+            (
+                None,
+                no_auth(&[5, 0, 0, 3, 0, 0x23, 0x28]),
+                Err("InvalidResponse"),
+            ),
+            (
+                None,
+                no_auth(&[5, 0, 0, 1, 192, 0, 2, 9, 0, 0]),
+                Err("InvalidResponse"),
+            ),
+        ];
+        for (auth, io, expected) in cases {
+            let result = timeout(limit, associate(io, auth, client_addr))
+                .await
+                .expect("handshake stalled");
+            match (result, expected) {
+                (Ok(mut association), Ok((bound, relay))) => {
+                    assert_eq!(*association.bound_addr(), bound);
+                    assert_eq!(association.relay_addr(proxy), relay);
+                    // The script has ended, so the proxy closed the control connection.
+                    timeout(limit, poll_fn(|cx| association.poll_closed(cx)))
+                        .await
+                        .expect("EOF not reported")
+                        .expect("closed");
+                }
+                (Err(err), Err(want)) => assert_eq!(format!("{err:?}"), want),
+                (got, want) => panic!("got {got:?}, want {want:?}"),
+            }
+        }
+
+        // A relay at the peer's IP keeps the control connection's scope, another IP gets none,
+        // and the port is BND.PORT. An IPv4-mapped peer, as a dual-stack socket names it, is IPv4.
+        for (bound, proxy, relay) in [
+            (
+                "0.0.0.0:8080",
+                "[::ffff:198.51.100.7]:1080",
+                "198.51.100.7:8080",
+            ),
+            ("[::]:8080", "[fe80::1%4]:1080", "[fe80::1%4]:8080"),
+            ("[fe80::1]:9000", "[fe80::1%4]:1080", "[fe80::1%4]:9000"),
+            ("[fe80::2]:9000", "[fe80::1%4]:1080", "[fe80::2]:9000"),
+        ] {
+            let association = UdpAssociation {
+                io: (),
+                bound: ip(bound),
+            };
+            let relay_addr = association.relay_addr(proxy.parse().unwrap());
+            assert_eq!(relay_addr, ip(relay), "{bound} via {proxy}");
+        }
+
+        // A reset control connection ends the association too.
+        let mut reset = UdpAssociation {
+            io: Builder::new()
+                .read_error(io::ErrorKind::ConnectionReset.into())
+                .build(),
+            bound: ip("192.0.2.1:9000"),
+        };
+        let err = timeout(limit, poll_fn(|cx| reset.poll_closed(cx)))
+            .await
+            .expect("reset not reported")
+            .expect_err("reset");
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+
+        // A reply cut inside BND.ADDR. The write buffer hides any request left unflushed.
+        let (client, mut server) = duplex(64);
+        server.write_all(&[5, 0, 5, 0, 0, 1, 192]).await.unwrap();
+        server.shutdown().await.unwrap();
+        let err = timeout(limit, associate(BufWriter::new(client), None, client_addr))
+            .await
+            .expect("EOF not reported")
+            .expect_err("truncated reply");
+        assert!(
+            matches!(&err, AssociateError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof),
+            "{err:?}"
+        );
+        let mut written = Vec::new();
+        server.read_to_end(&mut written).await.unwrap();
+        assert_eq!(written, [5, 1, 0, 5, 3, 0, 1, 192, 0, 2, 5, 0x11, 0x51]);
+
+        // Credentials are checked before any IO: with the peer gone, IO would fail differently.
+        let long = "u".repeat(256);
+        for auth in [("", "secret"), ("user", ""), (long.as_str(), "secret")] {
+            let (client, server) = duplex(64);
+            drop(server);
+            let err = associate(client, Some(auth), client_addr)
+                .await
+                .expect_err("invalid credentials");
+            assert!(matches!(err, AssociateError::InvalidCredentials), "{err:?}");
+        }
+    }
+
+    /// Control stream that is always readable: `reads` chunks, then EOF.
+    struct Chatty {
+        reads: usize,
+    }
+
+    impl AsyncRead for Chatty {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.reads > 0 {
+                self.reads -= 1;
+                buf.put_slice(&[0; 32]);
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[derive(Default)]
+    struct CountWakes(AtomicUsize);
+
+    impl Wake for CountWakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn poll_closed_yields_to_a_chatty_proxy() {
+        let mut association = UdpAssociation {
+            io: Chatty { reads: 64 },
+            bound: Address::Ip("192.0.2.1:9000".parse().unwrap()),
+        };
+        let wakes = Arc::new(CountWakes::default());
+        let waker = Waker::from(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+
+        // The reader never returns Pending, so each yield must schedule its own wakeup.
+        let mut polls = 0;
+        let mut closed = association.poll_closed(&mut cx);
+        while closed.is_pending() && polls < 8 {
+            polls += 1;
+            assert_eq!(
+                wakes.0.load(Ordering::Relaxed),
+                polls,
+                "yielded without a wakeup"
+            );
+            closed = association.poll_closed(&mut cx);
+        }
+        assert!(
+            matches!(closed, Poll::Ready(Ok(()))),
+            "EOF not reported: {closed:?}"
+        );
+        assert!(polls > 1, "drained the proxy in one poll");
+    }
+}

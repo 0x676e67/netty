@@ -1,8 +1,11 @@
 //! SOCKS4/4a and SOCKS5/5h connectors.
 //!
-//! The handshakes are delegated to [tokio-socks](https://docs.rs/tokio-socks). SOCKS5 is
+//! The CONNECT handshakes are delegated to [tokio-socks](https://docs.rs/tokio-socks);
+//! [`udp`] implements SOCKS5 UDP ASSOCIATE. SOCKS5 is
 //! [RFC 1928](https://www.rfc-editor.org/rfc/rfc1928), with username/password authentication
 //! from [RFC 1929](https://www.rfc-editor.org/rfc/rfc1929).
+
+pub mod udp;
 
 use std::{
     error::Error as StdError,
