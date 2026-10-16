@@ -13,6 +13,8 @@ use bytes::{Buf, Bytes};
 use http::Response;
 use http3::quic;
 use pin_project_lite::pin_project;
+#[cfg(feature = "http3-datagram")]
+use tokio::sync::futures::OwnedNotified;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     sync::{mpsc, oneshot},
@@ -59,6 +61,9 @@ struct H3Upgraded {
     read_closed: bool,
     #[cfg(feature = "http3-datagram")]
     datagrams: Option<Arc<RequestState>>,
+    /// Wakes a shutdown waiting for the session's Datagrams to reach QUIC.
+    #[cfg(feature = "http3-datagram")]
+    drain: Option<Pin<Box<OwnedNotified>>>,
 }
 
 pin_project! {
@@ -157,6 +162,8 @@ where
         read_closed: false,
         #[cfg(feature = "http3-datagram")]
         datagrams: datagrams.clone(),
+        #[cfg(feature = "http3-datagram")]
+        drain: None,
     };
 
     let (pending, on_upgrade) = pending();
@@ -449,6 +456,10 @@ impl H3Upgraded {
         if self.shutdown {
             return Poll::Ready(Ok(()));
         }
+        #[cfg(feature = "http3-datagram")]
+        if finish {
+            ready!(self.poll_datagrams_sent(cx));
+        }
         ready!(self.sender.poll_reserve(cx)).map_err(|_| closed())?;
         let (tx, rx) = oneshot::channel();
         self.sender
@@ -460,6 +471,37 @@ impl H3Upgraded {
             .map_err(|_| closed())?;
         self.pending = Some((finish, rx));
         self.poll_ack(cx)
+    }
+}
+
+#[cfg(feature = "http3-datagram")]
+impl H3Upgraded {
+    /// Stops new Datagrams and waits until the queued ones have been handed to QUIC, since
+    /// the FIN discards those still queued.
+    fn poll_datagrams_sent(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        let Some(datagrams) = &self.datagrams else {
+            return Poll::Ready(());
+        };
+        // Without this a busy sender would keep the queue from ever draining.
+        datagrams.finish_send();
+        loop {
+            if datagrams.drained() {
+                self.drain = None;
+                return Poll::Ready(());
+            }
+            let waiting = self
+                .drain
+                .get_or_insert_with(|| Box::pin(datagrams.capacity_notify().notified_owned()));
+            if waiting.as_mut().poll(cx).is_pending() {
+                // Registered, so recheck: a packet sent before registration sends no wakeup.
+                if datagrams.drained() {
+                    self.drain = None;
+                    return Poll::Ready(());
+                }
+                return Poll::Pending;
+            }
+            self.drain = None;
+        }
     }
 }
 

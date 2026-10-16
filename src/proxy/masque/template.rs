@@ -14,7 +14,9 @@ use super::MasqueError;
 ///
 /// Templates are checked against RFC 9298 §2 when parsed: absolute, variables only in the path
 /// or query, both `target_host` and `target_port` present, and no level 4 or reserved
-/// expansions. Variables other than those two expand as undefined.
+/// expansions. Variables other than those two expand as undefined. Userinfo is rejected, as it
+/// would travel in every request's `:authority`; send credentials with
+/// [`ConnectUdp::with_auth`](super::ConnectUdp::with_auth).
 #[derive(Clone)]
 pub struct Template {
     raw: Box<str>,
@@ -67,6 +69,9 @@ impl Template {
         }
         if scheme.contains(['{', '}']) || authority.contains(['{', '}', '?', '#']) {
             return Err(invalid("variables outside the path and query"));
+        }
+        if authority.contains('@') {
+            return Err(invalid("userinfo in the authority"));
         }
         let proxy = Uri::builder()
             .scheme(scheme)
@@ -350,6 +355,10 @@ mod tests {
             (
                 "https://{target_host}/{target_port}",
                 "variables outside the path and query",
+            ),
+            (
+                "https://user:secret@proxy.example/{target_host}/{target_port}/",
+                "userinfo in the authority",
             ),
             ("https://proxy.example/{target_host}", missing),
             ("https://proxy.example/{target_port}/", missing),

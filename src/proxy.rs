@@ -65,6 +65,7 @@ fn dst_host(uri: &Uri) -> Option<&str> {
 /// Returns the destination port, or `None` if it is zero or not a valid `u16`.
 ///
 /// Without a port, `http` and `ws` default to 80 and anything else, no scheme included, to 443.
+#[cfg(any(feature = "tunnel", feature = "socks"))]
 fn dst_port(uri: &Uri) -> Option<u16> {
     let authority = uri.authority()?;
     if let Some(port) = authority.port_u16() {

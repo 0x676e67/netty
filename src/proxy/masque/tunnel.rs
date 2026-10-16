@@ -42,9 +42,9 @@ pub struct UdpTunnel {
     unflushed: bool,
     /// Set once the request stream takes no more capsules, after a close or a write error.
     write_closed: bool,
-    /// Tasks waiting to receive, and to send or close.
+    /// Tasks waiting to receive, send and close.
     wakers: Arc<Wakers>,
-    /// Waker for every control stream write, so its wakeup reaches both tasks.
+    /// Waker for every control stream write, so its wakeup reaches each waiting task.
     write_waker: Waker,
 }
 
@@ -55,12 +55,13 @@ struct Native {
     recv_open: bool,
 }
 
-/// The receive task and the send or close task, woken together when the request stream
-/// accepts writes again.
+/// The receive, send and close tasks, woken together when the request stream accepts
+/// writes again. Each has its own slot, so one task registering never drops another.
 #[derive(Default)]
 struct Wakers {
     recv: AtomicWaker,
     send: AtomicWaker,
+    close: AtomicWaker,
 }
 
 // ===== impl UdpTunnel =====
@@ -164,7 +165,9 @@ impl UdpTunnel {
         if let Poll::Ready(Err(err)) = self.poll_write_buf() {
             return Poll::Ready(Err(MasqueError::Io(err)));
         }
-        loop {
+        // Each round drops at most one payload or reads once, so a proxy flooding unknown
+        // contexts or capsule types cannot keep this call from yielding.
+        for _ in 0..32 {
             if let Some(native) = self.native.as_mut().filter(|native| native.recv_open) {
                 match native.receiver.poll_recv(cx) {
                     Poll::Ready(Some(datagram)) => match udp_payload(datagram)? {
@@ -197,27 +200,32 @@ impl UdpTunnel {
                 });
             }
         }
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 
-    /// Writes buffered capsules, then closes the request stream for sending.
+    /// Writes buffered capsules, then closes the request stream for sending; HTTP Datagrams
+    /// already accepted go to the connection first.
     ///
     /// Returns `Ok` at once if sending already stopped after a close or a write error.
     pub fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.write_closed {
             return Poll::Ready(Ok(()));
         }
-        self.wakers.send.register(cx.waker());
+        self.wakers.close.register(cx.waker());
         ready!(self.poll_write_buf())?;
         let mut cx = Context::from_waker(&self.write_waker);
         ready!(Pin::new(&mut self.control).poll_shutdown(&mut cx))?;
         self.write_closed = true;
+        // A sender parked on a full buffer now sees `Closed`.
+        self.wakers.send.wake();
         Poll::Ready(Ok(()))
     }
 
     /// Writes buffered capsules, then flushes the request stream if anything was written.
     ///
     /// Polls with `write_waker`, so the tasks registered in `wakers` retry once the stream
-    /// drains. A write error stops sending and wakes a task waiting to send.
+    /// drains. A write error stops sending and wakes the tasks waiting to send or close.
     fn poll_write_buf(&mut self) -> Poll<io::Result<()>> {
         if self.write_closed {
             return Poll::Ready(Ok(()));
@@ -246,6 +254,7 @@ impl UdpTunnel {
             self.write_closed = true;
             self.write_buf.clear();
             self.wakers.send.wake();
+            self.wakers.close.wake();
         }
         Poll::Ready(result)
     }
@@ -270,6 +279,7 @@ impl Wake for Wakers {
     fn wake_by_ref(self: &Arc<Self>) {
         self.recv.wake();
         self.send.wake();
+        self.close.wake();
     }
 }
 
@@ -390,6 +400,79 @@ mod tests {
         let (payloads, result) = bounded(recv).await.unwrap();
         assert_eq!(payloads, [&b"pong"[..], &b"end"[..]]);
         assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn close_and_send_tasks_keep_their_wakeups() {
+        // A sender parked on the full capsule buffer still wakes when another task closes.
+        let (tunnel, mut proxy) = capsule_tunnel(4096, false);
+        let tunnel = Arc::new(Mutex::new(tunnel));
+        while tunnel.lock().unwrap().try_send(&[7; 8000]).is_ok() {}
+        let ready = tokio::spawn({
+            let tunnel = tunnel.clone();
+            async move { poll_fn(|cx| tunnel.lock().unwrap().poll_send_ready(cx)).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!ready.is_finished(), "ready over the capsule limit");
+        let mut written = Vec::new();
+        let (closed, read) = bounded(async {
+            tokio::join!(
+                poll_fn(|cx| tunnel.lock().unwrap().poll_close(cx)),
+                proxy.read_to_end(&mut written)
+            )
+        })
+        .await;
+        closed.unwrap();
+        read.unwrap();
+        let ready = bounded(ready).await.unwrap();
+        assert!(
+            matches!(ready, Ok(()) | Err(SendError::Closed)),
+            "{ready:?}"
+        );
+
+        // A close parked on the stream still finishes after a sender registers.
+        let (tunnel, mut proxy) = capsule_tunnel(4096, false);
+        let tunnel = Arc::new(Mutex::new(tunnel));
+        tunnel.lock().unwrap().try_send(&[7; 8000]).unwrap();
+        let close = tokio::spawn({
+            let tunnel = tunnel.clone();
+            async move { poll_fn(|cx| tunnel.lock().unwrap().poll_close(cx)).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!close.is_finished(), "close before the proxy reads");
+        let ready = poll_fn(|cx| Poll::Ready(tunnel.lock().unwrap().poll_send_ready(cx))).await;
+        assert_eq!(ready, Poll::Ready(Ok(())));
+        let mut written = Vec::new();
+        bounded(proxy.read_to_end(&mut written)).await.unwrap();
+        assert_eq!(written.len(), 8004);
+        bounded(close).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn recv_yields_while_dropping_unknown_contexts() {
+        let (mut tunnel, mut proxy) = capsule_tunnel(4096, false);
+        for _ in 0..64 {
+            proxy.write_all(&[0, 2, 1, b'x']).await.unwrap();
+        }
+        proxy
+            .write_all(&[0, 5, 0, b'p', b'o', b'n', b'g'])
+            .await
+            .unwrap();
+
+        // Dropping 64 payloads takes more than one call, and each yield wakes the task.
+        let mut recv = tokio_test::task::spawn(poll_fn(|cx| tunnel.poll_recv(cx)));
+        let mut yields = 0;
+        let payload = loop {
+            match recv.poll() {
+                Poll::Ready(result) => break result.unwrap().unwrap(),
+                Poll::Pending => {
+                    assert!(recv.is_woken(), "yield without a wakeup");
+                    yields += 1;
+                }
+            }
+        };
+        assert_eq!(payload, "pong");
+        assert!(yields > 0, "64 dropped payloads in one call");
     }
 
     #[tokio::test]

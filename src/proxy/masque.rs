@@ -23,7 +23,7 @@ use http_body::Body;
 use tower_service::Service;
 
 pub use self::{template::Template, tunnel::UdpTunnel};
-use super::{Tunneling, dst_host, dst_port};
+use super::{Tunneling, dst_host};
 use crate::{
     conn::http3::{SendRequest, datagram::DatagramRequest},
     error::BoxError,
@@ -87,7 +87,8 @@ fn validate<B>(response: &Response<B>) -> Result<(), MasqueError> {
 ///
 /// The inner service yields an HTTP/3 [`SendRequest`] for the template's
 /// [proxy](Template::proxy), so it can pool connections. `call` takes the UDP target as a URI
-/// whose host and port fill `target_host` and `target_port`.
+/// whose host and port fill `target_host` and `target_port`; UDP has no default port, so the
+/// URI must name one.
 #[derive(Clone, Debug)]
 pub struct ConnectUdp<S> {
     inner: S,
@@ -101,7 +102,8 @@ pub struct ConnectUdp<S> {
 pub enum MasqueError {
     /// The URI template breaks RFC 9298 §2, for the given reason.
     InvalidTemplate(&'static str),
-    /// The target host is empty or has an IPv6 zone ID, or the port is 0.
+    /// The target host is empty or has an IPv6 zone ID, or the port is missing, 0 or not a
+    /// valid `u16`.
     InvalidTarget,
     /// The inner connector failed to provide a connection to the proxy.
     ConnectFailed(BoxError),
@@ -203,7 +205,7 @@ where
 
     fn call(&mut self, dst: Uri) -> Self::Future {
         let target = dst_host(&dst)
-            .zip(dst_port(&dst))
+            .zip(dst.port_u16())
             .ok_or(MasqueError::InvalidTarget)
             .and_then(|(host, port)| self.template.expand(host, port));
         let connecting = self.inner.call(self.template.proxy().clone());
@@ -269,7 +271,49 @@ impl StdError for SendError {}
 
 #[cfg(test)]
 mod tests {
+    use std::{convert::Infallible, future::Pending};
+
+    use bytes::Bytes;
+    use futures_util::FutureExt;
+    use http_body_util::Empty;
+
     use super::*;
+
+    #[test]
+    fn targets_need_a_valid_port() {
+        /// A proxy connection that never comes up; a bad target fails without it.
+        struct Unreachable;
+
+        impl Service<Uri> for Unreachable {
+            type Response = SendRequest<Empty<Bytes>>;
+            type Error = Infallible;
+            type Future = Pending<Result<Self::Response, Infallible>>;
+
+            fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, _: Uri) -> Self::Future {
+                std::future::pending()
+            }
+        }
+
+        let template = Template::well_known(&"proxy.example".parse().unwrap()).unwrap();
+        let mut connector = ConnectUdp::new(template, Unreachable);
+        // UDP has no default port to fall back on.
+        for target in [
+            "udp://dns.example",
+            "udp://dns.example:",
+            "udp://dns.example:0",
+            "udp://dns.example:65536",
+        ] {
+            let result = connector.call(target.parse().unwrap()).now_or_never();
+            assert!(
+                matches!(result, Some(Err(MasqueError::InvalidTarget))),
+                "{target}: {result:?}"
+            );
+        }
+    }
 
     #[test]
     fn auth_headers_stay_sensitive() {

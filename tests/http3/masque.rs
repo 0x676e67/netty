@@ -116,6 +116,11 @@ async fn connect_udp_carries_payloads_as_http_datagrams() {
                 .await
                 .unwrap();
             stream.finish().await.unwrap();
+            // A full queue of datagrams sent right before the client's FIN still arrives.
+            for i in 0..64 {
+                assert_eq!(server_quic.read_datagram().await.unwrap(), [1, 0, i][..]);
+            }
+            assert!(stream.recv_data().await.unwrap().is_none(), "client FIN");
             let _ = server.accept().await;
             max.len() - 2
         });
@@ -143,6 +148,11 @@ async fn connect_udp_carries_payloads_as_http_datagrams() {
         datagram_seen.send(()).unwrap();
         assert_eq!(recv(&mut tunnel).await.unwrap().unwrap(), "c");
         assert!(recv(&mut tunnel).await.unwrap().is_none());
+        // The driver sends 32 per turn, so a queue of 64 outlasts the FIN unless drained first.
+        for i in 0..64 {
+            tunnel.try_send(&[i]).unwrap();
+        }
+        poll_fn(|cx| tunnel.poll_close(cx)).await.unwrap();
         drop(tunnel);
         drop(connector);
         client_driver.as_mut().graceful_shutdown();
@@ -201,6 +211,64 @@ async fn connect_udp_falls_back_to_capsules() {
         assert_eq!(tunnel.try_send(b"late"), Err(SendError::Closed));
         let result = recv(&mut tunnel).await;
         assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
+        drop(tunnel);
+        drop(tx);
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
+        server_task.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn close_stops_a_busy_sender() {
+    bounded(async {
+        let Pair {
+            mut tx,
+            driver,
+            mut server,
+            _endpoints,
+            ..
+        }: Pair = pair_config(Http3Options::default(), Exec, true, true, true, None).await;
+        let mut client_driver = Box::pin(driver);
+        let server_task = tokio::spawn(async move {
+            let resolver = server.accept().await.unwrap().unwrap();
+            let (_, mut stream) = resolver.resolve_request().await.unwrap();
+            stream.send_response(Response::new(())).await.unwrap();
+            stream.finish().await.unwrap();
+            assert!(stream.recv_data().await.unwrap().is_none(), "client FIN");
+            let _ = server.accept().await;
+        });
+
+        let template = Template::new("https://localhost/masque/{target_host}/{target_port}/");
+        let uri = template.unwrap().expand("192.0.2.1", 443).unwrap();
+        let mut response = tx
+            .try_send_request(masque::http3_request(uri))
+            .await
+            .unwrap();
+        let tunnel = Arc::new(Mutex::new(UdpTunnel::from_http3(&mut response).unwrap()));
+        // A sender that stops only once sending fails, sharing the tunnel with the close.
+        let sender = tokio::spawn({
+            let tunnel = tunnel.clone();
+            async move {
+                loop {
+                    let sent = poll_fn(|cx| tunnel.lock().unwrap().poll_send_ready(cx))
+                        .await
+                        .and_then(|()| tunnel.lock().unwrap().try_send(&[1; 100]));
+                    if let Err(err) = sent {
+                        return err;
+                    }
+                }
+            }
+        });
+        tokio::task::yield_now().await;
+        poll_fn(|cx| tunnel.lock().unwrap().poll_close(cx))
+            .await
+            .unwrap();
+        assert_eq!(sender.await.unwrap(), SendError::Closed);
+        // Reading to the end keeps the exchange open until the proxy has the FIN.
+        let end = poll_fn(|cx| tunnel.lock().unwrap().poll_recv(cx)).await;
+        assert!(end.unwrap().is_none());
         drop(tunnel);
         drop(tx);
         client_driver.as_mut().graceful_shutdown();

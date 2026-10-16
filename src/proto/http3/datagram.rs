@@ -71,6 +71,10 @@ struct Entry {
     outgoing: VecDeque<Bytes>,
     incoming_bytes: usize,
     outgoing_bytes: usize,
+    /// Whether the driver holds a packet of this stream that QUIC has not taken yet.
+    sending: bool,
+    /// Set when a shutdown starts: no new payloads while the queued ones drain.
+    finishing: bool,
 }
 
 /// Datagram state of one request, shared by its send and receive handles, its
@@ -176,6 +180,8 @@ impl Registry {
                     outgoing: VecDeque::new(),
                     incoming_bytes: 0,
                     outgoing_bytes: 0,
+                    sending: false,
+                    finishing: false,
                 },
             );
         }
@@ -266,6 +272,7 @@ impl Registry {
                 continue;
             };
             entry.outgoing_bytes -= packet.len();
+            entry.sending = true;
             if !entry.outgoing.is_empty() {
                 state.ready.push_back(id);
             }
@@ -275,6 +282,18 @@ impl Registry {
             return Some((id, packet));
         }
         None
+    }
+
+    /// Releases the packet the driver held for `id`, sent or dropped, and wakes a close
+    /// waiting for the stream's queue to drain.
+    fn sent(&self, id: u64) {
+        let drained = self.lock().streams.get_mut(&id).is_some_and(|entry| {
+            entry.sending = false;
+            entry.outgoing.is_empty()
+        });
+        if drained {
+            self.capacity_notify.notify_waiters();
+        }
     }
 }
 
@@ -296,10 +315,33 @@ impl RequestState {
     pub(crate) fn max_size(&self) -> Option<usize> {
         let state = self.registry.lock();
         let entry = state.streams.get(&self.id.into_inner())?;
-        if !state.negotiated || !entry.send_open {
+        if !state.negotiated || !entry.send_open || entry.finishing {
             return None;
         }
         state.max_size?.checked_sub(self.prefix_size())
+    }
+
+    /// Stops admitting payloads, so a shutdown waits only for those already queued.
+    pub(crate) fn finish_send(&self) {
+        let started = self
+            .registry
+            .lock()
+            .streams
+            .get_mut(&self.id.into_inner())
+            .is_some_and(|entry| !mem::replace(&mut entry.finishing, true));
+        if started {
+            // Parked senders now see `Closed`.
+            self.registry.capacity_notify.notify_waiters();
+        }
+    }
+
+    /// Whether every admitted payload has been handed to QUIC, or the session is gone.
+    pub(crate) fn drained(&self) -> bool {
+        let state = self.registry.lock();
+        state
+            .streams
+            .get(&self.id.into_inner())
+            .is_none_or(|entry| !entry.sending && entry.outgoing.is_empty())
     }
 
     /// Encoded size of the Quarter Stream ID prefix.
@@ -319,7 +361,7 @@ impl RequestState {
         let Some(entry) = state.streams.get(&self.id.into_inner()) else {
             return Err(SendErrorKind::Closed);
         };
-        if !entry.send_open {
+        if !entry.send_open || entry.finishing {
             return Err(SendErrorKind::Closed);
         }
         let Some(max) = state.max_size.filter(|_| state.negotiated) else {
@@ -342,7 +384,7 @@ impl RequestState {
         let Some(entry) = state.streams.get(&self.id.into_inner()) else {
             return Err(SendErrorKind::Closed);
         };
-        if !entry.send_open {
+        if !entry.send_open || entry.finishing {
             return Err(SendErrorKind::Closed);
         }
         let Some(max) = state.max_size.filter(|_| state.negotiated) else {
@@ -513,6 +555,7 @@ where
                 .get(id)
                 .is_some_and(|entry| entry.send_open);
             if !open {
+                this.registry.sent(*id);
                 this.pending = None;
                 if index == 31 {
                     cx.waker().wake_by_ref();
@@ -526,7 +569,10 @@ where
                 }
                 // MTU/availability can change after local admission. Datagram
                 // delivery is unreliable; never turn TooLarge into Capsules.
-                Poll::Ready(_) => this.pending = None,
+                Poll::Ready(_) => {
+                    this.registry.sent(*id);
+                    this.pending = None;
+                }
             }
             if index == 31 {
                 cx.waker().wake_by_ref();
@@ -842,6 +888,52 @@ mod tests {
         ) -> Poll<std::result::Result<Option<Bytes>, quic::ConnectionError>> {
             Poll::Pending
         }
+    }
+
+    #[test]
+    fn finishing_stops_admission_and_waits_for_the_held_packet() {
+        let registry = registry();
+        let request = registry.register(
+            StreamId::try_from(0).unwrap(),
+            true,
+            CancellationToken::new(),
+        );
+        let state = request.0.clone();
+        state.try_send(&Bytes::from_static(b"last")).unwrap();
+        state.finish_send();
+        assert_eq!(state.try_send(&Bytes::new()), Err(SendErrorKind::Closed));
+        assert_eq!(state.ready(), Err(SendErrorKind::Closed));
+
+        let mut driver = Driver {
+            sender: DatagramSender {
+                max: 1300,
+                blocked: true,
+                wake: None,
+                accepted: Vec::new(),
+            },
+            receiver: DatagramReceiver,
+            registry: registry.clone(),
+            pending: None,
+        };
+        let waker = futures_util::task::waker(Arc::new(Wakes::default()));
+        let mut cx = Context::from_waker(&waker);
+        // QUIC is blocked: the queue is empty, but the driver still holds the packet.
+        assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
+        assert!(registry.lock().streams[&0].outgoing.is_empty());
+        assert!(!state.drained());
+
+        let shutdown = Arc::new(Wakes::default());
+        let shutdown_waker = futures_util::task::waker(shutdown.clone());
+        let mut drained = Box::pin(state.capacity_notify().notified_owned());
+        let mut shutdown_cx = Context::from_waker(&shutdown_waker);
+        assert!(drained.as_mut().poll(&mut shutdown_cx).is_pending());
+        driver.sender.blocked = false;
+        driver.sender.wake.take().unwrap().wake();
+        assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
+        // The packet queued before the shutdown went out, and its release woke the shutdown.
+        assert_eq!(driver.sender.accepted.len(), 1);
+        assert!(state.drained());
+        assert!(shutdown.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
     }
 
     #[test]

@@ -24,6 +24,8 @@ pub struct DatagramRequest;
 
 /// A successful CONNECT and its request-associated Datagram handles.
 /// Dropping the control stream invalidates both handles, even if they outlive it.
+/// Shutting it down closes the send half and sends the FIN once QUIC has taken the
+/// Datagrams admitted before.
 pub struct Session {
     control: Upgraded,
     sender: Sender,
