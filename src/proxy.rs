@@ -1,9 +1,11 @@
 //! Proxy connectors.
 //!
 //! Each connector wraps an inner [`tower_service::Service<Uri>`] that connects to the proxy,
-//! then runs the proxy handshake for the destination passed to `call`. DNS, TLS and the
-//! transport itself stay with the inner connector.
+//! then runs the proxy handshake for the destination passed to `call`. TLS and the transport
+//! stay with the inner connector; SOCKS local DNS goes through a caller-supplied resolver.
 
+#[cfg(feature = "socks")]
+pub mod socks;
 #[cfg(feature = "tunnel")]
 pub mod tunnel;
 
