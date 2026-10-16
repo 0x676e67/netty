@@ -7,12 +7,13 @@
 //! This module only speaks the protocol (sans-IO). The caller owns the UDP socket and
 //! resolves domain names, sends datagrams framed with [`encode_header`] to
 //! [`UdpAssociation::relay_addr`], and unframes received ones with [`unframe`], which also
-//! drops datagrams that bypass the relay.
+//! drops datagrams that bypass the relay. IPv4-mapped addresses are read and written in their
+//! IPv4 form.
 
 use std::{
     error::Error as StdError,
     fmt, io,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, SocketAddr, SocketAddrV6},
     pin::Pin,
     str,
     task::{Context, Poll, ready},
@@ -227,6 +228,8 @@ pub fn encode_header<'a, B: BufMut>(
 }
 
 /// Splits a relayed datagram into its source address and payload, borrowing both.
+///
+/// An IPv4-mapped source, as a dual-stack relay may name an IPv4 peer, is returned as IPv4.
 pub fn decode_header(datagram: &[u8]) -> Result<(AddressRef<'_>, &[u8]), HeaderError> {
     let [rsv0, rsv1, frag, atyp, rest @ ..] = datagram else {
         return Err(HeaderError::Truncated);
@@ -240,7 +243,7 @@ pub fn decode_header(datagram: &[u8]) -> Result<(AddressRef<'_>, &[u8]), HeaderE
     decode_addr(*atyp, rest)
 }
 
-/// Payloads of a relayed datagram, unframed in place by [`unframe`].
+/// Payloads from one source, unframed in place by [`unframe`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unframed {
     /// The target that sent the payloads.
@@ -249,47 +252,71 @@ pub struct Unframed {
     pub len: usize,
     /// Length of each payload; only the last may be shorter.
     pub stride: usize,
+    /// Bytes of the buffer this call used up; the datagrams after them are still framed.
+    pub consumed: usize,
 }
 
-/// Unframes what the socket received from `from`, moving the payloads to the front of `buf`.
+/// Unframes what the socket received from `from`, moving payloads to the front of `buf`.
 ///
 /// With UDP GRO, `buf` holds datagrams of `stride` bytes back to back, the last possibly
-/// shorter; otherwise `stride` is `buf.len()`. Returns `None`, so the caller drops `buf`, if
-/// it did not come from `relay`, a datagram is fragmented or malformed, or the datagrams
-/// came from different sources: GRO only matches the outer addresses.
+/// shorter; otherwise `stride` is `buf.len()`. GRO only matches the outer addresses, so the
+/// datagrams may come from several targets: each call returns the leading run from one source,
+/// and unframing `buf[consumed..]` yields the next. Fragmented or malformed datagrams are
+/// skipped. Returns `None`, so the caller drops the rest of `buf`, if `from` is not `relay` or
+/// `buf` holds no further datagram. A link-local `relay` with a scope, as
+/// [`UdpAssociation::relay_addr`] keeps the control connection's, only matches that interface;
+/// one without matches any.
 ///
-/// IPv4-mapped addresses, as a dual-stack socket reports them, match their IPv4 form. The
-/// source is returned as the header names it; map it back with [`Ipv4Addr::to_ipv6_mapped`]
-/// if the socket names peers that way.
+/// IPv4-mapped addresses, as a dual-stack socket reports them, match their IPv4 form, and the
+/// source is returned as IPv4; map it back with
+/// [`Ipv4Addr::to_ipv6_mapped`](std::net::Ipv4Addr::to_ipv6_mapped) if the socket names peers
+/// that way.
 pub fn unframe(
     relay: SocketAddr,
     from: SocketAddr,
     buf: &mut [u8],
     stride: usize,
 ) -> Option<Unframed> {
-    let canonical = |addr: SocketAddr| SocketAddr::new(addr.ip().to_canonical(), addr.port());
-    if canonical(from) != canonical(relay) {
+    // Only a link-local address names an interface, and received addresses carry no
+    // `flowinfo`, so any set on `relay` is ignored.
+    let zone = |addr: SocketAddr| match addr {
+        SocketAddr::V6(addr) if addr.ip().is_unicast_link_local() => addr.scope_id(),
+        _ => 0,
+    };
+    let canonical = |addr: SocketAddr| (addr.ip().to_canonical(), addr.port());
+    if canonical(from) != canonical(relay) || ![0, zone(from)].contains(&zone(relay)) {
         return None;
     }
+    let stride = if stride == 0 { buf.len() } else { stride };
     let (mut read, mut write) = (0, 0);
-    let mut first = None;
+    let mut run: Option<(Address, usize)> = None;
     while read < buf.len() {
         let end = read.saturating_add(stride).min(buf.len());
-        let (source, payload) = decode_header(&buf[read..end]).ok()?;
+        let Ok((source, payload)) = decode_header(&buf[read..end]) else {
+            read = end;
+            continue;
+        };
         let len = payload.len();
-        match &first {
-            None => first = Some((Address::from(source), len)),
-            Some((first, _)) if AddressRef::from(first) != source => return None,
+        match &run {
+            None => run = Some((Address::from(source), len)),
+            // Another source, or a payload too long to split at the run's stride, starts the
+            // next run.
+            Some((first, stride)) if AddressRef::from(first) != source || len > *stride => break,
             Some(_) => {}
         }
         buf.copy_within(end - len..end, write);
         (read, write) = (end, write + len);
+        // A shorter payload ends the run, as the last datagram of a GRO batch does.
+        if run.as_ref().is_some_and(|&(_, stride)| len < stride) {
+            break;
+        }
     }
-    let (source, stride) = first?;
+    let (source, stride) = run?;
     Some(Unframed {
         source,
         len: write,
         stride,
+        consumed: read,
     })
 }
 
@@ -323,8 +350,9 @@ fn decode_addr(atyp: u8, bytes: &[u8]) -> Result<(AddressRef<'_>, &[u8]), Header
         _ => return Err(HeaderError::UnsupportedAddress),
     };
     let (port, rest) = rest.split_first_chunk().ok_or(HeaderError::Truncated)?;
+    let port = u16::from_be_bytes(*port);
     Ok((
-        AddressRef::Ip(SocketAddr::new(addr, u16::from_be_bytes(*port))),
+        AddressRef::Ip(SocketAddr::new(addr.to_canonical(), port)),
         rest,
     ))
 }
@@ -425,21 +453,34 @@ impl<'a> From<&'a Address> for AddressRef<'a> {
 
 impl<T> UdpAssociation<T> {
     /// Returns the relay address as bound by the proxy (BND.ADDR and BND.PORT).
+    ///
+    /// An IPv4-mapped address is returned as IPv4.
     pub fn bound_addr(&self) -> &Address {
         &self.bound
     }
 
     /// Returns where to send datagrams; resolve it first if it is a domain name.
     ///
-    /// Proxies often bind an unspecified address such as `0.0.0.0`; it then means the
-    /// proxy's own IP, which only the caller knows from the control connection.
-    pub fn relay_addr(&self, proxy_ip: IpAddr) -> Address {
-        match &self.bound {
-            Address::Ip(addr) if addr.ip().is_unspecified() => {
-                Address::Ip(SocketAddr::new(proxy_ip, addr.port()))
+    /// `proxy` is the control connection's peer address. Proxies often bind an unspecified
+    /// address such as `0.0.0.0`; it then means `proxy`'s IP. A relay at `proxy`'s IP keeps its
+    /// IPv6 scope, which a link-local relay needs; another IP gets none, as it may be on another
+    /// link. The port is always BND.PORT, and an IPv4-mapped `proxy` is used as IPv4.
+    pub fn relay_addr(&self, proxy: SocketAddr) -> Address {
+        let Address::Ip(bound) = &self.bound else {
+            return self.bound.clone();
+        };
+        let proxy_ip = proxy.ip().to_canonical();
+        let ip = if bound.ip().is_unspecified() {
+            proxy_ip
+        } else {
+            bound.ip()
+        };
+        Address::Ip(match (ip, proxy) {
+            (IpAddr::V6(ip), SocketAddr::V6(proxy)) if IpAddr::V6(ip) == proxy_ip => {
+                SocketAddr::V6(SocketAddrV6::new(ip, bound.port(), 0, proxy.scope_id()))
             }
-            bound => bound.clone(),
-        }
+            _ => SocketAddr::new(ip, bound.port()),
+        })
     }
 
     /// Returns the control connection.
@@ -588,12 +629,20 @@ mod tests {
             }
         }
 
-        // An IPv4-mapped target, as a dual-stack socket names it, goes out as IPv4.
+        // An IPv4-mapped target, as a dual-stack socket names it, goes out as IPv4, and a
+        // relay naming a source that way is read as IPv4.
         let mapped: SocketAddr = "[::ffff:192.0.2.1]:443".parse().unwrap();
         let mut encoded = Vec::new();
         encode_header(mapped, &mut encoded).unwrap();
         assert_eq!(encoded, v4);
         assert_eq!(header_len(mapped), v4.len());
+        let mut mapped_header = [0; 22];
+        mapped_header[3] = 4;
+        mapped_header[14..].copy_from_slice(&[0xff, 0xff, 192, 0, 2, 1, 0x01, 0xbb]);
+        assert_eq!(
+            decode_header(&mapped_header),
+            Ok((AddressRef::Ip("192.0.2.1:443".parse().unwrap()), &[][..]))
+        );
 
         // A domain name that does not fit its length octet writes nothing.
         for name in ["", &"a".repeat(256)] {
@@ -646,7 +695,8 @@ mod tests {
                 Unframed {
                     source: Address::Ip(target),
                     len: 47,
-                    stride: 20
+                    stride: 20,
+                    consumed: 77,
                 }
             );
             assert_eq!(buf[..47], [[1; 20].as_slice(), &[2; 20], &[3; 7]].concat());
@@ -658,9 +708,59 @@ mod tests {
         assert_eq!(unframed.source, Address::Domain("a".into(), 80));
         assert_eq!(&named[..unframed.len], b"quic");
 
-        let other = [0, 0, 0, 1, 192, 0, 2, 2, 0x01, 0xbb];
+        // GRO only matches the relay's address, so one batch can hold several targets: each
+        // call unframes the run from one source. Another port is another target, and a broken
+        // datagram is skipped alone. The same target named IPv4-mapped has a longer header, so
+        // a run splits wherever payloads could not split at its stride: a longer payload
+        // starts the next run and a shorter one ends the current.
+        let other_host = [0, 0, 0, 1, 192, 0, 2, 2, 0x01, 0xbb];
+        let other_port = [0, 0, 0, 1, 192, 0, 2, 1, 0x20, 0xfb];
+        let fragmented = [0, 0, 1, 1, 192, 0, 2, 1, 0x01, 0xbb];
+        let mut mapped = [0; 22];
+        mapped[3] = 4;
+        mapped[14..].copy_from_slice(&[0xff, 0xff, 192, 0, 2, 1, 0x01, 0xbb]);
+        let mut batch = [
+            frame(&header, &[1; 20]),
+            frame(&fragmented, &[0; 20]),
+            frame(&header, &[2; 20]),
+            frame(&other_port, &[3; 20]),
+            frame(&other_host, &[4; 20]),
+            frame(&mapped, &[5; 8]),
+            frame(&header, &[6; 20]),
+            frame(&mapped, &[7; 8]),
+            frame(&header, &[8; 20]),
+            frame(&mapped, &[9; 2]),
+        ]
+        .concat();
+        let mut runs = Vec::new();
+        let mut offset = 0;
+        while let Some(run) = unframe(relay, relay, &mut batch[offset..], 30) {
+            runs.push((
+                run.source,
+                batch[offset..offset + run.len].to_vec(),
+                run.stride,
+            ));
+            offset += run.consumed;
+        }
+        assert_eq!(offset, batch.len(), "every datagram consumed");
+        let ip = |addr: &str| Address::Ip(addr.parse().unwrap());
+        let payload = |runs: &[(u8, usize)]| -> Vec<u8> {
+            runs.iter().flat_map(|&(b, n)| [b].repeat(n)).collect()
+        };
+        assert_eq!(
+            runs,
+            [
+                (ip("192.0.2.1:443"), payload(&[(1, 20), (2, 20)]), 20),
+                (ip("192.0.2.1:8443"), payload(&[(3, 20)]), 20),
+                (ip("192.0.2.2:443"), payload(&[(4, 20)]), 20),
+                (ip("192.0.2.1:443"), payload(&[(5, 8)]), 8),
+                (ip("192.0.2.1:443"), payload(&[(6, 20), (7, 8)]), 20),
+                (ip("192.0.2.1:443"), payload(&[(8, 20), (9, 2)]), 20),
+            ]
+        );
+
         let quic = frame(&header, b"quic");
-        let cases: [(&str, Vec<u8>, &str, usize); 6] = [
+        let cases: [(&str, Vec<u8>, &str, usize); 4] = [
             ("bypassing the relay", quic.clone(), "192.0.2.1:443", 14),
             (
                 "from another relay port",
@@ -669,24 +769,41 @@ mod tests {
                 14,
             ),
             (
-                "mixing sources",
-                [quic.clone(), frame(&other, b"quic")].concat(),
-                "127.0.0.1:1080",
-                14,
-            ),
-            (
                 "fragmented",
-                frame(&[0, 0, 1, 1, 192, 0, 2, 1, 0x01, 0xbb], b"quic"),
+                frame(&fragmented, b"quic"),
                 "127.0.0.1:1080",
                 14,
             ),
             ("truncated", quic[..9].to_vec(), "127.0.0.1:1080", 9),
-            ("without a stride", quic.clone(), "127.0.0.1:1080", 0),
         ];
         for (case, mut datagram, from, stride) in cases {
             let unframed = unframe(relay, from.parse().unwrap(), &mut datagram, stride);
             assert_eq!(unframed, None, "{case}");
         }
+        // A link-local relay with a scope must reply on that interface; one without, and a
+        // global one, match any. `flowinfo` is ignored.
+        let v6 = |ip: &str, flowinfo, scope| {
+            SocketAddr::V6(SocketAddrV6::new(
+                ip.parse().unwrap(),
+                1080,
+                flowinfo,
+                scope,
+            ))
+        };
+        for (relay, from, accepted) in [
+            (v6("fe80::1", 7, 4), v6("fe80::1", 0, 4), true),
+            (v6("fe80::1", 0, 4), v6("fe80::1", 0, 5), false),
+            (v6("fe80::1", 0, 0), v6("fe80::1", 0, 4), true),
+            (v6("2001:db8::1", 0, 4), v6("2001:db8::1", 0, 0), true),
+        ] {
+            let unframed = unframe(relay, from, &mut quic.clone(), 14);
+            assert_eq!(unframed.is_some(), accepted, "{relay} from {from}");
+        }
+
+        // Without a stride, the buffer is one datagram.
+        let mut single = quic.clone();
+        let unframed = unframe(relay, relay, &mut single, 0).expect("relayed");
+        assert_eq!((unframed.len, unframed.consumed), (4, 14));
         buf.clear();
         assert_eq!(unframe(relay, relay, &mut buf, 30), None, "empty");
     }
@@ -696,7 +813,7 @@ mod tests {
         // UDP ASSOCIATE from `client_addr`.
         const REQUEST: &[u8] = &[5, 3, 0, 1, 192, 0, 2, 5, 0x11, 0x51];
         let client_addr: SocketAddr = "192.0.2.5:4433".parse().unwrap();
-        let proxy_ip: IpAddr = "198.51.100.7".parse().unwrap();
+        let proxy: SocketAddr = "198.51.100.7:1080".parse().unwrap();
         let user = Some(("user", "secret"));
         let limit = Duration::from_secs(5);
 
@@ -737,6 +854,36 @@ mod tests {
                 None,
                 no_auth(&[5, 0, 0, 1, 0, 0, 0, 0, 0x1f, 0x90]),
                 Ok((ip("0.0.0.0:8080"), ip("198.51.100.7:8080"))),
+            ),
+            (
+                None,
+                no_auth(&[&[5, 0, 0, 4][..], &[0; 16], &[0x1f, 0x90]].concat()),
+                Ok((ip("[::]:8080"), ip("198.51.100.7:8080"))),
+            ),
+            // An IPv4-mapped address, as a dual-stack relay reports it, is read as IPv4.
+            (
+                None,
+                no_auth(
+                    &[
+                        &[5, 0, 0, 4][..],
+                        &[0; 10],
+                        &[0xff, 0xff, 0, 0, 0, 0, 0x1f, 0x90],
+                    ]
+                    .concat(),
+                ),
+                Ok((ip("0.0.0.0:8080"), ip("198.51.100.7:8080"))),
+            ),
+            (
+                None,
+                no_auth(
+                    &[
+                        &[5, 0, 0, 4][..],
+                        &[0; 10],
+                        &[0xff, 0xff, 192, 0, 2, 9, 0x23, 0x28],
+                    ]
+                    .concat(),
+                ),
+                Ok((ip("192.0.2.9:9000"), ip("192.0.2.9:9000"))),
             ),
             // A specific one is used as is, as is a domain name for the caller to resolve.
             (
@@ -795,7 +942,7 @@ mod tests {
             match (result, expected) {
                 (Ok(mut association), Ok((bound, relay))) => {
                     assert_eq!(*association.bound_addr(), bound);
-                    assert_eq!(association.relay_addr(proxy_ip), relay);
+                    assert_eq!(association.relay_addr(proxy), relay);
                     // The script has ended, so the proxy closed the control connection.
                     timeout(limit, poll_fn(|cx| association.poll_closed(cx)))
                         .await
@@ -806,6 +953,39 @@ mod tests {
                 (got, want) => panic!("got {got:?}, want {want:?}"),
             }
         }
+
+        // A relay at the peer's IP keeps the control connection's scope, another IP gets none,
+        // and the port is BND.PORT. An IPv4-mapped peer, as a dual-stack socket names it, is IPv4.
+        for (bound, proxy, relay) in [
+            (
+                "0.0.0.0:8080",
+                "[::ffff:198.51.100.7]:1080",
+                "198.51.100.7:8080",
+            ),
+            ("[::]:8080", "[fe80::1%4]:1080", "[fe80::1%4]:8080"),
+            ("[fe80::1]:9000", "[fe80::1%4]:1080", "[fe80::1%4]:9000"),
+            ("[fe80::2]:9000", "[fe80::1%4]:1080", "[fe80::2]:9000"),
+        ] {
+            let association = UdpAssociation {
+                io: (),
+                bound: ip(bound),
+            };
+            let relay_addr = association.relay_addr(proxy.parse().unwrap());
+            assert_eq!(relay_addr, ip(relay), "{bound} via {proxy}");
+        }
+
+        // A reset control connection ends the association too.
+        let mut reset = UdpAssociation {
+            io: Builder::new()
+                .read_error(io::ErrorKind::ConnectionReset.into())
+                .build(),
+            bound: ip("192.0.2.1:9000"),
+        };
+        let err = timeout(limit, poll_fn(|cx| reset.poll_closed(cx)))
+            .await
+            .expect("reset not reported")
+            .expect_err("reset");
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
 
         // A reply cut inside BND.ADDR. The write buffer hides any request left unflushed.
         let (client, mut server) = duplex(64);

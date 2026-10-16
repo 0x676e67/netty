@@ -23,7 +23,7 @@ use http_body::Body;
 use tower_service::Service;
 
 pub use self::{template::Template, tunnel::UdpTunnel};
-use super::{Tunneling, dst_host, port_or_default};
+use super::{Tunneling, dst_host, dst_port};
 use crate::{
     conn::http3::{SendRequest, datagram::DatagramRequest},
     error::BoxError,
@@ -203,8 +203,9 @@ where
 
     fn call(&mut self, dst: Uri) -> Self::Future {
         let target = dst_host(&dst)
+            .zip(dst_port(&dst))
             .ok_or(MasqueError::InvalidTarget)
-            .and_then(|host| self.template.expand(host, port_or_default(&dst)));
+            .and_then(|(host, port)| self.template.expand(host, port));
         let connecting = self.inner.call(self.template.proxy().clone());
         let headers = self.headers.clone();
 
