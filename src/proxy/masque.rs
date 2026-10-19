@@ -1,8 +1,9 @@
 //! MASQUE CONNECT-UDP clients ([RFC 9298](https://www.rfc-editor.org/rfc/rfc9298)).
 //!
 //! [`ConnectUdp`] opens a [`UdpTunnel`] to a UDP target through a proxy over HTTP/3. For other
-//! setups, build the request with [`http3_request`] and open the tunnel from the response with
-//! [`UdpTunnel::from_http3`]. HTTP/2 Extended CONNECT and HTTP/1.1 Upgrade are not supported.
+//! setups, build the request with [`http3_request`] or [`http2_request`] and open the tunnel from
+//! the response with [`UdpTunnel::from_http3`] or [`UdpTunnel::from_http2`]. Over HTTP/2 every
+//! payload travels as a DATAGRAM capsule (RFC 9297 §3.5). HTTP/1.1 Upgrade is not supported.
 
 mod capsule;
 mod template;
@@ -15,7 +16,7 @@ use std::{
 };
 
 use http::{
-    HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri,
+    HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri, Version,
     header::{CONTENT_LENGTH, CONTENT_TYPE, Entry, PROXY_AUTHORIZATION, TRANSFER_ENCODING},
 };
 use http_body::Body;
@@ -43,6 +44,15 @@ pub fn http3_request<B: Default>(uri: Uri) -> Request<B> {
     let mut request = connect_request(uri);
     request.extensions_mut().insert(Protocol::CONNECT_UDP);
     request.extensions_mut().insert(DatagramRequest);
+    request
+}
+
+/// Builds an HTTP/2 CONNECT-UDP request for an expanded template (RFC 9298 §3.4).
+pub fn http2_request<B: Default>(uri: Uri) -> Request<B> {
+    let mut request = connect_request(uri);
+    request
+        .extensions_mut()
+        .insert(::http2::ext::Protocol::from_static("connect-udp"));
     request
 }
 
@@ -141,6 +151,21 @@ impl UdpTunnel {
             .ok_or(MasqueError::InvalidResponse)?
             .into_parts();
         Ok(UdpTunnel::new(control, Some((sender, receiver))))
+    }
+
+    /// Opens the tunnel from a successful response to [`http2_request`].
+    ///
+    /// The response must be HTTP/2 with status 200, the only one on which the HTTP/2 client
+    /// opens a tunnel; an HTTP/1.1 response to the same request would be a TCP tunnel.
+    pub async fn from_http2<B>(response: Response<B>) -> Result<Self, MasqueError> {
+        validate(&response)?;
+        if response.version() != Version::HTTP_2 || response.status() != StatusCode::OK {
+            return Err(MasqueError::InvalidResponse);
+        }
+        let control = crate::upgrade::on(response)
+            .await
+            .map_err(|_| MasqueError::InvalidResponse)?;
+        Ok(UdpTunnel::new(control, None))
     }
 }
 
@@ -320,6 +345,26 @@ mod tests {
             );
         }
         assert_eq!(connector.inner.0, 0, "connected for a bad target");
+    }
+
+    #[test]
+    fn http2_tunnels_need_an_http2_200() {
+        for (version, status, opens) in [
+            (Version::HTTP_2, 200, true),
+            // The same request on an HTTP/1.1 connection opens a TCP tunnel.
+            (Version::HTTP_11, 200, false),
+            (Version::HTTP_2, 202, false),
+        ] {
+            let (pending, on_upgrade) = crate::upgrade::pending();
+            let (io, _proxy) = tokio::io::duplex(64);
+            pending.fulfill(crate::upgrade::Upgraded::new(io, Bytes::new()));
+            let mut response = Response::new(());
+            *response.version_mut() = version;
+            *response.status_mut() = StatusCode::from_u16(status).unwrap();
+            response.extensions_mut().insert(on_upgrade);
+            let tunnel = UdpTunnel::from_http2(response).now_or_never().unwrap();
+            assert_eq!(tunnel.is_ok(), opens, "{version:?} {status}");
+        }
     }
 
     #[test]

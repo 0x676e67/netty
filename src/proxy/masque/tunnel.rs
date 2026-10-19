@@ -29,7 +29,8 @@ const READ_CHUNK: usize = 8 * 1024;
 /// as DATAGRAM capsules on the request stream; received capsules are always accepted. Methods
 /// take `&mut self`: share a tunnel between send and receive tasks behind a mutex.
 ///
-/// Dropping the tunnel aborts the request stream, which closes the tunnel at the proxy.
+/// Dropping the tunnel aborts the request stream, which closes the tunnel at the proxy; over
+/// HTTP/2 the reset follows capsules already written, which wait on the proxy's flow control.
 pub struct UdpTunnel {
     control: Upgraded,
     native: Option<Native>,
@@ -186,9 +187,11 @@ impl UdpTunnel {
     /// Receives the next UDP payload; `None` once the proxy closed the tunnel.
     ///
     /// Also finishes writing buffered capsules. An error ends receiving and later calls report
-    /// it again, with the same kind and message. A capsule cut short by the end of the stream
-    /// also resets the request stream with `H3_MESSAGE_ERROR` (RFC 9297 §3.3), and an oversized
-    /// payload with `H3_DATAGRAM_ERROR` (RFC 9298 §5).
+    /// it again, with the same kind and message. Over HTTP/3, a capsule cut short by the end of
+    /// the stream also resets the request stream with `H3_MESSAGE_ERROR` (RFC 9297 §3.3), and an
+    /// oversized payload with `H3_DATAGRAM_ERROR` (RFC 9298 §5); over HTTP/2 dropping the tunnel
+    /// aborts it. Over HTTP/2, a proxy reset with `NO_ERROR` or `CANCEL` reads as the end of the
+    /// tunnel.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, MasqueError>> {
         if let Some(err) = &self.recv_error {
             return Poll::Ready(Err(err.clone().into()));
@@ -409,7 +412,7 @@ mod tests {
 
     use super::*;
 
-    /// A capsule-only tunnel and the proxy's end of its request stream.
+    /// A capsule-only tunnel, as over HTTP/2, and the proxy's end of its request stream.
     ///
     /// `buffered` puts a write buffer in between, so capsules only reach the proxy if flushed.
     fn capsule_tunnel(capacity: usize, buffered: bool) -> (UdpTunnel, tokio::io::DuplexStream) {
