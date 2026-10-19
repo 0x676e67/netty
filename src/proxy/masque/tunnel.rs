@@ -186,27 +186,41 @@ impl UdpTunnel {
     /// Receives the next UDP payload; `None` once the proxy closed the tunnel.
     ///
     /// Also finishes writing buffered capsules. An error ends receiving and later calls report
-    /// it again, with the same kind and message; a malformed capsule or payload also resets the
-    /// request stream with `H3_DATAGRAM_ERROR`.
+    /// it again, with the same kind and message. A capsule cut short by the end of the stream
+    /// also resets the request stream with `H3_MESSAGE_ERROR` (RFC 9297 §3.3), and an oversized
+    /// payload with `H3_DATAGRAM_ERROR` (RFC 9298 §5).
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, MasqueError>> {
         if let Some(err) = &self.recv_error {
             return Poll::Ready(Err(err.clone().into()));
         }
         let result = ready!(self.poll_payload(cx));
+        // Ending inside a capsule breaks the Capsule Protocol, which makes the whole message
+        // malformed; the other errors are malformed payloads.
+        let truncated = matches!(result, Ok(None)) && self.decoder.is_partial(&self.read_buf);
+        let result = if truncated {
+            Err(MasqueError::Malformed)
+        } else {
+            result
+        };
         if let Err(err) = &result {
             let failed = match err {
                 MasqueError::Io(err) => RecvError::Io(err.kind(), err.to_string()),
                 _ => RecvError::Malformed,
             };
             if let (RecvError::Malformed, Some(native)) = (&failed, &self.native) {
-                native.receiver.abort_malformed();
+                if truncated {
+                    native.receiver.abort_malformed_message();
+                } else {
+                    native.receiver.abort_malformed();
+                }
             }
             self.recv_error = Some(failed);
         }
         Poll::Ready(result)
     }
 
-    /// Polls the next payload from HTTP Datagrams or the request stream.
+    /// Polls the next payload from HTTP Datagrams or the request stream; `None` at the end of the
+    /// stream, even inside a capsule.
     fn poll_payload(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, MasqueError>> {
         self.wakers.recv.register(cx.waker());
         // A write error only stops sending; `poll_flush` and `poll_close` report it.
@@ -250,11 +264,7 @@ impl UdpTunnel {
                         None => native.recv_open = false,
                     }
                 }
-                return Poll::Ready(if self.decoder.is_partial(&self.read_buf) {
-                    Err(MasqueError::Malformed)
-                } else {
-                    Ok(None)
-                });
+                return Poll::Ready(Ok(None));
             }
         }
         cx.waker().wake_by_ref();

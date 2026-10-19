@@ -337,15 +337,22 @@ async fn malformed_response_or_capsule_resets_the_stream() {
                 assert_eq!(stop_code(&mut stream).await, Code::H3_MESSAGE_ERROR);
             }
 
-            let resolver = server.accept().await.unwrap().unwrap();
-            let (_, mut stream) = resolver.resolve_request().await.unwrap();
-            stream.send_response(Response::new(())).await.unwrap();
-            // A Context ID 0 capsule longer than any UDP payload.
-            stream
-                .send_data(Bytes::from_static(&[0, 0x80, 1, 0, 0, 0]))
-                .await
-                .unwrap();
-            assert_eq!(reset_code(&mut stream).await, Code::H3_DATAGRAM_ERROR);
+            // A Context ID 0 capsule longer than any UDP payload breaks RFC 9298 §5, while a
+            // capsule cut short by FIN breaks the Capsule Protocol, so the message is
+            // malformed (RFC 9297 §3.3).
+            for (data, fin, code) in [
+                (&[0, 0x80, 1, 0, 0, 0][..], false, Code::H3_DATAGRAM_ERROR),
+                (&[0, 5, 0][..], true, Code::H3_MESSAGE_ERROR),
+            ] {
+                let resolver = server.accept().await.unwrap().unwrap();
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                stream.send_response(Response::new(())).await.unwrap();
+                stream.send_data(Bytes::from_static(data)).await.unwrap();
+                if fin {
+                    stream.finish().await.unwrap();
+                }
+                assert_eq!(reset_code(&mut stream).await, code);
+            }
         });
 
         let template = Template::new("https://localhost/masque/{target_host}/{target_port}/");
@@ -365,18 +372,22 @@ async fn malformed_response_or_capsule_resets_the_stream() {
             assert!(tx.try_send_request(request).await.is_err());
         }
 
-        let mut response = tx
-            .try_send_request(masque::http3_request(uri))
-            .await
-            .unwrap();
-        let mut tunnel = UdpTunnel::from_http3(&mut response).unwrap();
-        // The error sticks, and the stream resets with H3_DATAGRAM_ERROR while the tunnel lives.
+        // The error sticks, and the stream resets while the tunnel lives.
+        let mut tunnels = Vec::new();
         for _ in 0..2 {
-            let result = recv(&mut tunnel).await;
-            assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
+            let mut response = tx
+                .try_send_request(masque::http3_request(uri.clone()))
+                .await
+                .unwrap();
+            let mut tunnel = UdpTunnel::from_http3(&mut response).unwrap();
+            for _ in 0..2 {
+                let result = recv(&mut tunnel).await;
+                assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
+            }
+            tunnels.push(tunnel);
         }
         server_task.await.unwrap();
-        drop(tunnel);
+        drop(tunnels);
         drop(tx);
         client_driver.as_mut().graceful_shutdown();
         client_driver.await.unwrap();

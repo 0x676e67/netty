@@ -98,9 +98,10 @@ pub(crate) struct RequestState {
 /// Why the application aborted a Datagram session, which picks the stream's reset code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Abort {
-    /// The peer broke the format of its payloads or Capsules: `H3_DATAGRAM_ERROR`.
+    /// The peer's payloads break the protocol's format: `H3_DATAGRAM_ERROR`.
     Datagram,
-    /// The response is malformed under the session's protocol: `H3_MESSAGE_ERROR`.
+    /// The response or its Capsules are malformed under the session's protocol:
+    /// `H3_MESSAGE_ERROR`.
     Message,
 }
 

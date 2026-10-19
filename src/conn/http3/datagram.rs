@@ -84,7 +84,7 @@ impl Session {
     /// ([RFC 9297 §3.2](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2)). Dropping the
     /// session instead cancels the request.
     pub fn reject_malformed(self) {
-        self.receiver.0.abort(Abort::Message);
+        self.receiver.abort_malformed_message();
     }
 }
 
@@ -208,10 +208,17 @@ impl Receiver {
         poll_fn(|cx| self.poll_recv(cx)).await
     }
 
-    /// Resets the request stream with `H3_DATAGRAM_ERROR`, for a peer that broke the format
-    /// of its payloads or Capsules ([RFC 9297](https://www.rfc-editor.org/rfc/rfc9297.html)).
+    /// Resets the request stream with `H3_DATAGRAM_ERROR`, for a peer whose payloads break the
+    /// protocol's format ([RFC 9297](https://www.rfc-editor.org/rfc/rfc9297.html)).
     pub fn abort_malformed(&self) {
         self.0.abort(Abort::Datagram);
+    }
+
+    /// Resets the request stream with `H3_MESSAGE_ERROR`, for a peer whose Capsules make the
+    /// message malformed, such as one cut short by the end of the stream
+    /// ([RFC 9297 §3.3](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.3)).
+    pub fn abort_malformed_message(&self) {
+        self.0.abort(Abort::Message);
     }
 }
 
