@@ -11,12 +11,12 @@ mod tunnel;
 
 use std::{
     error::Error as StdError,
-    fmt, io,
+    fmt, future, io,
     task::{Context, Poll},
 };
 
 use http::{
-    HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri,
+    HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri, Version,
     header::{CONTENT_LENGTH, CONTENT_TYPE, Entry, PROXY_AUTHORIZATION, TRANSFER_ENCODING},
 };
 use http_body::Body;
@@ -88,7 +88,8 @@ fn validate<B>(response: &Response<B>) -> Result<(), MasqueError> {
 /// The inner service yields an HTTP/3 [`SendRequest`] for the template's
 /// [proxy](Template::proxy), so it can pool connections. `call` takes the UDP target as a URI
 /// whose host and port fill `target_host` and `target_port`; UDP has no default port, so the
-/// URI must name one.
+/// URI must name one. The request declares HTTP Datagrams, so the connection must come from
+/// `conn::http3::Builder::handshake_with_datagrams`.
 #[derive(Clone, Debug)]
 pub struct ConnectUdp<S> {
     inner: S,
@@ -102,8 +103,8 @@ pub struct ConnectUdp<S> {
 pub enum MasqueError {
     /// The URI template breaks RFC 9298 §2, for the given reason.
     InvalidTemplate(&'static str),
-    /// The target host is empty or has an IPv6 zone ID, or the port is missing, 0 or not a
-    /// valid `u16`.
+    /// The target host is empty, a bracketed literal other than IPv6 or has an IPv6 zone ID,
+    /// or the port is missing, 0 or not a valid `u16`.
     InvalidTarget,
     /// The inner connector failed to provide a connection to the proxy.
     ConnectFailed(BoxError),
@@ -144,8 +145,14 @@ impl UdpTunnel {
     }
 
     /// Opens the tunnel from a successful response to [`http2_request`].
+    ///
+    /// The response must be HTTP/2 with status 200, the only one on which the HTTP/2 client
+    /// opens a tunnel; an HTTP/1.1 response to the same request would be a TCP tunnel.
     pub async fn from_http2<B>(response: Response<B>) -> Result<Self, MasqueError> {
         validate(&response)?;
+        if response.version() != Version::HTTP_2 || response.status() != StatusCode::OK {
+            return Err(MasqueError::InvalidResponse);
+        }
         let control = crate::upgrade::on(response)
             .await
             .map_err(|_| MasqueError::InvalidResponse)?;
@@ -175,7 +182,17 @@ impl<S> ConnectUdp<S> {
     /// Adds extra headers to each CONNECT-UDP request.
     ///
     /// A `Proxy-Authorization` among them is marked sensitive and replaces one set earlier.
+    /// `Content-Length`, `Content-Type` and `Transfer-Encoding` are dropped, as the Capsule
+    /// Protocol forbids them (RFC 9297 §3.2), and so is `Capsule-Protocol`, which the request sets.
     pub fn with_headers(mut self, mut headers: HeaderMap) -> Self {
+        for name in [
+            CONTENT_LENGTH,
+            CONTENT_TYPE,
+            TRANSFER_ENCODING,
+            CAPSULE_PROTOCOL,
+        ] {
+            headers.remove(name);
+        }
         if let Entry::Occupied(mut auth) = headers.entry(PROXY_AUTHORIZATION) {
             auth.iter_mut().for_each(|value| value.set_sensitive(true));
         }
@@ -204,15 +221,19 @@ where
     }
 
     fn call(&mut self, dst: Uri) -> Self::Future {
+        // A bad target fails before the inner connector starts connecting to the proxy.
         let target = dst_host(&dst)
             .zip(dst.port_u16())
             .ok_or(MasqueError::InvalidTarget)
             .and_then(|(host, port)| self.template.expand(host, port));
+        let uri = match target {
+            Ok(uri) => uri,
+            Err(err) => return Tunneling::new(future::ready(Err(err))),
+        };
         let connecting = self.inner.call(self.template.proxy().clone());
         let headers = self.headers.clone();
 
         Tunneling::new(async move {
-            let uri = target?;
             let mut sender = connecting
                 .await
                 .map_err(|err| MasqueError::ConnectFailed(err.into()))?;
@@ -281,8 +302,8 @@ mod tests {
 
     #[test]
     fn targets_need_a_valid_port() {
-        /// A proxy connection that never comes up; a bad target fails without it.
-        struct Unreachable;
+        /// Counts connection attempts to a proxy that never comes up.
+        struct Unreachable(usize);
 
         impl Service<Uri> for Unreachable {
             type Response = SendRequest<Empty<Bytes>>;
@@ -294,12 +315,13 @@ mod tests {
             }
 
             fn call(&mut self, _: Uri) -> Self::Future {
+                self.0 += 1;
                 std::future::pending()
             }
         }
 
         let template = Template::well_known(&"proxy.example".parse().unwrap()).unwrap();
-        let mut connector = ConnectUdp::new(template, Unreachable);
+        let mut connector = ConnectUdp::new(template, Unreachable(0));
         // UDP has no default port to fall back on.
         for target in [
             "udp://dns.example",
@@ -313,20 +335,56 @@ mod tests {
                 "{target}: {result:?}"
             );
         }
+        assert_eq!(connector.inner.0, 0, "connected for a bad target");
     }
 
     #[test]
-    fn auth_headers_stay_sensitive() {
+    fn http2_tunnels_need_an_http2_200() {
+        for (version, status, opens) in [
+            (Version::HTTP_2, 200, true),
+            // The same request on an HTTP/1.1 connection opens a TCP tunnel.
+            (Version::HTTP_11, 200, false),
+            (Version::HTTP_2, 202, false),
+        ] {
+            let (pending, on_upgrade) = crate::upgrade::pending();
+            let (io, _proxy) = tokio::io::duplex(64);
+            pending.fulfill(crate::upgrade::Upgraded::new(io, Bytes::new()));
+            let mut response = Response::new(());
+            *response.version_mut() = version;
+            *response.status_mut() = StatusCode::from_u16(status).unwrap();
+            response.extensions_mut().insert(on_upgrade);
+            let tunnel = UdpTunnel::from_http2(response).now_or_never().unwrap();
+            assert_eq!(tunnel.is_ok(), opens, "{version:?} {status}");
+        }
+    }
+
+    #[test]
+    fn extra_headers_keep_auth_sensitive_and_drop_framing() {
         let template = Template::well_known(&"proxy.example".parse().unwrap()).unwrap();
         let auth = HeaderValue::from_static("Basic c2VjcmV0");
         let mut headers = HeaderMap::new();
         headers.insert(PROXY_AUTHORIZATION, auth.clone());
-        for connector in [
-            ConnectUdp::new(template.clone(), ()).with_auth(auth),
-            // A later Proxy-Authorization replaces an earlier one.
-            ConnectUdp::new(template, ())
-                .with_auth(HeaderValue::from_static("Basic b3RoZXI="))
-                .with_headers(headers),
+        for name in [
+            CONTENT_LENGTH,
+            CONTENT_TYPE,
+            TRANSFER_ENCODING,
+            CAPSULE_PROTOCOL,
+        ] {
+            headers.insert(name, HeaderValue::from_static("0"));
+        }
+        headers.insert("x-trace", HeaderValue::from_static("1"));
+        for (connector, names) in [
+            (
+                ConnectUdp::new(template.clone(), ()).with_auth(auth),
+                &["proxy-authorization"][..],
+            ),
+            // A later Proxy-Authorization replaces an earlier one; framing headers go.
+            (
+                ConnectUdp::new(template, ())
+                    .with_auth(HeaderValue::from_static("Basic b3RoZXI="))
+                    .with_headers(headers),
+                &["proxy-authorization", "x-trace"],
+            ),
         ] {
             let values: Vec<_> = connector
                 .headers
@@ -337,6 +395,8 @@ mod tests {
             assert!(values[0].is_sensitive());
             let debug = format!("{connector:?}");
             assert!(!debug.contains("c2VjcmV0"), "{debug}");
+            let kept: Vec<_> = connector.headers.keys().map(HeaderName::as_str).collect();
+            assert_eq!(kept, names);
         }
     }
 

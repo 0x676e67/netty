@@ -21,6 +21,8 @@ use tokio::{
 };
 use tokio_util::sync::{CancellationToken, PollSender, WaitForCancellationFutureOwned};
 
+#[cfg(feature = "http3-datagram")]
+use super::client::malformed_datagram_error;
 use super::{
     client::{CHUNK, H3ClientFuture, RecvGuard, SendGuard, invalid_datagram_error},
     shared::Active,
@@ -37,10 +39,25 @@ use crate::{
     proto::http3::datagram::{Registration, RequestState},
 };
 
-// pin_project_lite does not support cfg on fields; no registration is
-// stored when HTTP Datagrams are disabled.
+// pin_project_lite does not support cfg on fields; nothing is released
+// when HTTP Datagrams are disabled.
 #[cfg(not(feature = "http3-datagram"))]
-type Registration = ();
+type Release = ();
+
+/// What a tunnel task releases once its transfer ends.
+#[cfg(feature = "http3-datagram")]
+enum Release {
+    /// A request without Datagram semantics, unregistered with the task.
+    Ordinary(Registration),
+    /// A Datagram session, which the tunnel removes when it drops.
+    Datagram(SessionGuard),
+}
+
+/// Stops a Datagram session's sending when its tunnel task ends or is dropped. The stream
+/// guards close an unfinished receive direction, so packets received before a FIN stay
+/// readable until the tunnel drops.
+#[cfg(feature = "http3-datagram")]
+struct SessionGuard(Arc<RequestState>);
 
 /// Write commands from the tunnel to its pump task; acknowledgments carry
 /// the transport result back.
@@ -59,8 +76,9 @@ struct H3Upgraded {
     pending: Option<(bool, oneshot::Receiver<Result<()>>)>,
     shutdown: bool,
     read_closed: bool,
+    /// The Datagram session, closed when the tunnel drops.
     #[cfg(feature = "http3-datagram")]
-    datagrams: Option<Arc<RequestState>>,
+    datagrams: Option<Registration>,
     /// Wakes a shutdown waiting for the session's Datagrams to reach QUIC.
     #[cfg(feature = "http3-datagram")]
     drain: Option<Pin<Box<OwnedNotified>>>,
@@ -78,7 +96,7 @@ pin_project! {
         #[pin]
         transfer: Option<Transfer<S, R>>,
         active: Option<Active>,
-        registration: Option<Registration>,
+        release: Option<Release>,
     }
 }
 
@@ -99,9 +117,16 @@ where
         let (result, body) = ready!(transfer.poll(cx));
         this.transfer.set(None);
         if let (Err(error), Some(mut body), Some(active)) = (result, body, this.active.as_ref()) {
+            #[cfg(feature = "http3-datagram")]
+            let error = match this.release {
+                Some(Release::Datagram(SessionGuard(state))) if state.is_malformed() => {
+                    malformed_datagram_error()
+                }
+                _ => error,
+            };
             body.send_error(active.shared().error_or(error));
         }
-        this.registration.take();
+        this.release.take();
         this.active.take();
         Poll::Ready(())
     }
@@ -133,24 +158,31 @@ where
     E: Http3ClientConnExec<Q>,
 {
     #[cfg(feature = "http3-datagram")]
-    let (registration, datagrams) = match datagrams {
+    let (release, datagrams) = match datagrams {
         TunnelDatagrams::Disabled => (None, None),
-        TunnelDatagrams::Ordinary(registration) => (Some(registration), None),
+        TunnelDatagrams::Ordinary(registration) => (Some(Release::Ordinary(registration)), None),
         TunnelDatagrams::Datagram(registration) => {
-            let state = registration.0.clone();
-            (Some(registration), Some(state))
+            let session = SessionGuard(registration.0.clone());
+            (Some(Release::Datagram(session)), Some(registration))
         }
     };
 
     #[cfg(feature = "http3-datagram")]
-    let invalid = registration
+    let invalid = match (&release, &datagrams) {
+        (Some(Release::Ordinary(registration)), _) | (_, Some(registration)) => {
+            Some(registration.0.invalid.clone())
+        }
+        _ => None,
+    };
+    #[cfg(feature = "http3-datagram")]
+    let session = datagrams
         .as_ref()
-        .map(|registration| registration.0.invalid.clone());
+        .map(|registration| registration.0.clone());
 
     #[cfg(not(feature = "http3-datagram"))]
     let invalid: Option<CancellationToken> = None;
     #[cfg(not(feature = "http3-datagram"))]
-    let registration = None;
+    let release = None;
     let (body, rx) = chan::channel(false);
     let (tx, writes) = mpsc::channel(1);
     let io = H3Upgraded {
@@ -161,7 +193,7 @@ where
         shutdown: false,
         read_closed: false,
         #[cfg(feature = "http3-datagram")]
-        datagrams: datagrams.clone(),
+        datagrams,
         #[cfg(feature = "http3-datagram")]
         drain: None,
     };
@@ -169,8 +201,8 @@ where
     let (pending, on_upgrade) = pending();
     let io = Upgraded::new(io, Bytes::new());
     #[cfg(feature = "http3-datagram")]
-    let io = if let Some(datagrams) = datagrams {
-        headers.extensions_mut().insert(Pending::new(io, datagrams));
+    let io = if let Some(session) = session {
+        headers.extensions_mut().insert(Pending::new(io, session));
         None
     } else {
         Some(io)
@@ -196,7 +228,7 @@ where
                 invalid: invalid.map(CancellationToken::cancelled_owned),
             }),
             active: Some(active),
-            registration,
+            release,
         },
     });
 
@@ -412,7 +444,7 @@ impl<R: quic::RecvStream> Future for RecvStream<R> {
             this.recv.finished = true;
             #[cfg(feature = "http3-datagram")]
             if let Some(datagrams) = &this.recv.datagrams {
-                datagrams.close_recv();
+                datagrams.finish_recv();
             }
             // Dropping the sender delivers EOF to the tunnel reader.
             this.body.take();
@@ -474,12 +506,21 @@ impl H3Upgraded {
     }
 }
 
+// ===== impl SessionGuard =====
+
+#[cfg(feature = "http3-datagram")]
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.0.close_send();
+    }
+}
+
 #[cfg(feature = "http3-datagram")]
 impl H3Upgraded {
     /// Stops new Datagrams and waits until the queued ones have been handed to QUIC, since
     /// the FIN discards those still queued.
     fn poll_datagrams_sent(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        let Some(datagrams) = &self.datagrams else {
+        let Some(Registration(datagrams)) = &self.datagrams else {
             return Poll::Ready(());
         };
         // Without this a busy sender would keep the queue from ever draining.
@@ -566,14 +607,5 @@ impl AsyncWrite for H3Upgraded {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.poll_barrier(cx, true)
-    }
-}
-
-#[cfg(feature = "http3-datagram")]
-impl Drop for H3Upgraded {
-    fn drop(&mut self) {
-        if let Some(datagrams) = &self.datagrams {
-            datagrams.close();
-        }
     }
 }

@@ -260,7 +260,7 @@ impl<S: quic::RecvStream> State<S> {
                 recv.finished = true;
                 #[cfg(feature = "http3-datagram")]
                 if let Some(datagrams) = &recv.datagrams {
-                    datagrams.close_recv();
+                    datagrams.finish_recv();
                 }
                 self.recv = None;
                 self.release();

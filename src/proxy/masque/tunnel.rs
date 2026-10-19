@@ -29,19 +29,26 @@ const READ_CHUNK: usize = 8 * 1024;
 /// as DATAGRAM capsules on the request stream; received capsules are always accepted. Methods
 /// take `&mut self`: share a tunnel between send and receive tasks behind a mutex.
 ///
-/// Dropping the tunnel aborts the request stream, which closes the tunnel at the proxy.
+/// Dropping the tunnel aborts the request stream, which closes the tunnel at the proxy; over
+/// HTTP/2 the reset follows capsules already written, which wait on the proxy's flow control.
 pub struct UdpTunnel {
     control: Upgraded,
     native: Option<Native>,
 
     decoder: capsule::Decoder,
     read_buf: BytesMut,
+    /// Why receiving failed, so later polls report it again.
+    recv_error: Option<RecvError>,
 
     write_buf: BytesMut,
     /// Whether capsule bytes were written since the last flush.
     unflushed: bool,
+    /// Set when `poll_close` starts: sends are refused while buffered capsules drain.
+    closing: bool,
     /// Set once the request stream takes no more capsules, after a close or a write error.
     write_closed: bool,
+    /// The first write error, reported once by `poll_flush` or `poll_close`.
+    write_error: Option<io::Error>,
     /// Tasks waiting to receive, send and close.
     wakers: Arc<Wakers>,
     /// Waker for every control stream write, so its wakeup reaches each waiting task.
@@ -53,6 +60,13 @@ struct Native {
     sender: Sender,
     receiver: Receiver,
     recv_open: bool,
+}
+
+/// A receive failure, kept so later polls report it again.
+#[derive(Clone)]
+enum RecvError {
+    Malformed,
+    Io(io::ErrorKind, String),
 }
 
 /// The receive, send and close tasks, woken together when the request stream accepts
@@ -78,9 +92,12 @@ impl UdpTunnel {
             }),
             decoder: capsule::Decoder::default(),
             read_buf: BytesMut::new(),
+            recv_error: None,
             write_buf: BytesMut::new(),
             unflushed: false,
+            closing: false,
             write_closed: false,
+            write_error: None,
             write_waker: Waker::from(wakers.clone()),
             wakers,
         }
@@ -90,7 +107,8 @@ impl UdpTunnel {
     ///
     /// With HTTP Datagrams this is the QUIC datagram limit less the Quarter Stream ID and
     /// Context ID; larger payloads are rejected rather than moved to capsules, so the path MTU
-    /// stays visible (RFC 9298 §6.1). Inner QUIC needs at least 1200 bytes (RFC 9000 §14).
+    /// stays visible (RFC 9298 §6.1), and a limit too small for any payload reads as 0. Inner
+    /// QUIC needs at least 1200 bytes (RFC 9000 §14).
     pub fn max_payload_size(&self) -> usize {
         self.native_limit().unwrap_or(MAX_UDP_PAYLOAD)
     }
@@ -98,11 +116,17 @@ impl UdpTunnel {
     /// Payload limit of HTTP Datagrams, if they are usable.
     fn native_limit(&self) -> Option<usize> {
         let max = self.native.as_ref()?.sender.max_datagram_size()?;
-        Some(max.checked_sub(1)?.min(MAX_UDP_PAYLOAD))
+        Some(max.saturating_sub(1).min(MAX_UDP_PAYLOAD))
     }
 
     /// Queues one UDP payload; success is local admission, not delivery.
+    ///
+    /// Capsules are written while the tunnel is polled, so a task that only sends drives them
+    /// with [`poll_flush`](Self::poll_flush).
     pub fn try_send(&mut self, payload: &[u8]) -> Result<(), SendError> {
+        if self.closing {
+            return Err(SendError::Closed);
+        }
         if payload.len() > MAX_UDP_PAYLOAD {
             return Err(SendError::TooLarge);
         }
@@ -129,14 +153,18 @@ impl UdpTunnel {
         }
         capsule::encode_datagram(payload, &mut self.write_buf);
         // Write now; if the stream is full, the waiting tasks finish the write.
-        match self.poll_write_buf() {
-            Poll::Ready(Err(_)) => Err(SendError::Closed),
-            _ => Ok(()),
+        let _ = self.poll_write_buf();
+        if self.write_closed {
+            return Err(SendError::Closed);
         }
+        Ok(())
     }
 
     /// Waits until a payload of [`max_payload_size`](Self::max_payload_size) would be accepted.
     pub fn poll_send_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), SendError>> {
+        if self.closing {
+            return Poll::Ready(Err(SendError::Closed));
+        }
         if let Some(native) = &mut self.native {
             match ready!(native.sender.poll_ready(cx)) {
                 Ok(()) => return Poll::Ready(Ok(())),
@@ -158,13 +186,34 @@ impl UdpTunnel {
 
     /// Receives the next UDP payload; `None` once the proxy closed the tunnel.
     ///
-    /// Also finishes writing buffered capsules, so keep polling it while sending. An error is
-    /// fatal to the tunnel: drop it to abort the request stream.
+    /// Also finishes writing buffered capsules. An error ends receiving and later calls report
+    /// it again, with the same kind and message; over HTTP/3 a malformed capsule or payload also
+    /// resets the request stream with `H3_DATAGRAM_ERROR`, while over HTTP/2 dropping the
+    /// tunnel aborts it. Over HTTP/2, a proxy reset with `NO_ERROR` or `CANCEL` reads as the
+    /// end of the tunnel.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, MasqueError>> {
-        self.wakers.recv.register(cx.waker());
-        if let Poll::Ready(Err(err)) = self.poll_write_buf() {
-            return Poll::Ready(Err(MasqueError::Io(err)));
+        if let Some(err) = &self.recv_error {
+            return Poll::Ready(Err(err.clone().into()));
         }
+        let result = ready!(self.poll_payload(cx));
+        if let Err(err) = &result {
+            let failed = match err {
+                MasqueError::Io(err) => RecvError::Io(err.kind(), err.to_string()),
+                _ => RecvError::Malformed,
+            };
+            if let (RecvError::Malformed, Some(native)) = (&failed, &self.native) {
+                native.receiver.abort_malformed();
+            }
+            self.recv_error = Some(failed);
+        }
+        Poll::Ready(result)
+    }
+
+    /// Polls the next payload from HTTP Datagrams or the request stream.
+    fn poll_payload(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, MasqueError>> {
+        self.wakers.recv.register(cx.waker());
+        // A write error only stops sending; `poll_flush` and `poll_close` report it.
+        let _ = self.poll_write_buf();
         // Each round drops at most one payload or reads once, so a proxy flooding unknown
         // contexts or capsule types cannot keep this call from yielding.
         for _ in 0..32 {
@@ -193,6 +242,17 @@ impl UdpTunnel {
             self.read_buf.truncate(len + n);
             ready!(read).map_err(MasqueError::Io)?;
             if n == 0 {
+                // Datagrams that arrived before the FIN come first; the connection ends their
+                // direction once it has routed them.
+                if let Some(native) = self.native.as_mut().filter(|native| native.recv_open) {
+                    match ready!(native.receiver.poll_recv(cx)) {
+                        Some(datagram) => match udp_payload(datagram)? {
+                            Some(payload) => return Poll::Ready(Ok(Some(payload))),
+                            None => continue,
+                        },
+                        None => native.recv_open = false,
+                    }
+                }
                 return Poll::Ready(if self.decoder.is_partial(&self.read_buf) {
                     Err(MasqueError::Malformed)
                 } else {
@@ -204,31 +264,49 @@ impl UdpTunnel {
         Poll::Pending
     }
 
+    /// Writes buffered capsules to the request stream; HTTP Datagrams need no flush.
+    ///
+    /// Returns the first write error once.
+    pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.wakers.send.register(cx.waker());
+        ready!(self.poll_write_buf());
+        Poll::Ready(self.write_error.take().map_or(Ok(()), Err))
+    }
+
     /// Writes buffered capsules, then closes the request stream for sending; HTTP Datagrams
     /// already accepted go to the connection first.
     ///
-    /// Returns `Ok` at once if sending already stopped after a close or a write error.
+    /// Sends are refused from the first call on, so a busy sender cannot hold off the FIN.
+    /// Returns the first write error once, and `Ok` at once after that or after a close.
     pub fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if self.write_closed {
-            return Poll::Ready(Ok(()));
+        if !self.closing {
+            self.closing = true;
+            // A parked sender now sees `Closed`.
+            self.wakers.send.wake();
         }
-        self.wakers.close.register(cx.waker());
-        ready!(self.poll_write_buf())?;
-        let mut cx = Context::from_waker(&self.write_waker);
-        ready!(Pin::new(&mut self.control).poll_shutdown(&mut cx))?;
-        self.write_closed = true;
-        // A sender parked on a full buffer now sees `Closed`.
-        self.wakers.send.wake();
-        Poll::Ready(Ok(()))
+        if !self.write_closed {
+            self.wakers.close.register(cx.waker());
+            ready!(self.poll_write_buf());
+        }
+        if !self.write_closed {
+            let mut cx = Context::from_waker(&self.write_waker);
+            let shutdown = ready!(Pin::new(&mut self.control).poll_shutdown(&mut cx));
+            self.write_closed = true;
+            self.write_error = shutdown.err();
+            // A sender parked on a full buffer now sees `Closed`.
+            self.wakers.send.wake();
+        }
+        Poll::Ready(self.write_error.take().map_or(Ok(()), Err))
     }
 
     /// Writes buffered capsules, then flushes the request stream if anything was written.
     ///
     /// Polls with `write_waker`, so the tasks registered in `wakers` retry once the stream
-    /// drains. A write error stops sending and wakes the tasks waiting to send or close.
-    fn poll_write_buf(&mut self) -> Poll<io::Result<()>> {
+    /// drains. A write error stops sending, keeps the error for `poll_flush` or `poll_close`
+    /// and wakes the tasks waiting to send or close.
+    fn poll_write_buf(&mut self) -> Poll<()> {
         if self.write_closed {
-            return Poll::Ready(Ok(()));
+            return Poll::Ready(());
         }
         let mut cx = Context::from_waker(&self.write_waker);
         let result = loop {
@@ -250,13 +328,14 @@ impl UdpTunnel {
                 Err(err) => break Err(err),
             }
         };
-        if result.is_err() {
+        if let Err(err) = result {
+            self.write_error = Some(err);
             self.write_closed = true;
             self.write_buf.clear();
             self.wakers.send.wake();
             self.wakers.close.wake();
         }
-        Poll::Ready(result)
+        Poll::Ready(())
     }
 }
 
@@ -266,6 +345,17 @@ impl fmt::Debug for UdpTunnel {
             .field("datagrams", &self.native.is_some())
             .field("max_payload_size", &self.max_payload_size())
             .finish_non_exhaustive()
+    }
+}
+
+// ===== impl RecvError =====
+
+impl From<RecvError> for MasqueError {
+    fn from(err: RecvError) -> Self {
+        match err {
+            RecvError::Malformed => MasqueError::Malformed,
+            RecvError::Io(kind, message) => MasqueError::Io(io::Error::new(kind, message)),
+        }
     }
 }
 
@@ -430,7 +520,7 @@ mod tests {
             "{ready:?}"
         );
 
-        // A close parked on the stream still finishes after a sender registers.
+        // A close parked on the stream still finishes after the send slot is registered.
         let (tunnel, mut proxy) = capsule_tunnel(4096, false);
         let tunnel = Arc::new(Mutex::new(tunnel));
         tunnel.lock().unwrap().try_send(&[7; 8000]).unwrap();
@@ -440,12 +530,46 @@ mod tests {
         });
         tokio::task::yield_now().await;
         assert!(!close.is_finished(), "close before the proxy reads");
-        let ready = poll_fn(|cx| Poll::Ready(tunnel.lock().unwrap().poll_send_ready(cx))).await;
-        assert_eq!(ready, Poll::Ready(Ok(())));
+        let flushed = poll_fn(|cx| Poll::Ready(tunnel.lock().unwrap().poll_flush(cx))).await;
+        assert!(flushed.is_pending(), "flushed into a full stream");
         let mut written = Vec::new();
         bounded(proxy.read_to_end(&mut written)).await.unwrap();
         assert_eq!(written.len(), 8004);
         bounded(close).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_stops_a_busy_capsule_sender() {
+        let (tunnel, mut proxy) = capsule_tunnel(4096, false);
+        let tunnel = Arc::new(Mutex::new(tunnel));
+        // A sender that stops only once sending fails, sharing the tunnel with the close.
+        let sender = tokio::spawn({
+            let tunnel = tunnel.clone();
+            async move {
+                loop {
+                    let sent = poll_fn(|cx| tunnel.lock().unwrap().poll_send_ready(cx))
+                        .await
+                        .and_then(|()| tunnel.lock().unwrap().try_send(&[1; 100]));
+                    if let Err(err) = sent {
+                        return err;
+                    }
+                }
+            }
+        });
+        tokio::task::yield_now().await;
+        let mut written = Vec::new();
+        let (closed, read) = bounded(async {
+            tokio::join!(
+                poll_fn(|cx| tunnel.lock().unwrap().poll_close(cx)),
+                proxy.read_to_end(&mut written)
+            )
+        })
+        .await;
+        closed.unwrap();
+        read.unwrap();
+        assert_eq!(bounded(sender).await.unwrap(), SendError::Closed);
+        // What was accepted before the close went out as whole 104-byte capsules.
+        assert!(!written.is_empty() && written.len() % 104 == 0);
     }
 
     #[tokio::test]
@@ -476,10 +600,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flush_drives_capsules_and_reports_a_write_error_once() {
+        // A task that only sends drives buffered capsules with `poll_flush`.
+        let (mut tunnel, mut proxy) = capsule_tunnel(4096, false);
+        tunnel.try_send(&[7; 8000]).unwrap();
+        let mut written = vec![0; 8004];
+        let (flushed, read) = bounded(async {
+            tokio::join!(
+                poll_fn(|cx| tunnel.poll_flush(cx)),
+                proxy.read_exact(&mut written)
+            )
+        })
+        .await;
+        flushed.unwrap();
+        read.unwrap();
+
+        // A failed write only stops sending: its error comes back once, receiving goes on.
+        proxy.write_all(&[0, 3, 0, b'h', b'i']).await.unwrap();
+        drop(proxy);
+        assert_eq!(tunnel.try_send(b"x"), Err(SendError::Closed));
+        let recv = bounded(poll_fn(|cx| tunnel.poll_recv(cx))).await;
+        assert_eq!(recv.unwrap().unwrap(), "hi");
+        let flushed = poll_fn(|cx| tunnel.poll_flush(cx)).await;
+        assert_eq!(flushed.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        poll_fn(|cx| tunnel.poll_close(cx)).await.unwrap();
+        assert!(matches!(poll_fn(|cx| tunnel.poll_recv(cx)).await, Ok(None)));
+    }
+
+    #[tokio::test]
+    async fn receive_errors_stick() {
+        // A whole Context ID 0 capsule one byte over the UDP limit, then a valid one.
+        let (mut tunnel, mut proxy) = capsule_tunnel(1 << 17, false);
+        let mut oversized = BytesMut::new();
+        capsule::encode_datagram(&[7; MAX_UDP_PAYLOAD + 1], &mut oversized);
+        proxy.write_all(&oversized).await.unwrap();
+        proxy.write_all(&[0, 3, 0, b'o', b'k']).await.unwrap();
+        for _ in 0..2 {
+            let result = bounded(poll_fn(|cx| tunnel.poll_recv(cx))).await;
+            assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
+        }
+
+        /// A request stream whose reads fail.
+        struct Failing;
+
+        impl AsyncRead for Failing {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                _: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Ready(Err(io::Error::other("proxy reset")))
+            }
+        }
+
+        impl AsyncWrite for Failing {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                Poll::Ready(Ok(buf.len()))
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        // An I/O error comes back with its kind and message.
+        let mut tunnel = UdpTunnel::new(Upgraded::new(Failing, Bytes::new()), None);
+        for _ in 0..2 {
+            let result = poll_fn(|cx| tunnel.poll_recv(cx)).await;
+            let Err(MasqueError::Io(err)) = result else {
+                panic!("{result:?}");
+            };
+            assert_eq!(
+                (err.kind(), err.to_string()),
+                (io::ErrorKind::Other, "proxy reset".into())
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn close_writes_buffered_capsules_before_fin() {
         // Too small for one capsule, so most of it stays buffered until `poll_close`.
         let (mut tunnel, mut proxy) = capsule_tunnel(2, false);
         tunnel.try_send(b"bye").unwrap();
+        // Sends stop as soon as the close starts, before it can finish.
+        let closing = poll_fn(|cx| Poll::Ready(tunnel.poll_close(cx))).await;
+        assert!(closing.is_pending(), "closed into a full stream");
+        assert_eq!(tunnel.try_send(b"late"), Err(SendError::Closed));
+        let ready = poll_fn(|cx| tunnel.poll_send_ready(cx)).await;
+        assert_eq!(ready, Err(SendError::Closed));
         let mut written = Vec::new();
         let (closed, read) = bounded(async {
             tokio::join!(

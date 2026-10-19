@@ -246,7 +246,19 @@ async fn close_stops_a_busy_sender() {
             .try_send_request(masque::http3_request(uri))
             .await
             .unwrap();
-        let tunnel = Arc::new(Mutex::new(UdpTunnel::from_http3(&mut response).unwrap()));
+        let mut tunnel = UdpTunnel::from_http3(&mut response).unwrap();
+        // With the queue full, readiness waits until the connection sends some of it.
+        while tunnel.try_send(&[1; 100]).is_ok() {}
+        assert_eq!(tunnel.try_send(&[1; 100]), Err(SendError::Full));
+        let mut ready = tokio_test::task::spawn(poll_fn(|cx| tunnel.poll_send_ready(cx)));
+        assert!(ready.poll().is_pending(), "ready with a full queue");
+        while !ready.is_woken() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(ready.poll(), Poll::Ready(Ok(())));
+        drop(ready);
+
+        let tunnel = Arc::new(Mutex::new(tunnel));
         // A sender that stops only once sending fails, sharing the tunnel with the close.
         let sender = tokio::spawn({
             let tunnel = tunnel.clone();
@@ -274,6 +286,57 @@ async fn close_stops_a_busy_sender() {
         client_driver.as_mut().graceful_shutdown();
         client_driver.await.unwrap();
         server_task.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn malformed_capsule_resets_the_stream() {
+    bounded(async {
+        let Pair {
+            mut tx,
+            driver,
+            mut server,
+            _endpoints,
+            ..
+        }: Pair = pair_config(Http3Options::default(), Exec, true, false, true, None).await;
+        let mut client_driver = Box::pin(driver);
+        let server_task = tokio::spawn(async move {
+            let resolver = server.accept().await.unwrap().unwrap();
+            let (_, mut stream) = resolver.resolve_request().await.unwrap();
+            stream.send_response(Response::new(())).await.unwrap();
+            // A Context ID 0 capsule longer than any UDP payload.
+            stream
+                .send_data(Bytes::from_static(&[0, 0x80, 1, 0, 0, 0]))
+                .await
+                .unwrap();
+            let Err(error) = stream.recv_data().await else {
+                panic!("the request stream was not reset");
+            };
+            assert!(
+                matches!(error, h3::error::StreamError::RemoteTerminate { code, .. }
+                    if code == h3::error::Code::H3_DATAGRAM_ERROR),
+                "{error}"
+            );
+        });
+
+        let template = Template::new("https://localhost/masque/{target_host}/{target_port}/");
+        let uri = template.unwrap().expand("192.0.2.1", 443).unwrap();
+        let mut response = tx
+            .try_send_request(masque::http3_request(uri))
+            .await
+            .unwrap();
+        let mut tunnel = UdpTunnel::from_http3(&mut response).unwrap();
+        // The error sticks, and the stream resets with H3_DATAGRAM_ERROR while the tunnel lives.
+        for _ in 0..2 {
+            let result = recv(&mut tunnel).await;
+            assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
+        }
+        server_task.await.unwrap();
+        drop(tunnel);
+        drop(tx);
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
     })
     .await;
 }

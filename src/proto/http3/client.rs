@@ -689,6 +689,12 @@ pub(super) fn invalid_datagram_error() -> Error {
     Error::new_h3("HTTP Datagram on a request without Datagram semantics")
 }
 
+/// The application aborted a Datagram session over a malformed payload or Capsule.
+#[cfg(feature = "http3-datagram")]
+pub(super) fn malformed_datagram_error() -> Error {
+    Error::new_h3("malformed HTTP Datagram or Capsule")
+}
+
 /// Closes the send direction of an empty request body. After a peer STOP_SENDING
 /// the guard stays unfinished so dropping it answers with a reset.
 struct Finish<'a, S>

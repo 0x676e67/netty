@@ -195,6 +195,12 @@ impl Receiver {
     pub async fn recv(&mut self) -> Option<Bytes> {
         poll_fn(|cx| self.poll_recv(cx)).await
     }
+
+    /// Resets the request stream with `H3_DATAGRAM_ERROR`, for a peer that broke the format
+    /// of its payloads or Capsules ([RFC 9297](https://www.rfc-editor.org/rfc/rfc9297.html)).
+    pub fn abort_malformed(&self) {
+        self.0.abort_malformed();
+    }
 }
 
 impl Drop for Receiver {

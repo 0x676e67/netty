@@ -73,12 +73,15 @@ impl Template {
         if authority.contains('@') {
             return Err(invalid("userinfo in the authority"));
         }
-        let proxy = Uri::builder()
-            .scheme(scheme)
-            .authority(authority)
-            .path_and_query("/")
-            .build()
+        // Parsing, unlike `Uri::builder`, reads `HTTPS` as the https scheme.
+        let proxy: Uri = format!("{scheme}://{authority}/")
+            .parse()
             .map_err(|_| invalid("invalid scheme or authority"))?;
+        // `Uri` keeps a port it cannot read; the proxy's must be a nonzero u16.
+        let has_port = proxy.authority().is_some_and(|a| a.as_str() != a.host());
+        if has_port && proxy.port_u16().is_none_or(|port| port == 0) {
+            return Err(invalid("invalid port"));
+        }
 
         let parts = parse_parts(&rest[path_start..])?;
         let has = |want: fn(&Var) -> bool| {
@@ -268,16 +271,19 @@ fn is_pct_encoded(bytes: &[u8]) -> bool {
     matches!(bytes, [b'%', hi, lo, ..] if hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit())
 }
 
-/// Normalizes `target_host`: strips IPv6 brackets and rejects empty hosts and zone IDs.
+/// Normalizes `target_host`: strips IPv6 brackets and rejects empty hosts, other bracketed
+/// literals and zone IDs.
 fn target_host(host: &str) -> Result<&str, MasqueError> {
-    let host = host
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host);
-    // RFC 9298 §3: IPv6 zone identifiers are not supported.
-    if host.is_empty() || (host.contains(':') && host.parse::<Ipv6Addr>().is_err()) {
-        return Err(MasqueError::InvalidTarget);
-    }
+    let is_ipv6 = |host: &str| host.parse::<Ipv6Addr>().is_ok();
+    // RFC 9298 §3: IPv6 zone identifiers are not supported. Brackets hold only IPv6.
+    let host = match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        Some(ip) if is_ipv6(ip) => ip,
+        Some(_) => return Err(MasqueError::InvalidTarget),
+        None if host.is_empty() || (host.contains(':') && !is_ipv6(host)) => {
+            return Err(MasqueError::InvalidTarget);
+        }
+        None => host,
+    };
     Ok(host)
 }
 
@@ -330,6 +336,14 @@ mod tests {
             assert_eq!(template.expand(host, 443).unwrap().to_string(), expected);
         }
 
+        // Scheme names are case-insensitive, and the proxy URI reads them as such.
+        let upper = Template::new("HTTPS://proxy.example/{target_host}/{target_port}/").unwrap();
+        assert_eq!(upper.proxy().scheme(), Some(&http::uri::Scheme::HTTPS));
+        assert_eq!(
+            upper.expand("192.0.2.6", 53).unwrap(),
+            "https://proxy.example/192.0.2.6/53/"
+        );
+
         let well_known = Template::well_known(&"proxy.example:443".parse().unwrap()).unwrap();
         assert_eq!(
             well_known.expand("::1", 53).unwrap().to_string(),
@@ -359,6 +373,18 @@ mod tests {
             (
                 "https://user:secret@proxy.example/{target_host}/{target_port}/",
                 "userinfo in the authority",
+            ),
+            (
+                "https://proxy.example:99999/{target_host}/{target_port}/",
+                "invalid port",
+            ),
+            (
+                "https://proxy.example:/{target_host}/{target_port}/",
+                "invalid port",
+            ),
+            (
+                "https://proxy.example:0/{target_host}/{target_port}/",
+                "invalid port",
             ),
             ("https://proxy.example/{target_host}", missing),
             ("https://proxy.example/{target_port}/", missing),
@@ -423,6 +449,9 @@ mod tests {
             ("fe80::1%eth0", 443),
             ("1:2:3", 443),
             ("[2001:db8::1", 443),
+            // Brackets hold only IPv6 literals.
+            ("[example.com]", 443),
+            ("[v1.x]", 443),
             ("a.example", 0),
         ] {
             assert!(

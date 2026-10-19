@@ -13,7 +13,10 @@ use std::{
     future::Future,
     mem,
     pin::Pin,
-    sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
+    sync::{
+        Arc, Mutex, MutexGuard, OnceLock, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
 };
 
@@ -58,6 +61,9 @@ struct State {
     max_size: Option<usize>,
     negotiated: bool,
     closed: bool,
+    /// Streams whose FIN arrived, ended once the driver has routed a budget of what QUIC
+    /// received before it.
+    finished: Vec<u64>,
 }
 
 /// One registered request stream: whether it has Datagram semantics, which
@@ -88,6 +94,8 @@ pub(crate) struct RequestState {
     stop_state: OnceLock<Weak<dyn Any + Send + Sync>>,
     stop: OnceLock<fn(&(dyn Any + Send + Sync))>,
     pub(super) invalid: CancellationToken,
+    /// Set when the application aborted the session over malformed input.
+    malformed: AtomicBool,
 }
 
 /// Keeps a request registered; dropping it removes the session.
@@ -166,6 +174,7 @@ impl Registry {
             received: AtomicWaker::new(),
             stop_state: OnceLock::new(),
             stop: OnceLock::new(),
+            malformed: AtomicBool::new(false),
         });
         let mut state = self.lock();
         if !state.closed {
@@ -194,19 +203,38 @@ impl Registry {
     }
 
     /// Drops every session once the connection ends.
+    ///
+    /// A session still in use keeps the packets it already received, readable until its own
+    /// close reclaims them.
     pub(crate) fn close(&self) {
-        let entries = {
+        let live = {
             let mut state = self.lock();
             state.closed = true;
-            state.incoming = 0;
             state.outgoing = 0;
             state.ready.clear();
-            mem::take(&mut state.streams)
+            state.finished.clear();
+            let mut live = Vec::new();
+            state.streams.retain(|_, entry| {
+                let Some(request) = entry.request.upgrade() else {
+                    return false;
+                };
+                live.push(request);
+                entry.send_open = false;
+                entry.recv_open = false;
+                entry.outgoing.clear();
+                entry.outgoing_bytes = 0;
+                entry.sending = false;
+                !entry.incoming.is_empty()
+            });
+            state.incoming = state
+                .streams
+                .values()
+                .map(|entry| entry.incoming_bytes)
+                .sum();
+            live
         };
-        for entry in entries.into_values() {
-            if let Some(request) = entry.request.upgrade() {
-                request.received.wake();
-            }
+        for request in live {
+            request.received.wake();
         }
         self.waker.wake();
         self.capacity_notify.notify_waiters();
@@ -236,12 +264,7 @@ impl Registry {
             drop(state);
             // An active request without Datagram semantics is a stream error,
             // unlike an unknown stream (RFC 9297 §2).
-            request.invalid.cancel();
-            if let Some((state, stop)) = request.stop_state.get().zip(request.stop.get())
-                && let Some(state) = state.upgrade()
-            {
-                stop(&*state);
-            }
+            request.invalidate();
             return Ok(());
         }
         let payload = packet.into_payload();
@@ -295,6 +318,29 @@ impl Registry {
             self.capacity_notify.notify_waiters();
         }
     }
+
+    /// Takes the streams whose FIN arrived so far.
+    fn take_finished(&self) -> Vec<u64> {
+        mem::take(&mut self.lock().finished)
+    }
+
+    /// Ends the receive direction of `ids`; the driver calls it after routing a budget of the
+    /// Datagrams QUIC received before taking them.
+    fn finish(&self, ids: Vec<u64>) {
+        let finished: Vec<_> = {
+            let mut state = self.lock();
+            ids.into_iter()
+                .filter_map(|id| {
+                    let entry = state.streams.get_mut(&id)?;
+                    entry.recv_open = false;
+                    entry.request.upgrade()
+                })
+                .collect()
+        };
+        for request in finished {
+            request.received.wake();
+        }
+    }
 }
 
 // ===== impl RequestState =====
@@ -318,7 +364,8 @@ impl RequestState {
         if !state.negotiated || !entry.send_open || entry.finishing {
             return None;
         }
-        state.max_size?.checked_sub(self.prefix_size())
+        // A limit below the prefix cannot carry any payload, which reads as 0.
+        Some(state.max_size?.saturating_sub(self.prefix_size()))
     }
 
     /// Stops admitting payloads, so a shutdown waits only for those already queued.
@@ -470,6 +517,44 @@ impl RequestState {
         self.registry.capacity_notify.notify_waiters();
     }
 
+    /// Marks the request invalid, so its stream resets with `H3_DATAGRAM_ERROR`, and stops a
+    /// response body waiting on it.
+    pub(crate) fn invalidate(&self) {
+        self.invalid.cancel();
+        if let Some((state, stop)) = self.stop_state.get().zip(self.stop.get())
+            && let Some(state) = state.upgrade()
+        {
+            stop(&*state);
+        }
+    }
+
+    /// Resets the request stream with `H3_DATAGRAM_ERROR` over a malformed payload or Capsule.
+    pub(crate) fn abort_malformed(&self) {
+        // Published before the cancel, which the transfer task observes first.
+        self.malformed.store(true, Ordering::Release);
+        self.invalidate();
+        // Both directions end now, also after the peer's FIN.
+        self.close_recv();
+        self.close_send();
+    }
+
+    /// Whether the application aborted the session over malformed input.
+    pub(crate) fn is_malformed(&self) -> bool {
+        self.malformed.load(Ordering::Acquire)
+    }
+
+    /// Ends the receive direction at the stream's end, once the driver has routed the packets
+    /// QUIC received before it, up to one budget; packets already queued stay readable.
+    pub(crate) fn finish_recv(&self) {
+        let id = self.id.into_inner();
+        let mut state = self.registry.lock();
+        if state.streams.get(&id).is_some_and(|entry| entry.recv_open) {
+            state.finished.push(id);
+        }
+        drop(state);
+        self.registry.waker.wake();
+    }
+
     /// Closes the receive direction and discards its queue.
     pub(crate) fn close_recv(&self) {
         let mut state = self.registry.lock();
@@ -523,6 +608,9 @@ where
         this.registry.waker.register(cx.waker());
         let max_size = this.sender.max_datagram_size();
         this.registry.lock().max_size = max_size;
+        // A FIN taken now came after every Datagram QUIC holds, so routing a budget of them
+        // before applying it keeps them; a flood beyond that budget may lose some.
+        let finished = this.registry.take_finished();
         // Independent bounded budgets keep control/QPACK and both Datagram
         // directions moving even under a continuously ready producer.
         for index in 0..32 {
@@ -540,6 +628,9 @@ where
             if index == 31 {
                 cx.waker().wake_by_ref();
             }
+        }
+        if !finished.is_empty() {
+            this.registry.finish(finished);
         }
         for index in 0..32 {
             if this.pending.is_none() {
@@ -765,12 +856,23 @@ mod tests {
         );
         requests[0].0.close_send();
         requests[8].0.try_send(&payload).unwrap();
+        registry.receive(Bytes::from_static(&[1, 7])).unwrap();
         registry.close();
         assert_eq!(registry.lock().outgoing, 0);
         assert_eq!(
             requests[8].0.try_send(&Bytes::new()),
             Err(SendErrorKind::Closed)
         );
+        // A live session keeps what it already received, then reports the end.
+        let waker = futures_util::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert_eq!(registry.lock().incoming, 1);
+        assert_eq!(
+            requests[1].0.poll_recv(&mut cx),
+            Poll::Ready(Some(Bytes::from_static(&[7])))
+        );
+        assert_eq!(requests[1].0.poll_recv(&mut cx), Poll::Ready(None));
+        assert_eq!(registry.lock().incoming, 0);
     }
 
     #[test]
@@ -827,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn receive_budget_drops_newest_and_fin_clears_queued_packets() {
+    fn receive_budget_drops_newest_and_fin_keeps_queued_packets() {
         let registry = registry();
         let request = registry.register(
             StreamId::try_from(0).unwrap(),
@@ -840,9 +942,32 @@ mod tests {
         registry.receive(Bytes::from_static(&[0, 9])).unwrap();
         assert_eq!(registry.lock().streams[&0].incoming.len(), PACKETS);
         assert_eq!(registry.lock().incoming, 0);
-        request.0.close_recv();
+
+        // The stream's end drops later packets but keeps the queued ones readable.
+        request.0.finish_recv();
+        registry.finish(registry.take_finished());
         registry.receive(Bytes::from_static(&[0, 9])).unwrap();
-        assert!(registry.lock().streams[&0].incoming.is_empty());
+        let waker = futures_util::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..PACKETS {
+            assert_eq!(
+                request.0.poll_recv(&mut cx),
+                Poll::Ready(Some(Bytes::new()))
+            );
+        }
+        assert_eq!(request.0.poll_recv(&mut cx), Poll::Ready(None));
+
+        // A cancel discards what is still queued.
+        let other = registry.register(
+            StreamId::try_from(4).unwrap(),
+            true,
+            CancellationToken::new(),
+        );
+        registry.receive(Bytes::from_static(&[1, 7])).unwrap();
+        assert_eq!(registry.lock().streams[&4].incoming.len(), 1);
+        other.0.close_recv();
+        assert!(registry.lock().streams[&4].incoming.is_empty());
+        assert_eq!(registry.lock().incoming, 0);
         assert!(registry.receive(Bytes::new()).is_err());
     }
 
@@ -853,7 +978,9 @@ mod tests {
         accepted: Vec<Bytes>,
     }
 
-    struct DatagramReceiver;
+    /// Yields queued QUIC Datagrams, then stays pending.
+    #[derive(Default)]
+    struct DatagramReceiver(VecDeque<Bytes>);
 
     // ===== impl DatagramSender =====
 
@@ -886,8 +1013,108 @@ mod tests {
             &mut self,
             _: &mut Context<'_>,
         ) -> Poll<std::result::Result<Option<Bytes>, quic::ConnectionError>> {
-            Poll::Pending
+            self.0
+                .pop_front()
+                .map_or(Poll::Pending, |packet| Poll::Ready(Ok(Some(packet))))
         }
+    }
+
+    #[test]
+    fn fin_waits_for_datagrams_quic_received_before_it() {
+        let registry = registry();
+        let request = registry.register(
+            StreamId::try_from(0).unwrap(),
+            true,
+            CancellationToken::new(),
+        );
+        // The stream task saw the FIN before the driver routed two earlier Datagrams.
+        request.0.finish_recv();
+        let mut driver = Driver {
+            sender: DatagramSender {
+                max: 1300,
+                blocked: false,
+                wake: None,
+                accepted: Vec::new(),
+            },
+            receiver: DatagramReceiver(
+                [Bytes::from_static(&[0, 1]), Bytes::from_static(&[0, 2])].into(),
+            ),
+            registry: registry.clone(),
+            pending: None,
+        };
+        let waker = futures_util::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            request.0.poll_recv(&mut cx).is_pending(),
+            "ended before routing"
+        );
+        assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
+        for payload in [[1], [2]] {
+            assert_eq!(
+                request.0.poll_recv(&mut cx),
+                Poll::Ready(Some(Bytes::copy_from_slice(&payload)))
+            );
+        }
+        assert_eq!(request.0.poll_recv(&mut cx), Poll::Ready(None));
+
+        // A flood for another stream holds the FIN off for one budget only.
+        let request = registry.register(
+            StreamId::try_from(4).unwrap(),
+            true,
+            CancellationToken::new(),
+        );
+        request.0.finish_recv();
+        driver.receiver.0 = std::iter::repeat_n(Bytes::from_static(&[60]), 64).collect();
+        assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
+        assert!(!driver.receiver.0.is_empty(), "the flood outlasts one poll");
+        assert_eq!(request.0.poll_recv(&mut cx), Poll::Ready(None));
+
+        /// Goes idle once, as a Datagram and then the stream's FIN arrive.
+        struct FinWhileIdle(Option<(Arc<RequestState>, Bytes)>, VecDeque<Bytes>);
+
+        impl quic::RecvDatagram for FinWhileIdle {
+            fn poll_recv(
+                &mut self,
+                _: &mut Context<'_>,
+            ) -> Poll<std::result::Result<Option<Bytes>, quic::ConnectionError>> {
+                if let Some(packet) = self.1.pop_front() {
+                    return Poll::Ready(Ok(Some(packet)));
+                }
+                if let Some((request, packet)) = self.0.take() {
+                    self.1.push_back(packet);
+                    request.finish_recv();
+                }
+                Poll::Pending
+            }
+        }
+
+        // A FIN that arrives during a poll waits for the next one, which routes the Datagram
+        // QUIC received before it.
+        let request = registry.register(
+            StreamId::try_from(8).unwrap(),
+            true,
+            CancellationToken::new(),
+        );
+        let mut driver = Driver {
+            sender: driver.sender,
+            receiver: FinWhileIdle(
+                Some((request.0.clone(), Bytes::from_static(&[2, 5]))),
+                VecDeque::new(),
+            ),
+            registry: registry.clone(),
+            pending: None,
+        };
+        assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
+        assert!(
+            request.0.poll_recv(&mut cx).is_pending(),
+            "ended before routing"
+        );
+        assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
+        assert_eq!(
+            request.0.poll_recv(&mut cx),
+            Poll::Ready(Some(Bytes::from_static(&[5])))
+        );
+        assert_eq!(request.0.poll_recv(&mut cx), Poll::Ready(None));
     }
 
     #[test]
@@ -911,7 +1138,7 @@ mod tests {
                 wake: None,
                 accepted: Vec::new(),
             },
-            receiver: DatagramReceiver,
+            receiver: DatagramReceiver::default(),
             registry: registry.clone(),
             pending: None,
         };
@@ -960,7 +1187,7 @@ mod tests {
                     wake: None,
                     accepted: Vec::new(),
                 },
-                receiver: DatagramReceiver,
+                receiver: DatagramReceiver::default(),
                 registry: registry.clone(),
                 pending: None,
             };
@@ -1014,7 +1241,7 @@ mod tests {
                 wake: None,
                 accepted: Vec::new(),
             },
-            receiver: DatagramReceiver,
+            receiver: DatagramReceiver::default(),
             registry: registry.clone(),
             pending: None,
         };
@@ -1045,6 +1272,10 @@ mod tests {
         );
         request.0.try_send(&Bytes::from(vec![7; 1198])).unwrap();
         assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
+        // A limit below the Quarter Stream ID reads as 0 rather than as unavailable.
+        registry.lock().max_size = Some(0);
+        assert_eq!(request.0.max_size(), Some(0));
+        registry.lock().max_size = Some(1200);
         assert_eq!(driver.sender.accepted[0].len(), 1200);
         assert_eq!(registry.lock().outgoing, 0);
     }
