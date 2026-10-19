@@ -284,14 +284,25 @@ async fn close_stops_a_busy_sender() {
     .await;
 }
 
+type ProxyStream = h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+
 /// Reads the request stream until the client resets it, returning the code.
-async fn reset_code(
-    stream: &mut h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
-) -> Code {
+async fn reset_code(stream: &mut ProxyStream) -> Code {
     loop {
         match stream.recv_data().await {
             Ok(Some(_)) => {}
             Ok(None) => panic!("the request stream ended without a reset"),
+            Err(StreamError::RemoteTerminate { code, .. }) => return code,
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
+/// Writes to the request stream until the client stops it, returning the code.
+async fn stop_code(stream: &mut ProxyStream) -> Code {
+    loop {
+        match stream.send_data(Bytes::from_static(b"x")).await {
+            Ok(()) => tokio::task::yield_now().await,
             Err(StreamError::RemoteTerminate { code, .. }) => return code,
             Err(error) => panic!("{error}"),
         }
@@ -310,15 +321,21 @@ async fn malformed_response_or_capsule_resets_the_stream() {
         }: Pair = pair_config(Http3Options::default(), Exec, true, false, true, None).await;
         let mut client_driver = Box::pin(driver);
         let server_task = tokio::spawn(async move {
-            // The Capsule Protocol forbids Content-Type (RFC 9297 §3.2).
-            let resolver = server.accept().await.unwrap().unwrap();
-            let (_, mut stream) = resolver.resolve_request().await.unwrap();
-            let response = Response::builder()
-                .header(CONTENT_TYPE, "application/octet-stream")
-                .body(())
-                .unwrap();
-            stream.send_response(response).await.unwrap();
-            assert_eq!(reset_code(&mut stream).await, Code::H3_MESSAGE_ERROR);
+            // The Capsule Protocol forbids Content-Type (RFC 9297 §3.2); HTTP/3 forbids
+            // Transfer-Encoding and status 101 (RFC 9114 §4.2, §4.5). A malformed response is a
+            // stream error in both directions (RFC 9114 §4.1.2).
+            for response in [
+                Response::builder().header(CONTENT_TYPE, "application/octet-stream"),
+                Response::builder().header("transfer-encoding", "chunked"),
+                Response::builder().status(StatusCode::SWITCHING_PROTOCOLS),
+            ] {
+                let resolver = server.accept().await.unwrap().unwrap();
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                let response = response.body(()).unwrap();
+                stream.send_response(response).await.unwrap();
+                assert_eq!(reset_code(&mut stream).await, Code::H3_MESSAGE_ERROR);
+                assert_eq!(stop_code(&mut stream).await, Code::H3_MESSAGE_ERROR);
+            }
 
             let resolver = server.accept().await.unwrap().unwrap();
             let (_, mut stream) = resolver.resolve_request().await.unwrap();
@@ -342,6 +359,11 @@ async fn malformed_response_or_capsule_resets_the_stream() {
             matches!(result, Err(MasqueError::InvalidResponse)),
             "{result:?}"
         );
+        // HTTP/3 rejects these heads itself.
+        for _ in 0..2 {
+            let request = masque::http3_request(uri.clone());
+            assert!(tx.try_send_request(request).await.is_err());
+        }
 
         let mut response = tx
             .try_send_request(masque::http3_request(uri))
