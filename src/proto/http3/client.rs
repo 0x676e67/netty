@@ -58,7 +58,7 @@ pub(super) type RecvStream<S> = Stream<<S as rt::quic::BidiStream<Bytes>>::RecvS
 pub(super) const CHUNK: usize = 16 * 1024;
 
 /// Send half of a request stream. Dropping it before `finished` resets the
-/// send direction, so a completed FIN must set the flag first.
+/// send direction with `code`, so a completed FIN must set the flag first.
 pub(super) struct SendGuard<S>
 where
     S: quic::SendStream<Bytes>,
@@ -67,6 +67,7 @@ where
     pub(super) datagrams: Option<Arc<RequestState>>,
     pub(super) stream: RequestStream<S, Bytes>,
     pub(super) finished: bool,
+    pub(super) code: Code,
 }
 
 /// Receive half of a request stream. Dropping it before `finished` sends
@@ -342,16 +343,11 @@ where
 {
     fn drop(&mut self) {
         if !self.finished {
-            let code = Code::H3_REQUEST_CANCELLED;
+            let code = self.code;
             #[cfg(feature = "http3-datagram")]
-            let code = if self
-                .datagrams
-                .as_ref()
-                .is_some_and(|d| d.invalid.is_cancelled())
-            {
-                Code::H3_DATAGRAM_ERROR
-            } else {
-                code
+            let code = match &self.datagrams {
+                Some(datagrams) if datagrams.invalid.is_cancelled() => datagrams.invalid_code(),
+                _ => code,
             };
             self.stream.stop_stream(code);
         }
@@ -372,14 +368,9 @@ impl<S: quic::RecvStream> Drop for RecvGuard<S> {
             }
             let code = self.code;
             #[cfg(feature = "http3-datagram")]
-            let code = if self
-                .datagrams
-                .as_ref()
-                .is_some_and(|d| d.invalid.is_cancelled())
-            {
-                Code::H3_DATAGRAM_ERROR
-            } else {
-                code
+            let code = match &self.datagrams {
+                Some(datagrams) if datagrams.invalid.is_cancelled() => datagrams.invalid_code(),
+                _ => code,
             };
             self.stream.stop_sending(code);
         }
@@ -522,6 +513,7 @@ where
             datagrams: datagrams.cloned(),
             stream: send,
             finished: false,
+            code: Code::H3_REQUEST_CANCELLED,
         };
 
         let mut recv = RecvGuard {
@@ -547,7 +539,11 @@ where
                 })
                 .await
             }
-            .map_err(|error| lost(shared.error_or(error)))?;
+            .map_err(|error| {
+                // A malformed head is a stream error in both directions.
+                send.code = recv.code;
+                lost(shared.error_or(error))
+            })?;
             if headers.status().is_success() {
                 #[cfg(feature = "http3-datagram")]
                 let datagrams = match registration {
@@ -900,7 +896,13 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let recv = &mut self.get_mut().recv;
         for _ in 0..32 {
-            let headers = ready!(recv.stream.poll_recv_response(cx)).map_err(Error::new_h3)?;
+            let headers = ready!(recv.stream.poll_recv_response(cx)).map_err(|error| {
+                // http3 stopped sending over a rejected head; the guards keep its code.
+                if let StreamError::StreamError { code, .. } = &error {
+                    recv.code = *code;
+                }
+                Error::new_h3(error)
+            })?;
             if headers.status() == StatusCode::SWITCHING_PROTOCOLS {
                 recv.code = Code::H3_MESSAGE_ERROR;
                 return Poll::Ready(Err(Error::new_h3("HTTP/3 response cannot use status 101")));

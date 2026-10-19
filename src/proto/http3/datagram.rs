@@ -13,10 +13,7 @@ use std::{
     future::Future,
     mem,
     pin::Pin,
-    sync::{
-        Arc, Mutex, MutexGuard, OnceLock, Weak,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
     task::{Context, Poll},
 };
 
@@ -94,8 +91,18 @@ pub(crate) struct RequestState {
     stop_state: OnceLock<Weak<dyn Any + Send + Sync>>,
     stop: OnceLock<fn(&(dyn Any + Send + Sync))>,
     pub(super) invalid: CancellationToken,
-    /// Set when the application aborted the session over malformed input.
-    malformed: AtomicBool,
+    /// Why the application aborted the session, if it did.
+    abort: OnceLock<Abort>,
+}
+
+/// Why the application aborted a Datagram session, which picks the stream's reset code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Abort {
+    /// The peer's payloads break the protocol's format: `H3_DATAGRAM_ERROR`.
+    Datagram,
+    /// The response or its Capsules are malformed under the session's protocol:
+    /// `H3_MESSAGE_ERROR`.
+    Message,
 }
 
 /// Keeps a request registered; dropping it removes the session.
@@ -174,7 +181,7 @@ impl Registry {
             received: AtomicWaker::new(),
             stop_state: OnceLock::new(),
             stop: OnceLock::new(),
-            malformed: AtomicBool::new(false),
+            abort: OnceLock::new(),
         });
         let mut state = self.lock();
         if !state.closed {
@@ -517,8 +524,8 @@ impl RequestState {
         self.registry.capacity_notify.notify_waiters();
     }
 
-    /// Marks the request invalid, so its stream resets with `H3_DATAGRAM_ERROR`, and stops a
-    /// response body waiting on it.
+    /// Marks the request invalid, so its stream resets with [`invalid_code`](Self::invalid_code),
+    /// and stops a response body waiting on it.
     pub(crate) fn invalidate(&self) {
         self.invalid.cancel();
         if let Some((state, stop)) = self.stop_state.get().zip(self.stop.get())
@@ -528,19 +535,27 @@ impl RequestState {
         }
     }
 
-    /// Resets the request stream with `H3_DATAGRAM_ERROR` over a malformed payload or Capsule.
-    pub(crate) fn abort_malformed(&self) {
-        // Published before the cancel, which the transfer task observes first.
-        self.malformed.store(true, Ordering::Release);
+    /// Resets the request stream with the code for `abort`.
+    pub(crate) fn abort(&self, abort: Abort) {
+        // Published before the cancel, which the stream guards and the transfer task observe first.
+        let _ = self.abort.set(abort);
         self.invalidate();
         // Both directions end now, also after the peer's FIN.
         self.close_recv();
         self.close_send();
     }
 
-    /// Whether the application aborted the session over malformed input.
-    pub(crate) fn is_malformed(&self) -> bool {
-        self.malformed.load(Ordering::Acquire)
+    /// Why the application aborted the session, if it did.
+    pub(crate) fn aborted(&self) -> Option<Abort> {
+        self.abort.get().copied()
+    }
+
+    /// The code the stream of an invalid request resets with.
+    pub(crate) fn invalid_code(&self) -> Code {
+        match self.aborted() {
+            Some(Abort::Message) => Code::H3_MESSAGE_ERROR,
+            _ => Code::H3_DATAGRAM_ERROR,
+        }
     }
 
     /// Ends the receive direction at the stream's end, once the driver has routed the packets
@@ -607,7 +622,10 @@ where
         let this = self.get_mut();
         this.registry.waker.register(cx.waker());
         let max_size = this.sender.max_datagram_size();
-        this.registry.lock().max_size = max_size;
+        if mem::replace(&mut this.registry.lock().max_size, max_size) != max_size {
+            // Readiness is measured against the limit, so a smaller one can admit a parked sender.
+            this.registry.capacity_notify.notify_waiters();
+        }
         // A FIN taken now came after every Datagram QUIC holds, so routing a budget of them
         // before applying it keeps them; a flood beyond that budget may lose some.
         let finished = this.registry.take_finished();
@@ -782,9 +800,34 @@ mod tests {
         assert_eq!(queued(), 3);
 
         registry.next().unwrap();
-        assert!(wakes.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        let woken = || wakes.0.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(woken() > 0);
         assert_eq!(sender.poll_ready(&mut cx), Poll::Ready(Ok(())));
         assert_eq!(queued(), 2);
+
+        // A smaller QUIC limit admits a sender parked on room for the larger one.
+        let mut driver = Driver {
+            sender: DatagramSender {
+                max: 65536,
+                blocked: true,
+                wake: None,
+                accepted: Vec::new(),
+            },
+            receiver: DatagramReceiver::default(),
+            registry: registry.clone(),
+            pending: None,
+        };
+        let noop = futures_util::task::noop_waker();
+        let mut driver_cx = Context::from_waker(&noop);
+        // The driver now holds a packet the blocked transport has not taken.
+        assert!(Pin::new(&mut driver).poll(&mut driver_cx).is_pending());
+        request.0.try_send(&Bytes::from(vec![0; 65535])).unwrap();
+        assert!(sender.poll_ready(&mut cx).is_pending());
+        let before = woken();
+        driver.sender.max = 1200;
+        assert!(Pin::new(&mut driver).poll(&mut driver_cx).is_pending());
+        assert!(woken() > before, "limit change woke no sender");
+        assert_eq!(sender.poll_ready(&mut cx), Poll::Ready(Ok(())));
 
         registry.negotiated(false);
         assert_eq!(

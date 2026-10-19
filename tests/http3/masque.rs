@@ -1,23 +1,15 @@
-//! MASQUE CONNECT-UDP over HTTP/3, including QUIC through the tunnel.
-//!
-//! `MasqueUdpSocket` is a reference for wiring `UdpTunnel` into quinn.
+//! MASQUE CONNECT-UDP over HTTP/3.
 
 use std::{
     convert::Infallible,
     future::{Ready, poll_fn, ready},
-    io::{self, IoSliceMut},
-    net::{Ipv4Addr, SocketAddr},
-    pin::Pin,
     sync::Mutex,
-    task::{self, Context, Poll},
+    task::{Context, Poll},
 };
 
-use http::{HeaderValue, Method, StatusCode, Uri};
+use h3::error::{Code, StreamError};
+use http::{HeaderValue, Method, StatusCode, Uri, header::CONTENT_TYPE};
 use netty::proxy::masque::{self, ConnectUdp, MasqueError, SendError, Template, UdpTunnel};
-use quinn::{
-    AsyncUdpSocket, Endpoint, EndpointConfig, TokioRuntime, UdpPoller,
-    udp::{RecvMeta, Transmit},
-};
 use tower_service::Service;
 
 use super::*;
@@ -80,6 +72,8 @@ async fn connect_udp_carries_payloads_as_http_datagrams() {
             let response = Response::builder().status(403).body(()).unwrap();
             refused.send_response(response).await.unwrap();
             refused.finish().await.unwrap();
+            // A refusal ends the request normally rather than as malformed.
+            assert!(refused.recv_data().await.unwrap().is_none(), "client FIN");
 
             let resolver = server.accept().await.unwrap().unwrap();
             let (request, mut stream) = resolver.resolve_request().await.unwrap();
@@ -290,8 +284,33 @@ async fn close_stops_a_busy_sender() {
     .await;
 }
 
+type ProxyStream = h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+
+/// Reads the request stream until the client resets it, returning the code.
+async fn reset_code(stream: &mut ProxyStream) -> Code {
+    loop {
+        match stream.recv_data().await {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the request stream ended without a reset"),
+            Err(StreamError::RemoteTerminate { code, .. }) => return code,
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
+/// Writes to the request stream until the client stops it, returning the code.
+async fn stop_code(stream: &mut ProxyStream) -> Code {
+    loop {
+        match stream.send_data(Bytes::from_static(b"x")).await {
+            Ok(()) => tokio::task::yield_now().await,
+            Err(StreamError::RemoteTerminate { code, .. }) => return code,
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
 #[tokio::test]
-async fn malformed_capsule_resets_the_stream() {
+async fn malformed_response_or_capsule_resets_the_stream() {
     bounded(async {
         let Pair {
             mut tx,
@@ -302,230 +321,74 @@ async fn malformed_capsule_resets_the_stream() {
         }: Pair = pair_config(Http3Options::default(), Exec, true, false, true, None).await;
         let mut client_driver = Box::pin(driver);
         let server_task = tokio::spawn(async move {
-            let resolver = server.accept().await.unwrap().unwrap();
-            let (_, mut stream) = resolver.resolve_request().await.unwrap();
-            stream.send_response(Response::new(())).await.unwrap();
-            // A Context ID 0 capsule longer than any UDP payload.
-            stream
-                .send_data(Bytes::from_static(&[0, 0x80, 1, 0, 0, 0]))
-                .await
-                .unwrap();
-            let Err(error) = stream.recv_data().await else {
-                panic!("the request stream was not reset");
-            };
-            assert!(
-                matches!(error, h3::error::StreamError::RemoteTerminate { code, .. }
-                    if code == h3::error::Code::H3_DATAGRAM_ERROR),
-                "{error}"
-            );
+            // The Capsule Protocol forbids Content-Type (RFC 9297 §3.2); HTTP/3 forbids
+            // Transfer-Encoding and status 101 (RFC 9114 §4.2, §4.5). A malformed response is a
+            // stream error in both directions (RFC 9114 §4.1.2).
+            for response in [
+                Response::builder().header(CONTENT_TYPE, "application/octet-stream"),
+                Response::builder().header("transfer-encoding", "chunked"),
+                Response::builder().status(StatusCode::SWITCHING_PROTOCOLS),
+            ] {
+                let resolver = server.accept().await.unwrap().unwrap();
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                let response = response.body(()).unwrap();
+                stream.send_response(response).await.unwrap();
+                assert_eq!(reset_code(&mut stream).await, Code::H3_MESSAGE_ERROR);
+                assert_eq!(stop_code(&mut stream).await, Code::H3_MESSAGE_ERROR);
+            }
+
+            // A Context ID 0 capsule longer than any UDP payload breaks RFC 9298 §5, while a
+            // capsule cut short by FIN breaks the Capsule Protocol, so the message is
+            // malformed (RFC 9297 §3.3).
+            for (data, fin, code) in [
+                (&[0, 0x80, 1, 0, 0, 0][..], false, Code::H3_DATAGRAM_ERROR),
+                (&[0, 5, 0][..], true, Code::H3_MESSAGE_ERROR),
+            ] {
+                let resolver = server.accept().await.unwrap().unwrap();
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                stream.send_response(Response::new(())).await.unwrap();
+                stream.send_data(Bytes::from_static(data)).await.unwrap();
+                if fin {
+                    stream.finish().await.unwrap();
+                }
+                assert_eq!(reset_code(&mut stream).await, code);
+            }
         });
 
         let template = Template::new("https://localhost/masque/{target_host}/{target_port}/");
         let uri = template.unwrap().expand("192.0.2.1", 443).unwrap();
         let mut response = tx
-            .try_send_request(masque::http3_request(uri))
+            .try_send_request(masque::http3_request(uri.clone()))
             .await
             .unwrap();
-        let mut tunnel = UdpTunnel::from_http3(&mut response).unwrap();
-        // The error sticks, and the stream resets with H3_DATAGRAM_ERROR while the tunnel lives.
+        let result = UdpTunnel::from_http3(&mut response);
+        assert!(
+            matches!(result, Err(MasqueError::InvalidResponse)),
+            "{result:?}"
+        );
+        // HTTP/3 rejects these heads itself.
         for _ in 0..2 {
-            let result = recv(&mut tunnel).await;
-            assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
+            let request = masque::http3_request(uri.clone());
+            assert!(tx.try_send_request(request).await.is_err());
+        }
+
+        // The error sticks, and the stream resets while the tunnel lives.
+        let mut tunnels = Vec::new();
+        for _ in 0..2 {
+            let mut response = tx
+                .try_send_request(masque::http3_request(uri.clone()))
+                .await
+                .unwrap();
+            let mut tunnel = UdpTunnel::from_http3(&mut response).unwrap();
+            for _ in 0..2 {
+                let result = recv(&mut tunnel).await;
+                assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
+            }
+            tunnels.push(tunnel);
         }
         server_task.await.unwrap();
-        drop(tunnel);
+        drop(tunnels);
         drop(tx);
-        client_driver.as_mut().graceful_shutdown();
-        client_driver.await.unwrap();
-    })
-    .await;
-}
-
-/// A quinn socket that carries every datagram through one CONNECT-UDP tunnel.
-///
-/// The tunnel reaches a single target, so it suits one QUIC connection to that target.
-#[derive(Debug)]
-struct MasqueUdpSocket {
-    tunnel: Mutex<UdpTunnel>,
-    target: SocketAddr,
-}
-
-/// Waits for room in the tunnel; one connection driver means one waiting task.
-#[derive(Debug)]
-struct MasquePoller(Arc<MasqueUdpSocket>);
-
-impl UdpPoller for MasquePoller {
-    fn poll_writable(self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
-        let ready = self.0.tunnel.lock().unwrap().poll_send_ready(cx);
-        ready.map_err(io::Error::other)
-    }
-}
-
-impl AsyncUdpSocket for MasqueUdpSocket {
-    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
-        Box::pin(MasquePoller(self))
-    }
-
-    fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
-        // `max_transmit_segments` is 1, so `contents` is a single datagram.
-        assert_eq!(
-            transmit.destination, self.target,
-            "the tunnel's only target"
-        );
-        match self.tunnel.lock().unwrap().try_send(transmit.contents) {
-            Ok(()) => Ok(()),
-            Err(SendError::Full) => Err(io::ErrorKind::WouldBlock.into()),
-            // Lost like an oversized UDP datagram; any other error would end the connection.
-            Err(SendError::TooLarge) => Ok(()),
-            Err(err) => Err(io::Error::other(err)),
-        }
-    }
-
-    fn poll_recv(
-        &self,
-        cx: &mut Context<'_>,
-        bufs: &mut [IoSliceMut<'_>],
-        meta: &mut [RecvMeta],
-    ) -> Poll<io::Result<usize>> {
-        let payload = match task::ready!(self.tunnel.lock().unwrap().poll_recv(cx)) {
-            Ok(Some(payload)) => payload,
-            Ok(None) => return Poll::Ready(Err(io::ErrorKind::ConnectionReset.into())),
-            Err(err) => return Poll::Ready(Err(io::Error::other(err))),
-        };
-        let len = payload.len().min(bufs[0].len());
-        bufs[0][..len].copy_from_slice(&payload[..len]);
-        meta[0] = RecvMeta {
-            addr: self.target,
-            len,
-            stride: len,
-            ..RecvMeta::default()
-        };
-        Poll::Ready(Ok(1))
-    }
-
-    fn local_addr(&self) -> io::Result<SocketAddr> {
-        Ok((Ipv4Addr::UNSPECIFIED, 0).into())
-    }
-}
-
-/// Inner QUIC stays at its 1200-byte minimum, which the outer datagrams must carry.
-fn inner_transport() -> Arc<quinn::TransportConfig> {
-    let mut transport = quinn::TransportConfig::default();
-    transport.initial_mtu(1200).mtu_discovery_config(None);
-    Arc::new(transport)
-}
-
-#[tokio::test]
-async fn quic_over_connect_udp() {
-    // The target: a QUIC echo server.
-    let (cert, mut server_config, _) = tls::config();
-    server_config.transport_config(inner_transport());
-    let target = Endpoint::server(server_config, (Ipv4Addr::LOCALHOST, 0).into()).unwrap();
-    let target_addr = target.local_addr().unwrap();
-    let echo = tokio::spawn(async move {
-        let conn = target.accept().await.unwrap().await.unwrap();
-        let peer = conn.remote_address();
-        let (mut send, mut recv) = conn.accept_bi().await.unwrap();
-        let body = recv.read_to_end(1 << 20).await.unwrap();
-        send.write_all(&body).await.unwrap();
-        send.finish().unwrap();
-        conn.closed().await;
-        peer
-    });
-
-    bounded(async {
-        let Pair {
-            tx,
-            driver,
-            mut server,
-            server_quic,
-            _endpoints,
-        } = pair_config(Http3Options::default(), Exec, true, true, true, None).await;
-        let mut client_driver = Box::pin(driver);
-
-        // The proxy relays HTTP Datagrams of the first request to the target over UDP.
-        let relayed = Arc::new(AtomicUsize::new(0));
-        let (relay_addr, relay_bound) = oneshot::channel();
-        let proxy = tokio::spawn({
-            let relayed = relayed.clone();
-            async move {
-                let resolver = server.accept().await.unwrap().unwrap();
-                let (request, mut stream) = resolver.resolve_request().await.unwrap();
-                let path = request.uri().path().trim_end_matches('/');
-                let mut segments = path.rsplit('/');
-                let port: u16 = segments.next().unwrap().parse().unwrap();
-                let host: Ipv4Addr = segments.next().unwrap().parse().unwrap();
-                stream.send_response(Response::new(())).await.unwrap();
-
-                let udp = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-                    .await
-                    .unwrap();
-                udp.connect((host, port)).await.unwrap();
-                relay_addr.send(udp.local_addr().unwrap()).unwrap();
-                let mut buf = vec![0; 65535];
-                loop {
-                    tokio::select! {
-                        datagram = server_quic.read_datagram() => {
-                            let Ok(datagram) = datagram else { break };
-                            // Quarter Stream ID 0, then Context ID 0.
-                            assert_eq!(datagram[..2], [0, 0]);
-                            udp.send(&datagram[2..]).await.unwrap();
-                            relayed.fetch_add(1, Ordering::Relaxed);
-                        }
-                        len = udp.recv(&mut buf) => {
-                            let mut datagram = BytesMut::from(&[0, 0][..]);
-                            datagram.extend_from_slice(&buf[..len.unwrap()]);
-                            server_quic.send_datagram(datagram.freeze()).unwrap();
-                        }
-                    }
-                }
-                drop(stream);
-            }
-        });
-
-        let template = Template::new("https://localhost:4433/masque/{target_host}/{target_port}/");
-        let mut connector = ConnectUdp::new(template.unwrap(), Proxy(tx));
-        let uri = format!("udp://{target_addr}").parse().unwrap();
-        let tunnel = connector.call(uri).await.unwrap();
-        assert!(tunnel.max_payload_size() >= 1200, "{tunnel:?}");
-        let socket = Arc::new(MasqueUdpSocket {
-            tunnel: Mutex::new(tunnel),
-            target: target_addr,
-        });
-        let mut client = Endpoint::new_with_abstract_socket(
-            EndpointConfig::default(),
-            None,
-            socket,
-            Arc::new(TokioRuntime),
-        )
-        .unwrap();
-        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls::client_crypto(&cert));
-        let mut client_config = quinn::ClientConfig::new(Arc::new(crypto.unwrap()));
-        client_config.transport_config(inner_transport());
-        client.set_default_client_config(client_config);
-
-        let conn = client
-            .connect(target_addr, "localhost")
-            .unwrap()
-            .await
-            .unwrap();
-        let (mut send, mut recv) = conn.open_bi().await.unwrap();
-        let body: Vec<u8> = (0..256 * 1024).map(|i| i as u8).collect();
-        send.write_all(&body).await.unwrap();
-        send.finish().unwrap();
-        assert_eq!(recv.read_to_end(1 << 20).await.unwrap(), body);
-        conn.close(0u32.into(), b"done");
-        // Drain while the tunnel still carries the close: a closed tunnel fails the driver.
-        client.wait_idle().await;
-
-        // The target only ever talked to the proxy, and more than a handshake went through.
-        let peer = echo.await.unwrap();
-        assert_eq!(peer, relay_bound.await.unwrap());
-        assert!(relayed.load(Ordering::Relaxed) > 100);
-        // Dropping the endpoint drops the tunnel, which aborts its request stream.
-        drop(client);
-        proxy.abort();
-        drop(connector);
         client_driver.as_mut().graceful_shutdown();
         client_driver.await.unwrap();
     })
