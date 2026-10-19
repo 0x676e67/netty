@@ -28,6 +28,7 @@ use crate::{
     conn::http3::{SendRequest, datagram::DatagramRequest},
     error::BoxError,
     http3::Protocol,
+    proto::http2::upgrade::StreamReset,
 };
 
 /// Largest UDP payload carried under Context ID 0 (RFC 9298 §5).
@@ -72,15 +73,19 @@ fn validate<B>(response: &Response<B>) -> Result<(), MasqueError> {
     if !status.is_success() {
         return Err(MasqueError::Unsuccessful(status));
     }
-    let headers = response.headers();
-    if matches!(status.as_u16(), 204..=206)
-        || [CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING]
-            .iter()
-            .any(|name| headers.contains_key(name))
-    {
+    if breaks_capsule_protocol(status, response.headers()) {
         return Err(MasqueError::InvalidResponse);
     }
     Ok(())
+}
+
+/// Whether a success response breaks the Capsule Protocol, which makes it malformed
+/// (RFC 9297 §3.2).
+pub(crate) fn breaks_capsule_protocol(status: StatusCode, headers: &HeaderMap) -> bool {
+    matches!(status.as_u16(), 204..=206)
+        || [CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING]
+            .iter()
+            .any(|name| headers.contains_key(name))
 }
 
 /// Connector that opens CONNECT-UDP tunnels over HTTP/3.
@@ -150,22 +155,25 @@ impl UdpTunnel {
         let (control, sender, receiver) = crate::conn::http3::datagram::on(response)
             .ok_or(MasqueError::InvalidResponse)?
             .into_parts();
-        Ok(UdpTunnel::new(control, Some((sender, receiver))))
+        Ok(UdpTunnel::new(control, Some((sender, receiver)), None))
     }
 
     /// Opens the tunnel from a successful response to [`http2_request`].
     ///
     /// The response must be HTTP/2 with status 200, the only one on which the HTTP/2 client
-    /// opens a tunnel; an HTTP/1.1 response to the same request would be a TCP tunnel.
-    pub async fn from_http2<B>(response: Response<B>) -> Result<Self, MasqueError> {
+    /// opens a tunnel; an HTTP/1.1 response to the same request would be a TCP tunnel. A success
+    /// response that breaks the Capsule Protocol is malformed (RFC 9297 §3.2): the HTTP/2 client
+    /// resets its stream with `PROTOCOL_ERROR` and fails the request instead.
+    pub async fn from_http2<B>(mut response: Response<B>) -> Result<Self, MasqueError> {
         validate(&response)?;
         if response.version() != Version::HTTP_2 || response.status() != StatusCode::OK {
             return Err(MasqueError::InvalidResponse);
         }
+        let reset = response.extensions_mut().remove::<StreamReset>();
         let control = crate::upgrade::on(response)
             .await
             .map_err(|_| MasqueError::InvalidResponse)?;
-        Ok(UdpTunnel::new(control, None))
+        Ok(UdpTunnel::new(control, None, reset))
     }
 }
 

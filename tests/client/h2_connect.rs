@@ -721,3 +721,150 @@ async fn h2_connect_udp_carries_capsules() {
     assert_eq!(recv().unwrap().unwrap(), "pong");
     assert!(recv().unwrap().is_none());
 }
+
+#[cfg(feature = "masque")]
+#[tokio::test]
+async fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
+    use std::{future::poll_fn, pin::Pin};
+
+    use futures_util::StreamExt as _;
+    use netty::proxy::masque::{self, MasqueError, Template, UdpTunnel};
+
+    let mut driver = Driver::new();
+    let (mut client, conn, server_io) = driver.handshake(Default::default());
+    driver.spawn(async move {
+        let _ = conn.await;
+    });
+    // The proxy hands out each CONNECT-UDP request while its connection keeps running.
+    let (requests_tx, mut requests) = futures_channel::mpsc::unbounded();
+    driver.spawn(async move {
+        let mut builder = h2::server::Builder::new();
+        builder.enable_connect_protocol().initial_window_size(16);
+        let mut server = builder.handshake::<_, Bytes>(server_io).await.unwrap();
+        while let Some(Ok(request)) = server.accept().await {
+            requests_tx.unbounded_send(request).unwrap();
+        }
+    });
+    driver.run();
+    let idle = driver.tasks.len();
+
+    let uri = Template::new("https://localhost:443/masque/{target_host}/{target_port}/")
+        .unwrap()
+        .expand("192.0.2.1", 53)
+        .unwrap();
+    // Sends a CONNECT-UDP request that the proxy answers with `response`.
+    let mut connect = |driver: &mut Driver, response: Response<()>| {
+        let mut sending = task::spawn(client.try_send_request(masque::http2_request(uri.clone())));
+        assert_pending!(driver.poll(&mut sending));
+        let (request, mut respond) = driver.finish(requests.next()).unwrap();
+        let send = respond.send_response(response, false).unwrap();
+        (assert_ready!(driver.poll(&mut sending)), request, send)
+    };
+    let reset = |driver: &mut Driver, send: &mut h2::SendStream<Bytes>| {
+        driver.finish(poll_fn(|cx| send.poll_reset(cx))).unwrap()
+    };
+
+    // A success that breaks the Capsule Protocol is malformed (RFC 9297 §3.2).
+    for (status, header) in [
+        (200, Some(("content-type", "application/octet-stream"))),
+        (200, Some(("content-length", "0"))),
+        (200, Some(("content-length", "5"))),
+        (204, None),
+    ] {
+        let mut response = Response::builder().status(status);
+        if let Some((name, value)) = header {
+            response = response.header(name, value);
+        }
+        let (result, _request, mut send) = connect(&mut driver, response.body(()).unwrap());
+        assert!(result.is_err(), "{status} {header:?}");
+        assert_eq!(
+            reset(&mut driver, &mut send),
+            h2::Reason::PROTOCOL_ERROR,
+            "{status} {header:?}"
+        );
+    }
+
+    // A refusal is not malformed, even with a body.
+    let response = Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header("content-length", "4")
+        .body(())
+        .unwrap();
+    let (response, _request, mut send) = connect(&mut driver, response);
+    send.send_data(Bytes::from_static(b"nope"), true).unwrap();
+    let result = driver.finish(UdpTunnel::from_http2(response.unwrap()));
+    assert!(
+        matches!(
+            result,
+            Err(MasqueError::Unsuccessful(StatusCode::FORBIDDEN))
+        ),
+        "{result:?}"
+    );
+
+    // A malformed capsule, while the tunnel is open and after the client closed it.
+    let malformed = Bytes::from_static(&[0, 0x80, 1, 0, 0, 0]);
+    for close in [false, true] {
+        let (response, mut request, mut send) = connect(&mut driver, Response::new(()));
+        let mut tunnel = driver
+            .finish(UdpTunnel::from_http2(response.unwrap()))
+            .unwrap();
+        if close {
+            // Sending a capsule queued ahead of END_STREAM wakes the send task again while it
+            // waits for a reset; the proxy's 16-byte window spreads that over window updates.
+            tunnel.try_send(&[7; 64]).unwrap();
+            driver.finish(poll_fn(|cx| tunnel.poll_close(cx))).unwrap();
+            let body = request.body_mut();
+            while let Some(data) = driver.finish(body.data()) {
+                let len = data.unwrap().len();
+                body.flow_control().release_capacity(len).unwrap();
+            }
+        }
+        send.send_data(malformed.clone(), false).unwrap();
+        driver.run();
+        let result = assert_ready!(task::spawn(poll_fn(|cx| tunnel.poll_recv(cx))).poll());
+        assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
+        if !close {
+            // Dropped before the send task runs, the tunnel still leaves its reset behind.
+            drop(tunnel);
+        }
+        assert_eq!(
+            reset(&mut driver, &mut send),
+            h2::Reason::PROTOCOL_ERROR,
+            "{close}"
+        );
+    }
+
+    // A send task waiting for a reset after END_STREAM ends once the tunnel drops.
+    let (response, _request, _send) = connect(&mut driver, Response::new(()));
+    let mut tunnel = driver
+        .finish(UdpTunnel::from_http2(response.unwrap()))
+        .unwrap();
+    driver.finish(poll_fn(|cx| tunnel.poll_close(cx))).unwrap();
+    drop(tunnel);
+    driver.run();
+    assert_eq!(driver.tasks.len(), idle, "a send task outlived its tunnel");
+
+    // Without `UdpTunnel`, a kept response does not hold the stream open past its IO.
+    let (response, _request, mut send) = connect(&mut driver, Response::new(()));
+    let mut response = response.unwrap();
+    let mut io = driver.finish(netty::upgrade::on(&mut response)).unwrap();
+    driver
+        .finish(poll_fn(|cx| Pin::new(&mut io).poll_shutdown(cx)))
+        .unwrap();
+    drop(io);
+    assert_eq!(reset(&mut driver, &mut send), h2::Reason::CANCEL);
+    assert_eq!(driver.tasks.len(), idle, "a send task outlived its IO");
+    drop(response);
+
+    // Other Extended CONNECT protocols keep their rules: Content-Type is no reason to reset.
+    let mut sending = task::spawn(client.try_send_request(extended_connect("/chat")));
+    assert_pending!(driver.poll(&mut sending));
+    let (_request, mut respond) = driver.finish(requests.next()).unwrap();
+    let response = Response::builder()
+        .header("content-type", "application/octet-stream")
+        .body(())
+        .unwrap();
+    let _send = respond.send_response(response, false).unwrap();
+    let mut response = assert_ready!(driver.poll(&mut sending)).unwrap();
+    assert!(driver.finish(netty::upgrade::on(&mut response)).is_ok());
+}

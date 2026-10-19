@@ -504,11 +504,20 @@ where
     }
 }
 
+// pin_project_lite does not support cfg on fields.
+#[cfg(not(feature = "masque"))]
+type ConnectUdp = ();
+
+/// Whether the request is CONNECT-UDP, whose tunnel MASQUE resets over malformed capsules.
+#[cfg(feature = "masque")]
+type ConnectUdp = bool;
+
 struct FutCtx<B>
 where
     B: Body,
 {
     is_connect: bool,
+    connect_udp: ConnectUdp,
     eos: bool,
     fut: ResponseFuture,
     body_tx: SendStream<SendBuf<B::Data>>,
@@ -651,6 +660,7 @@ where
                     ping: Some(ping),
                     send_stream: Some(send_stream),
                     cancel_tx: Some(cancel_tx),
+                    connect_udp: f.connect_udp,
                     exec: self.executor.clone(),
                 },
                 call_back: Some(f.cb),
@@ -696,6 +706,7 @@ pin_project! {
         #[pin]
         send_stream: Option<Option<SendStream<SendBuf<<B as Body>::Data>>>>,
         cancel_tx: Option<oneshot::Sender<()>>,
+        connect_udp: ConnectUdp,
         exec: E,
     }
 }
@@ -729,6 +740,22 @@ where
                 // record that we got the response headers
                 ping.record_non_data();
 
+                // A CONNECT-UDP success that breaks the Capsule Protocol is malformed (RFC 9297
+                // §3.2), a stream error of type PROTOCOL_ERROR (RFC 9113 §8.1.1).
+                #[cfg(feature = "masque")]
+                if *this.connect_udp
+                    && res.status().is_success()
+                    && crate::proxy::masque::breaks_capsule_protocol(res.status(), res.headers())
+                {
+                    if let Some(mut send_stream) = send_stream {
+                        send_stream.send_reset(http2::Reason::PROTOCOL_ERROR);
+                    }
+                    return Poll::Ready(Err((
+                        Error::new_h2(http2::Reason::PROTOCOL_ERROR.into()),
+                        None::<Request<B>>,
+                    )));
+                }
+
                 let content_length = headers::content_length_parse_all(res.headers());
                 if let (Some(mut send_stream), StatusCode::OK) = (send_stream, res.status()) {
                     if content_length.is_some_and(|len| len != 0) {
@@ -744,7 +771,13 @@ where
                     let mut res = Response::from_parts(parts, Incoming::empty());
 
                     let (pending, on_upgrade) = upgrade::pending();
-                    let (io, task) = super::upgrade::pair(send_stream, recv_stream, ping);
+                    let (io, task) = super::upgrade::pair(
+                        send_stream,
+                        recv_stream,
+                        ping,
+                        #[cfg(feature = "masque")]
+                        this.connect_udp.then_some(res.extensions_mut()),
+                    );
                     this.exec.execute_upgrade(task);
                     let upgraded = Upgraded::new(io, Bytes::new());
 
@@ -840,6 +873,15 @@ where
 
                     let is_connect = req.method() == Method::CONNECT;
                     let eos = body.is_end_stream();
+                    // `send_request` takes the `:protocol` extension.
+                    #[cfg(feature = "masque")]
+                    let connect_udp = is_connect
+                        && req
+                            .extensions()
+                            .get::<Protocol>()
+                            .is_some_and(|protocol| protocol.as_str() == "connect-udp");
+                    #[cfg(not(feature = "masque"))]
+                    let connect_udp = ();
 
                     if is_connect
                         && headers::content_length_parse_all(req.headers())
@@ -867,6 +909,7 @@ where
 
                     let f = FutCtx {
                         is_connect,
+                        connect_udp,
                         eos,
                         fut,
                         body_tx,
