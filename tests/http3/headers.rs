@@ -25,6 +25,95 @@ impl netty::ext::OnPreserveHeaderCallback for Preserve {
 }
 
 #[tokio::test]
+async fn configured_pseudo_order_reaches_peer_on_cloned_and_reused_senders() {
+    use netty::http3::{PseudoId, PseudoOrder};
+
+    bounded(async {
+        for configured in [false, true] {
+            let custom = PseudoOrder::builder()
+                .extend([
+                    PseudoId::Path,
+                    PseudoId::Authority,
+                    PseudoId::Method,
+                    PseudoId::Scheme,
+                ])
+                .build();
+            let options = Http3Options::builder()
+                .send_grease(false)
+                .headers_pseudo_order(configured.then_some(custom.clone()))
+                .build();
+            let (_, server_config, client_config) = tls::config();
+            let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
+            let capture = capture::Capture::default();
+            let server_builder = h3::server::builder();
+            let (client, server) = tokio::join!(
+                Builder::new(Exec)
+                    .options(options)
+                    .handshake::<_, ClientBody>(native::Connection::new(client)),
+                server_builder.build::<_, Bytes>(capture.connection(server))
+            );
+            let (mut tx, driver) = client.unwrap();
+            let mut server = server.unwrap();
+            let mut client_driver = Box::pin(driver);
+            let server_task = tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (_, mut stream) = server
+                        .accept()
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .resolve_request()
+                        .await
+                        .unwrap();
+                    stream.send_response(Response::new(())).await.unwrap();
+                    stream.finish().await.unwrap();
+                }
+                let _ = server.accept().await;
+            });
+            let mut cloned = tx.clone();
+            for request_index in 0..2 {
+                let sender = if request_index == 0 {
+                    &mut cloned
+                } else {
+                    &mut tx
+                };
+                let extension = if configured {
+                    PseudoOrder::default()
+                } else {
+                    custom.clone()
+                };
+                sender
+                    .try_send_request(
+                        Request::get("https://localhost/order")
+                            .header("x-order", "present")
+                            .extension(extension)
+                            .body(Full::new(Bytes::new()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .into_body()
+                    .collect()
+                    .await
+                    .unwrap();
+                let expected = if configured {
+                    [":path", ":authority", ":method", ":scheme", "x-order"]
+                } else {
+                    [":method", ":scheme", ":authority", ":path", "x-order"]
+                };
+                assert_eq!(capture.header_names(request_index * 4), expected);
+            }
+            drop(cloned);
+            drop(tx);
+            client_driver.as_mut().graceful_shutdown();
+            client_driver.await.unwrap();
+            server_task.await.unwrap();
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn preserve_header_callback_reaches_peer_in_order() {
     bounded(async {
         let Pair {

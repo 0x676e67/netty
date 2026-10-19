@@ -373,6 +373,9 @@ impl<E> Builder<E> {
         if let Some(order) = opts.settings_order {
             builder.settings_order(order);
         }
+        if let Some(order) = opts.headers_pseudo_order {
+            builder.pseudo_order(order);
+        }
         #[cfg(feature = "http3-datagram")]
         builder.enable_datagram(datagrams.is_some());
         let (driver, sender) = builder
