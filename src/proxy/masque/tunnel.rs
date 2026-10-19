@@ -31,8 +31,9 @@ const READ_CHUNK: usize = 8 * 1024;
 /// as DATAGRAM capsules on the request stream; received capsules are always accepted. Methods
 /// take `&mut self`: share a tunnel between send and receive tasks behind a mutex.
 ///
-/// Dropping the tunnel aborts the request stream, which closes the tunnel at the proxy; over
-/// HTTP/2 the reset follows capsules already written, which wait on the proxy's flow control.
+/// Dropping the tunnel aborts the request stream unless both sides have ended it, which closes
+/// the tunnel at the proxy and may discard capsules not yet delivered; to deliver them, close
+/// the tunnel and receive to the end first.
 pub struct UdpTunnel {
     control: Upgraded,
     native: Option<Native>,
@@ -197,11 +198,11 @@ impl UdpTunnel {
     ///
     /// Also finishes writing buffered capsules. An error ends receiving and later calls report
     /// it again, with the same kind and message. A malformed capsule or payload also resets the
-    /// request stream, even after [`poll_close`](Self::poll_close): over HTTP/3 with
-    /// `H3_MESSAGE_ERROR` for a capsule cut short by the end of the stream (RFC 9297 §3.3) and
-    /// `H3_DATAGRAM_ERROR` for an oversized payload (RFC 9298 §5), over HTTP/2 with
-    /// `PROTOCOL_ERROR`. Over HTTP/2, a proxy reset with `NO_ERROR` or `CANCEL` reads as the end of
-    /// the tunnel.
+    /// request stream, also after [`poll_close`](Self::poll_close) unless both sides have ended
+    /// it: over HTTP/3 with `H3_MESSAGE_ERROR` for a capsule cut short by the end of the stream
+    /// (RFC 9297 §3.3) and `H3_DATAGRAM_ERROR` for an oversized payload (RFC 9298 §5), over
+    /// HTTP/2 with `PROTOCOL_ERROR`. Over HTTP/2, a proxy reset with `NO_ERROR` or `CANCEL` reads
+    /// as the end of the stream, so one that cuts a capsule short is malformed.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, MasqueError>> {
         if let Some(err) = &self.recv_error {
             return Poll::Ready(Err(err.clone().into()));
@@ -361,6 +362,18 @@ impl UdpTunnel {
             self.wakers.close.wake();
         }
         Poll::Ready(())
+    }
+}
+
+impl Drop for UdpTunnel {
+    fn drop(&mut self) {
+        // Over HTTP/2 the send task may hold a capsule that waits on the proxy's flow control,
+        // which would keep the stream open; after a close, the stream ends as usual.
+        if !self.write_closed
+            && let Some(reset) = &self.reset
+        {
+            reset.reset(Reason::CANCEL);
+        }
     }
 }
 

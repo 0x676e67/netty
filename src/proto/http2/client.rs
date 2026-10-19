@@ -506,18 +506,18 @@ where
 
 // pin_project_lite does not support cfg on fields.
 #[cfg(not(feature = "masque"))]
-type ConnectUdp = ();
+type ConnectUdpFlag = ();
 
 /// Whether the request is CONNECT-UDP, whose tunnel MASQUE resets over malformed capsules.
 #[cfg(feature = "masque")]
-type ConnectUdp = bool;
+type ConnectUdpFlag = bool;
 
 struct FutCtx<B>
 where
     B: Body,
 {
     is_connect: bool,
-    connect_udp: ConnectUdp,
+    connect_udp: ConnectUdpFlag,
     eos: bool,
     fut: ResponseFuture,
     body_tx: SendStream<SendBuf<B::Data>>,
@@ -706,7 +706,7 @@ pin_project! {
         #[pin]
         send_stream: Option<Option<SendStream<SendBuf<<B as Body>::Data>>>>,
         cancel_tx: Option<oneshot::Sender<()>>,
-        connect_udp: ConnectUdp,
+        connect_udp: ConnectUdpFlag,
         exec: E,
     }
 }
@@ -740,12 +740,14 @@ where
                 // record that we got the response headers
                 ping.record_non_data();
 
-                // A CONNECT-UDP success that breaks the Capsule Protocol is malformed (RFC 9297
-                // §3.2), a stream error of type PROTOCOL_ERROR (RFC 9113 §8.1.1).
+                // A CONNECT-UDP success that breaks the Capsule Protocol is malformed, a stream
+                // error of type PROTOCOL_ERROR.
+                // https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
+                // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.1.1
                 #[cfg(feature = "masque")]
                 if *this.connect_udp
                     && res.status().is_success()
-                    && crate::proxy::masque::breaks_capsule_protocol(res.status(), res.headers())
+                    && headers::breaks_capsule_protocol(res.status(), res.headers())
                 {
                     if let Some(mut send_stream) = send_stream {
                         send_stream.send_reset(http2::Reason::PROTOCOL_ERROR);

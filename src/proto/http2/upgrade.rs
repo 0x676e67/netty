@@ -19,16 +19,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+#[cfg(feature = "masque")]
+use std::sync::{Arc, Mutex};
 use std::{
     future::Future,
     io::{self, Cursor},
     pin::Pin,
     task::{Context, Poll, ready},
-};
-#[cfg(feature = "masque")]
-use std::{
-    mem,
-    sync::{Arc, Mutex},
 };
 
 use bytes::{Buf, Bytes};
@@ -40,18 +37,18 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::{SendBuf, ping::Recorder};
 
-/// Splits an upgraded CONNECT stream into its IO and send task. With MASQUE, `reset` receives a
-/// [`StreamReset`] for the stream.
+/// Splits an upgraded CONNECT stream into its IO and send task. With MASQUE, `extensions`
+/// receives a [`StreamReset`] for the stream.
 pub(super) fn pair<B>(
     send_stream: SendStream<SendBuf<B>>,
     recv_stream: RecvStream,
     ping: Recorder,
-    #[cfg(feature = "masque")] reset: Option<&mut http::Extensions>,
+    #[cfg(feature = "masque")] extensions: Option<&mut http::Extensions>,
 ) -> (H2Upgraded, UpgradedSendStreamTask<B>) {
     let (tx, rx) = mpsc::channel(1);
     let (error_tx, error_rx) = oneshot::channel();
     #[cfg(feature = "masque")]
-    let (reset, alive) = ResetRx::new(reset);
+    let (reset, alive) = ResetRx::new(extensions);
     #[cfg(not(feature = "masque"))]
     let reset = ResetRx;
 
@@ -136,18 +133,19 @@ where
     fn tick(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), crate::Error>> {
         let mut me = self.project();
 
+        // Once per tick: the registration stays, so a later request wakes the task.
+        if let Poll::Ready(reason) = me.reset.poll(cx) {
+            me.h2_tx.send_reset(reason);
+            return Poll::Ready(Err(crate::Error::new_body_write(::http2::Error::from(
+                reason,
+            ))));
+        }
+
         // this is a manual `select()` over 3 "futures", so we always need
         // to be sure they are ready and/or we are waiting notification of
         // one of the sides hanging up, so the task doesn't live around
         // longer than it's meant to.
         loop {
-            if let Poll::Ready(reason) = me.reset.poll(cx) {
-                me.h2_tx.send_reset(reason);
-                return Poll::Ready(Err(crate::Error::new_body_write(::http2::Error::from(
-                    reason,
-                ))));
-            }
-
             match me.h2_tx.poll_reset(cx) {
                 Poll::Ready(Ok(reason)) => {
                     trace!("stream received RST_STREAM: {:?}", reason);
@@ -159,6 +157,15 @@ where
                     return Poll::Ready(Err(crate::Error::new_body_write(err)));
                 }
                 Poll::Pending => (),
+            }
+
+            // After END_STREAM only a reset can follow.
+            if me.reset.ended() {
+                return if me.reset.waiting() {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(()))
+                };
             }
 
             // A write taken from the mpsc receiver waits here for h2 capacity,
@@ -200,12 +207,10 @@ where
                     *me.buffered = Some(cursor);
                 }
                 Poll::Ready(None) => {
+                    me.h2_tx
+                        .send_data(SendBuf::None, true)
+                        .map_err(crate::Error::new_body_write)?;
                     if me.reset.end() {
-                        me.h2_tx
-                            .send_data(SendBuf::None, true)
-                            .map_err(crate::Error::new_body_write)?;
-                    }
-                    if me.reset.waiting() {
                         // Shutdown completes here; the task stays only to apply a reset.
                         me.error_tx.take();
                         return Poll::Pending;
@@ -294,9 +299,15 @@ impl ResetRx {
         Poll::Pending
     }
 
-    /// Records END_STREAM, returning whether it still has to go out.
+    /// Records END_STREAM, returning whether the task waits for a reset.
     fn end(&mut self) -> bool {
-        !mem::replace(&mut self.ended, true)
+        self.ended = true;
+        self.waiting()
+    }
+
+    /// Whether END_STREAM went out.
+    fn ended(&self) -> bool {
+        self.ended
     }
 
     /// Whether a handle can still reset the stream.
@@ -312,7 +323,11 @@ impl ResetRx {
     }
 
     fn end(&mut self) -> bool {
-        true
+        false
+    }
+
+    fn ended(&self) -> bool {
+        false
     }
 
     fn waiting(&self) -> bool {
