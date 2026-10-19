@@ -15,7 +15,11 @@ use http::Response;
 use tokio::sync::futures::OwnedNotified;
 
 pub use crate::proto::http3::datagram::SendErrorKind;
-use crate::{proto::http3::datagram::RequestState, rt::quic::StreamId, upgrade::Upgraded};
+use crate::{
+    proto::http3::datagram::{Abort, RequestState},
+    rt::quic::StreamId,
+    upgrade::Upgraded,
+};
 
 /// Declares that this Extended CONNECT protocol defines HTTP Datagram semantics.
 /// It does not negotiate a protocol or assert successful proxy authorization.
@@ -73,6 +77,14 @@ impl Session {
     /// Native sends may be unavailable while the control stream supports Capsules.
     pub fn into_parts(self) -> (Upgraded, Sender, Receiver) {
         (self.control, self.sender, self.receiver)
+    }
+
+    /// Resets the request stream with `H3_MESSAGE_ERROR`, for a success response the protocol
+    /// treats as malformed, such as one that breaks the Capsule Protocol
+    /// ([RFC 9297 §3.2](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2)). Dropping the
+    /// session instead cancels the request.
+    pub fn reject_malformed(self) {
+        self.receiver.0.abort(Abort::Message);
     }
 }
 
@@ -199,7 +211,7 @@ impl Receiver {
     /// Resets the request stream with `H3_DATAGRAM_ERROR`, for a peer that broke the format
     /// of its payloads or Capsules ([RFC 9297](https://www.rfc-editor.org/rfc/rfc9297.html)).
     pub fn abort_malformed(&self) {
-        self.0.abort_malformed();
+        self.0.abort(Abort::Datagram);
     }
 }
 

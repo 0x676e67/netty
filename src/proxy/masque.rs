@@ -126,8 +126,17 @@ pub enum SendError {
 
 impl UdpTunnel {
     /// Opens the tunnel from a successful response to [`http3_request`].
+    ///
+    /// A success response that breaks the Capsule Protocol is malformed (RFC 9297 §3.2), so its
+    /// request stream resets with `H3_MESSAGE_ERROR`.
     pub fn from_http3<B>(response: &mut Response<B>) -> Result<Self, MasqueError> {
-        validate(response)?;
+        if let Err(err) = validate(response) {
+            // Only a success response carries a session, so refusals are left as they are.
+            if let Some(session) = crate::conn::http3::datagram::on(response) {
+                session.reject_malformed();
+            }
+            return Err(err);
+        }
         let (control, sender, receiver) = crate::conn::http3::datagram::on(response)
             .ok_or(MasqueError::InvalidResponse)?
             .into_parts();

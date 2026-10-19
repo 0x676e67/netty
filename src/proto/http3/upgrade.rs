@@ -36,7 +36,7 @@ use crate::{
 #[cfg(feature = "http3-datagram")]
 use crate::{
     conn::http3::datagram::Pending,
-    proto::http3::datagram::{Registration, RequestState},
+    proto::http3::datagram::{Abort, Registration, RequestState},
 };
 
 // pin_project_lite does not support cfg on fields; nothing is released
@@ -119,7 +119,9 @@ where
         if let (Err(error), Some(mut body), Some(active)) = (result, body, this.active.as_ref()) {
             #[cfg(feature = "http3-datagram")]
             let error = match this.release {
-                Some(Release::Datagram(SessionGuard(state))) if state.is_malformed() => {
+                Some(Release::Datagram(SessionGuard(state)))
+                    if state.aborted() == Some(Abort::Datagram) =>
+                {
                     malformed_datagram_error()
                 }
                 _ => error,

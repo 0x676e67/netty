@@ -344,14 +344,9 @@ where
         if !self.finished {
             let code = Code::H3_REQUEST_CANCELLED;
             #[cfg(feature = "http3-datagram")]
-            let code = if self
-                .datagrams
-                .as_ref()
-                .is_some_and(|d| d.invalid.is_cancelled())
-            {
-                Code::H3_DATAGRAM_ERROR
-            } else {
-                code
+            let code = match &self.datagrams {
+                Some(datagrams) if datagrams.invalid.is_cancelled() => datagrams.invalid_code(),
+                _ => code,
             };
             self.stream.stop_stream(code);
         }
@@ -372,14 +367,9 @@ impl<S: quic::RecvStream> Drop for RecvGuard<S> {
             }
             let code = self.code;
             #[cfg(feature = "http3-datagram")]
-            let code = if self
-                .datagrams
-                .as_ref()
-                .is_some_and(|d| d.invalid.is_cancelled())
-            {
-                Code::H3_DATAGRAM_ERROR
-            } else {
-                code
+            let code = match &self.datagrams {
+                Some(datagrams) if datagrams.invalid.is_cancelled() => datagrams.invalid_code(),
+                _ => code,
             };
             self.stream.stop_sending(code);
         }
