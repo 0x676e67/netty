@@ -23,7 +23,7 @@ use std::{
     future::Future,
     io::{self, Cursor},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     task::{Context, Poll, ready},
 };
 
@@ -46,7 +46,7 @@ pub(super) fn pair<B>(
 ) -> (H2Upgraded, UpgradedSendStreamTask<B>) {
     let (tx, rx) = mpsc::channel(1);
     let (error_tx, error_rx) = oneshot::channel();
-    let (reset, alive) = ResetRx::new(extensions);
+    let (reset, slot) = ResetRx::new(extensions);
 
     (
         H2Upgraded {
@@ -54,7 +54,7 @@ pub(super) fn pair<B>(
             recv_stream,
             ping,
             buf: Bytes::new(),
-            _alive: alive,
+            _reset: slot,
         },
         UpgradedSendStreamTask {
             h2_tx: send_stream,
@@ -73,8 +73,9 @@ pub(super) struct H2Upgraded {
     send_stream: UpgradedSendStreamBridge,
     recv_stream: RecvStream,
     buf: Bytes,
-    /// Dropped with the stream, which ends the send task's wait for a reset.
-    _alive: Option<oneshot::Sender<()>>,
+    /// What a [`StreamReset`] reaches; dropped with the stream, which ends the send task's wait
+    /// for a reset.
+    _reset: Option<Arc<ResetSlot>>,
 }
 
 /// Relays accepted writes and terminal errors while the upgraded stream is alive.
@@ -106,21 +107,20 @@ pub(crate) const CONNECT_UDP: &str = "connect-udp";
 
 /// Resets an upgraded CONNECT stream with a chosen code. MASQUE resets with `PROTOCOL_ERROR` on
 /// malformed capsules and with `CANCEL` when a tunnel drops before its close. The send task
-/// outlives END_STREAM to apply it until the upgraded IO or every clone drops.
+/// outlives END_STREAM to apply it until the upgraded IO drops.
 #[cfg_attr(
     not(feature = "masque"),
     expect(dead_code, reason = "only MASQUE resets")
 )]
 #[derive(Clone)]
-pub(crate) struct StreamReset(Arc<Mutex<Option<oneshot::Sender<Reason>>>>);
+pub(crate) struct StreamReset(Weak<ResetSlot>);
 
-/// The send task's end of a [`StreamReset`].
+/// The sender of a reset request, held by the upgraded IO.
+type ResetSlot = Mutex<Option<oneshot::Sender<Reason>>>;
+
+/// The send task's end of a [`StreamReset`]; `None` once nothing can ask for a reset.
 #[derive(Default)]
-struct ResetRx {
-    /// The reset request, and a receiver whose sender lives in the upgraded IO; `None` once
-    /// nothing can ask for a reset.
-    rx: Option<(oneshot::Receiver<Reason>, oneshot::Receiver<()>)>,
-}
+struct ResetRx(Option<oneshot::Receiver<Reason>>);
 
 // ===== impl UpgradedSendStreamTask =====
 
@@ -245,10 +245,13 @@ where
 
 #[cfg(feature = "masque")]
 impl StreamReset {
-    /// Resets the stream with `reason`; only the first call takes effect.
+    /// Resets the stream with `reason` while its upgraded IO lives; only the first call takes
+    /// effect.
     pub(crate) fn reset(&self, reason: Reason) {
-        let tx = self
-            .0
+        let Some(slot) = self.0.upgrade() else {
+            return;
+        };
+        let tx = slot
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take();
@@ -261,41 +264,34 @@ impl StreamReset {
 // ===== impl ResetRx =====
 
 impl ResetRx {
-    /// Puts a [`StreamReset`] in `extensions`, if given, and returns the sender the upgraded IO
+    /// Puts a [`StreamReset`] in `extensions`, if given, and returns the slot the upgraded IO
     /// keeps alive.
-    fn new(extensions: Option<&mut http::Extensions>) -> (Self, Option<oneshot::Sender<()>>) {
+    fn new(extensions: Option<&mut http::Extensions>) -> (Self, Option<Arc<ResetSlot>>) {
         let Some(extensions) = extensions else {
             return (Self::default(), None);
         };
         let (tx, rx) = oneshot::channel();
-        let (alive_tx, alive_rx) = oneshot::channel();
-        extensions.insert(StreamReset(Arc::new(Mutex::new(Some(tx)))));
-        let reset = Self {
-            rx: Some((rx, alive_rx)),
-        };
-        (reset, Some(alive_tx))
+        let slot = Arc::new(Mutex::new(Some(tx)));
+        extensions.insert(StreamReset(Arc::downgrade(&slot)));
+        (Self(Some(rx)), Some(slot))
     }
 
-    /// Polls for a requested reset; none can come once every handle or the IO dropped.
+    /// Polls for a requested reset; none can come once the upgraded IO dropped.
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Reason> {
-        let Some((rx, alive)) = self.rx.as_mut() else {
+        let Some(rx) = self.0.as_mut() else {
             return Poll::Pending;
         };
-        // Checked first: a reset requested before the IO dropped is then visible below, even
-        // when another thread does both between the two polls.
-        let gone = Pin::new(alive).poll(cx).is_ready();
         match Pin::new(rx).poll(cx) {
             Poll::Ready(Ok(reason)) => return Poll::Ready(reason),
-            Poll::Ready(Err(_dropped)) => self.rx = None,
-            Poll::Pending if gone => self.rx = None,
+            Poll::Ready(Err(_dropped)) => self.0 = None,
             Poll::Pending => {}
         }
         Poll::Pending
     }
 
-    /// Whether a handle can still reset the stream.
+    /// Whether a reset can still come.
     fn waiting(&self) -> bool {
-        self.rx.is_some()
+        self.0.is_some()
     }
 }
 

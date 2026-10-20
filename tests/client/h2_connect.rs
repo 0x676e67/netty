@@ -894,8 +894,9 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
     assert_eq!(reset(&mut driver, &mut server), h2::Reason::CANCEL);
     assert_eq!(driver.tasks.len(), idle, "a send task outlived its tunnel");
 
-    // Hyper finishes sending before it abandons the request, which resets with NO_ERROR.
-    // Like CANCEL, that reads as the end of the stream, so one inside a capsule is malformed.
+    // Hyper ends its side before it abandons the request and resets with NO_ERROR. The client
+    // reads the END_STREAM, so the capsule it cuts short is malformed, and sees the reset on its
+    // send side.
     let (response, server) = connect(&mut driver, Response::new(Bytes::new()));
     let mut server = server.unwrap();
     let mut tunnel = UdpTunnel::from_http2(&mut response.unwrap()).unwrap();
@@ -954,4 +955,73 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
         "{result:?}"
     );
     assert!(driver.finish(netty::upgrade::on(&mut response)).is_ok());
+}
+
+// Plain for the same reason. A bare h2 server plays the proxy, because Hyper cannot send these
+// frames: it drops or refuses Content-Length on a successful CONNECT, and it ends its side before
+// any reset.
+#[cfg(feature = "masque")]
+#[test]
+fn h2_connect_udp_treats_raw_proxy_framing_as_malformed() {
+    use std::future::poll_fn;
+
+    use futures_util::StreamExt as _;
+    use netty::proxy::masque::{self, MasqueError, Template, UdpTunnel};
+
+    let mut driver = Driver::new();
+    let (mut client, conn, server_io) = driver.handshake(Default::default());
+    driver.spawn(async move {
+        let _ = conn.await;
+    });
+    let (requests_tx, mut requests) = futures_channel::mpsc::unbounded();
+    driver.spawn(async move {
+        let mut builder = h2::server::Builder::new();
+        builder.enable_connect_protocol();
+        let mut server = builder.handshake::<_, Bytes>(server_io).await.unwrap();
+        while let Some(Ok(request)) = server.accept().await {
+            requests_tx.unbounded_send(request).unwrap();
+        }
+    });
+    driver.run();
+
+    let uri = Template::new("https://localhost:443/masque/{target_host}/{target_port}/")
+        .unwrap()
+        .expand("192.0.2.1", 53)
+        .unwrap();
+    let mut connect = |driver: &mut Driver, response: Response<()>| {
+        let mut sending = task::spawn(client.try_send_request(masque::http2_request(uri.clone())));
+        assert_pending!(driver.poll(&mut sending));
+        let (_request, mut respond) = driver.finish(requests.next()).unwrap();
+        let send = respond.send_response(response, false).unwrap();
+        (assert_ready!(driver.poll(&mut sending)), send)
+    };
+
+    // Content-Length breaks the Capsule Protocol even at zero (RFC 9297 §3.2), and a nonzero one
+    // gets this reset rather than the plain CONNECT `INTERNAL_ERROR`.
+    for length in ["0", "5"] {
+        let response = Response::builder()
+            .header("content-length", length)
+            .body(())
+            .unwrap();
+        let (result, mut send) = connect(&mut driver, response);
+        assert!(result.is_err(), "{length}");
+        let reason = driver.finish(poll_fn(|cx| send.poll_reset(cx))).unwrap();
+        assert_eq!(reason, h2::Reason::PROTOCOL_ERROR, "{length}");
+    }
+
+    // A proxy reset with NO_ERROR or CANCEL reads as the end of the stream, so one inside a
+    // capsule is malformed.
+    for reason in [h2::Reason::NO_ERROR, h2::Reason::CANCEL] {
+        let (response, mut send) = connect(&mut driver, Response::new(()));
+        let mut tunnel = UdpTunnel::from_http2(&mut response.unwrap()).unwrap();
+        send.send_data(Bytes::from_static(&[0, 5, 0, b'p']), false)
+            .unwrap();
+        driver.run();
+        send.send_reset(reason);
+        let result = driver.finish(poll_fn(|cx| tunnel.poll_recv(cx)));
+        assert!(
+            matches!(result, Err(MasqueError::Malformed)),
+            "{reason:?}: {result:?}"
+        );
+    }
 }

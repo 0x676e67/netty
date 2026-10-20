@@ -209,21 +209,3 @@ pub(super) fn add_chunked(mut entry: http::header::OccupiedEntry<'_, HeaderValue
 
     entry.insert(HeaderValue::from_static(CHUNKED));
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn capsule_protocol_forbids_even_zero_content_length() {
-        let mut headers = HeaderMap::new();
-        assert!(!breaks_capsule_protocol(StatusCode::OK, &headers));
-
-        // Hyper removes zero lengths from successful CONNECT responses and rejects nonzero
-        // lengths itself, so neither value reaches the client in the integration fixture.
-        for value in ["0", "5"] {
-            headers.insert(CONTENT_LENGTH, HeaderValue::from_static(value));
-            assert!(breaks_capsule_protocol(StatusCode::OK, &headers));
-        }
-    }
-}

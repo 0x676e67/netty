@@ -769,7 +769,9 @@ where
                         send_stream,
                         recv_stream,
                         ping,
-                        this.connect_udp.then_some(res.extensions_mut()),
+                        // Only MASQUE resets the stream.
+                        (cfg!(feature = "masque") && *this.connect_udp)
+                            .then_some(res.extensions_mut()),
                     );
                     this.exec.execute_upgrade(task);
                     let upgraded = Upgraded::new(io, Bytes::new());
@@ -867,8 +869,7 @@ where
                     let is_connect = req.method() == Method::CONNECT;
                     let eos = body.is_end_stream();
                     // `send_request` takes the `:protocol` extension.
-                    let connect_udp = cfg!(feature = "masque")
-                        && is_connect
+                    let connect_udp = is_connect
                         && req
                             .extensions()
                             .get::<Protocol>()
