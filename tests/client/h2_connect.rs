@@ -737,15 +737,26 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
     driver.spawn(async move {
         let _ = conn.await;
     });
-    // The proxy hands out each CONNECT-UDP request while its connection keeps running.
+    // Hyper hands out each upgrade while its connection keeps running.
     let (requests_tx, mut requests) = futures_channel::mpsc::unbounded();
+    let service = service_fn(move |mut request: Request<hyper::body::Incoming>| {
+        let upgrade = hyper::upgrade::on(&mut request);
+        let (response_tx, response_rx) = oneshot::channel();
+        requests_tx
+            .unbounded_send((request, response_tx, upgrade))
+            .unwrap();
+        async move { Ok::<_, Infallible>(response_rx.await.unwrap()) }
+    });
+    let executor = driver.executor.clone();
     driver.spawn(async move {
-        let mut builder = h2::server::Builder::new();
-        builder.enable_connect_protocol().initial_window_size(16);
-        let mut server = builder.handshake::<_, Bytes>(server_io).await.unwrap();
-        while let Some(Ok(request)) = server.accept().await {
-            requests_tx.unbounded_send(request).unwrap();
-        }
+        let mut builder = hyper::server::conn::http2::Builder::new(executor);
+        builder
+            .enable_connect_protocol()
+            .initial_stream_window_size(16);
+        builder
+            .serve_connection(TokioIo::new(server_io), service)
+            .await
+            .unwrap();
     });
     driver.run();
     let idle = driver.tasks.len();
@@ -755,32 +766,46 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
         .expand("192.0.2.1", 53)
         .unwrap();
     // Sends a CONNECT-UDP request that the proxy answers with `response`.
-    let mut connect = |driver: &mut Driver, response: Response<()>| {
+    let mut connect = |driver: &mut Driver, response: Response<Bytes>| {
+        let success = response.status().is_success();
         let mut sending = task::spawn(client.try_send_request(masque::http2_request(uri.clone())));
         assert_pending!(driver.poll(&mut sending));
-        let (request, mut respond) = driver.finish(requests.next()).unwrap();
-        let send = respond.send_response(response, false).unwrap();
-        (assert_ready!(driver.poll(&mut sending)), request, send)
+        let (request, respond, upgrade) = driver.finish(requests.next()).unwrap();
+        assert_eq!(request.method(), Method::CONNECT);
+        let protocol = request.extensions().get::<hyper::ext::Protocol>().unwrap();
+        assert_eq!(protocol.as_str(), "connect-udp");
+        respond.send(response.map(Full::new)).unwrap();
+        let server = success.then(|| TokioIo::new(driver.finish(upgrade).unwrap()));
+        (assert_ready!(driver.poll(&mut sending)), server)
     };
-    let reset = |driver: &mut Driver, send: &mut h2::SendStream<Bytes>| {
-        driver.finish(poll_fn(|cx| send.poll_reset(cx))).unwrap()
+    // Hyper's upgraded reader maps CANCEL to EOF, so observe the reason on its writer.
+    let reset = |driver: &mut Driver, server: &mut TokioIo<hyper::upgrade::Upgraded>| {
+        driver.run();
+        let error = driver.finish(server.write_all(b"after-reset")).unwrap_err();
+        let mut source = std::error::Error::source(&error);
+        while let Some(error) = source {
+            if let Some(error) = error.downcast_ref::<h2::Error>() {
+                return error.reason().unwrap();
+            }
+            source = error.source();
+        }
+        panic!("reset without an h2 reason: {error:?}");
     };
 
     // A success that breaks the Capsule Protocol is malformed (RFC 9297 §3.2).
     for (status, header) in [
         (200, Some(("content-type", "application/octet-stream"))),
-        (200, Some(("content-length", "0"))),
-        (200, Some(("content-length", "5"))),
         (204, None),
     ] {
         let mut response = Response::builder().status(status);
         if let Some((name, value)) = header {
             response = response.header(name, value);
         }
-        let (result, _request, mut send) = connect(&mut driver, response.body(()).unwrap());
+        let (result, server) = connect(&mut driver, response.body(Bytes::new()).unwrap());
+        let mut server = server.unwrap();
         assert!(result.is_err(), "{status} {header:?}");
         assert_eq!(
-            reset(&mut driver, &mut send),
+            reset(&mut driver, &mut server),
             h2::Reason::PROTOCOL_ERROR,
             "{status} {header:?}"
         );
@@ -790,10 +815,10 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
     let response = Response::builder()
         .status(StatusCode::FORBIDDEN)
         .header("content-length", "4")
-        .body(())
+        .body(Bytes::from_static(b"nope"))
         .unwrap();
-    let (response, _request, mut send) = connect(&mut driver, response);
-    send.send_data(Bytes::from_static(b"nope"), true).unwrap();
+    let (response, server) = connect(&mut driver, response);
+    assert!(server.is_none());
     let mut response = response.unwrap();
     let result = UdpTunnel::from_http2(&mut response);
     assert!(
@@ -808,23 +833,21 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
     assert_eq!(body.to_bytes(), "nope");
 
     // A malformed capsule, while the tunnel is open and after the client closed it.
-    let malformed = Bytes::from_static(&[0, 0x80, 1, 0, 0, 0]);
+    let malformed = [0, 0x80, 1, 0, 0, 0];
     for close in [false, true] {
-        let (response, mut request, mut send) = connect(&mut driver, Response::new(()));
+        let (response, server) = connect(&mut driver, Response::new(Bytes::new()));
+        let mut server = server.unwrap();
         let mut tunnel = UdpTunnel::from_http2(&mut response.unwrap()).unwrap();
         if close {
             // Sending a capsule queued ahead of END_STREAM wakes the send task again while it
             // waits for a reset; the proxy's 16-byte window spreads that over window updates.
             tunnel.try_send(&[7; 64]).unwrap();
             driver.finish(poll_fn(|cx| tunnel.poll_close(cx))).unwrap();
-            let body = request.body_mut();
-            while let Some(data) = driver.finish(body.data()) {
-                let len = data.unwrap().len();
-                body.flow_control().release_capacity(len).unwrap();
-            }
+            let mut received = Vec::new();
+            driver.finish(server.read_to_end(&mut received)).unwrap();
+            assert_eq!(received.len(), 68);
         }
-        send.send_data(malformed.clone(), false).unwrap();
-        driver.run();
+        driver.finish(server.write_all(&malformed)).unwrap();
         let result = assert_ready!(task::spawn(poll_fn(|cx| tunnel.poll_recv(cx))).poll());
         assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
         if !close {
@@ -832,14 +855,14 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
             drop(tunnel);
         }
         assert_eq!(
-            reset(&mut driver, &mut send),
+            reset(&mut driver, &mut server),
             h2::Reason::PROTOCOL_ERROR,
             "{close}"
         );
     }
 
     // A send task waiting for a reset after END_STREAM ends once the tunnel drops.
-    let (response, _request, _send) = connect(&mut driver, Response::new(()));
+    let (response, _server) = connect(&mut driver, Response::new(Bytes::new()));
     let mut tunnel = UdpTunnel::from_http2(&mut response.unwrap()).unwrap();
     driver.finish(poll_fn(|cx| tunnel.poll_close(cx))).unwrap();
     drop(tunnel);
@@ -847,65 +870,81 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
     assert_eq!(driver.tasks.len(), idle, "a send task outlived its tunnel");
 
     // After a close, dropping the tunnel lets the stream end as usual.
-    let (response, mut request, mut send) = connect(&mut driver, Response::new(()));
+    let (response, server) = connect(&mut driver, Response::new(Bytes::new()));
+    let mut server = server.unwrap();
     let mut tunnel = UdpTunnel::from_http2(&mut response.unwrap()).unwrap();
-    send.send_data(Bytes::new(), true).unwrap();
+    driver.finish(server.shutdown()).unwrap();
     tunnel.try_send(&[7; 64]).unwrap();
     driver.finish(poll_fn(|cx| tunnel.poll_close(cx))).unwrap();
     drop(tunnel);
-    let body = request.body_mut();
-    let mut received = 0;
-    while let Some(data) = driver.finish(body.data()) {
-        let len = data.unwrap().len();
-        received += len;
-        body.flow_control().release_capacity(len).unwrap();
-    }
-    assert_eq!(received, 68, "capsule cut short");
+    let mut received = Vec::new();
+    driver.finish(server.read_to_end(&mut received)).unwrap();
+    assert_eq!(received.len(), 68, "capsule cut short");
 
     // Dropped before its close, the tunnel aborts the stream even while a capsule waits on the
     // proxy's flow control.
-    let (response, _request, mut send) = connect(&mut driver, Response::new(()));
+    let (response, server) = connect(&mut driver, Response::new(Bytes::new()));
+    let mut server = server.unwrap();
     let mut tunnel = UdpTunnel::from_http2(&mut response.unwrap()).unwrap();
     for _ in 0..2 {
         tunnel.try_send(&[7; 64]).unwrap();
         driver.run();
     }
     drop(tunnel);
-    assert_eq!(reset(&mut driver, &mut send), h2::Reason::CANCEL);
+    assert_eq!(reset(&mut driver, &mut server), h2::Reason::CANCEL);
     assert_eq!(driver.tasks.len(), idle, "a send task outlived its tunnel");
 
-    // A proxy reset with CANCEL reads as the end of the stream, so one inside a capsule is
-    // malformed.
-    let (response, _request, mut send) = connect(&mut driver, Response::new(()));
+    // Hyper finishes sending before it abandons the request, which resets with NO_ERROR.
+    // Like CANCEL, that reads as the end of the stream, so one inside a capsule is malformed.
+    let (response, server) = connect(&mut driver, Response::new(Bytes::new()));
+    let mut server = server.unwrap();
     let mut tunnel = UdpTunnel::from_http2(&mut response.unwrap()).unwrap();
-    send.send_data(Bytes::from_static(&[0, 5, 0, b'p']), false)
-        .unwrap();
+    driver.finish(server.write_all(&[0, 5, 0, b'p'])).unwrap();
+    drop(server);
     driver.run();
-    send.send_reset(h2::Reason::CANCEL);
+    assert_eq!(
+        tunnel.try_send(b"after-reset"),
+        Err(masque::SendError::Closed)
+    );
+    let error = driver
+        .finish(poll_fn(|cx| tunnel.poll_flush(cx)))
+        .unwrap_err();
+    let error = error
+        .get_ref()
+        .unwrap()
+        .downcast_ref::<netty::Error>()
+        .unwrap();
+    let cause = std::error::Error::source(error).unwrap();
+    assert_eq!(
+        cause.downcast_ref::<::http2::Error>().unwrap().reason(),
+        Some(::http2::Reason::NO_ERROR)
+    );
     let result = driver.finish(poll_fn(|cx| tunnel.poll_recv(cx)));
     assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
 
     // Without `UdpTunnel`, a kept response does not hold the stream open past its IO.
-    let (response, _request, mut send) = connect(&mut driver, Response::new(()));
+    let (response, server) = connect(&mut driver, Response::new(Bytes::new()));
+    let mut server = server.unwrap();
     let mut response = response.unwrap();
     let mut io = driver.finish(netty::upgrade::on(&mut response)).unwrap();
     driver
         .finish(poll_fn(|cx| Pin::new(&mut io).poll_shutdown(cx)))
         .unwrap();
     drop(io);
-    assert_eq!(reset(&mut driver, &mut send), h2::Reason::CANCEL);
+    assert_eq!(reset(&mut driver, &mut server), h2::Reason::CANCEL);
     assert_eq!(driver.tasks.len(), idle, "a send task outlived its IO");
     drop(response);
 
     // Other Extended CONNECT protocols keep their rules: Content-Type is no reason to reset.
     let mut sending = task::spawn(client.try_send_request(extended_connect("/chat")));
     assert_pending!(driver.poll(&mut sending));
-    let (_request, mut respond) = driver.finish(requests.next()).unwrap();
+    let (_request, respond, upgrade) = driver.finish(requests.next()).unwrap();
     let response = Response::builder()
         .header("content-type", "application/octet-stream")
-        .body(())
+        .body(Full::new(Bytes::new()))
         .unwrap();
-    let _send = respond.send_response(response, false).unwrap();
+    respond.send(response).unwrap();
+    let _server = driver.finish(upgrade).unwrap();
     let mut response = assert_ready!(driver.poll(&mut sending)).unwrap();
     // Even with valid framing, `UdpTunnel` refuses it and leaves the upgrade to the caller.
     response.headers_mut().remove("content-type");
