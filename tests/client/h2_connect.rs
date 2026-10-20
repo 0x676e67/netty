@@ -674,6 +674,69 @@ async fn h2_connect_reset_during_backpressure() {
     );
 }
 
+// Use only the low-level API so this also checks CONNECT-UDP without the masque feature.
+#[test]
+fn h2_connect_udp_rejects_capsule_headers() {
+    let mut driver = Driver::new();
+    let executor = driver.executor.clone();
+    let (server_tx, server_rx) = oneshot::channel();
+    let server_tx = Mutex::new(Some(server_tx));
+    let upgrade_executor = executor.clone();
+    let service = service_fn(move |request: Request<hyper::body::Incoming>| {
+        assert_eq!(request.method(), Method::CONNECT);
+        let protocol = request.extensions().get::<hyper::ext::Protocol>().unwrap();
+        assert_eq!(protocol.as_str(), "connect-udp");
+        let upgrade = hyper::upgrade::on(request);
+        let tx = server_tx.lock().unwrap().take().unwrap();
+        upgrade_executor.execute(async move {
+            tx.send(upgrade.await.unwrap()).unwrap();
+        });
+        async {
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .header("content-type", "application/octet-stream")
+                    .body(Empty::<Bytes>::new())
+                    .unwrap(),
+            )
+        }
+    });
+    let (mut client, conn, server_io) = driver.handshake(Default::default());
+    driver.spawn(async move {
+        let mut builder = hyper::server::conn::http2::Builder::new(executor);
+        builder.enable_connect_protocol();
+        builder
+            .serve_connection(TokioIo::new(server_io), service)
+            .await
+            .unwrap();
+    });
+    driver.spawn(async move {
+        let _ = conn.await;
+    });
+    driver.run();
+
+    let mut request = Request::connect("https://localhost:443/masque/192.0.2.1/53/")
+        .header("capsule-protocol", "?1")
+        .body(Empty::<Bytes>::new())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(::http2::ext::Protocol::from_static("connect-udp"));
+    let result = driver.finish(client.try_send_request(request));
+    assert!(result.is_err(), "{result:?}");
+
+    let mut server = TokioIo::new(driver.finish(server_rx).unwrap());
+    let error = driver.finish(server.write_all(b"after-reset")).unwrap_err();
+    let mut source = std::error::Error::source(&error);
+    while let Some(error) = source {
+        if let Some(error) = error.downcast_ref::<h2::Error>() {
+            assert_eq!(error.reason(), Some(h2::Reason::PROTOCOL_ERROR));
+            return;
+        }
+        source = error.source();
+    }
+    panic!("reset without an h2 reason: {error:?}");
+}
+
 #[cfg(feature = "masque")]
 #[tokio::test]
 async fn h2_connect_udp_carries_capsules() {
