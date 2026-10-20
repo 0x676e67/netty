@@ -140,6 +140,15 @@ fn extended_connect(path: &str) -> Request<Empty<Bytes>> {
     request
 }
 
+/// A CONNECT-UDP request to 192.0.2.1:53 through the test proxy.
+#[cfg(feature = "masque")]
+fn connect_udp_request() -> Request<Empty<Bytes>> {
+    use netty::proxy::masque::{self, Template};
+
+    let template = Template::new("https://localhost:443/masque/{target_host}/{target_port}/");
+    masque::http2_request(template.unwrap().expand("192.0.2.1", 53).unwrap())
+}
+
 fn connect() -> (
     Driver,
     Upgraded,
@@ -668,7 +677,7 @@ async fn h2_connect_reset_during_backpressure() {
 #[cfg(feature = "masque")]
 #[tokio::test]
 async fn h2_connect_udp_carries_capsules() {
-    use netty::proxy::masque::{self, Template, UdpTunnel};
+    use netty::proxy::masque::UdpTunnel;
 
     let mut driver = Driver::new();
     let executor = driver.executor.clone();
@@ -703,10 +712,8 @@ async fn h2_connect_udp_carries_capsules() {
         conn.await.unwrap();
     });
 
-    let template = Template::new("https://localhost:443/masque/{target_host}/{target_port}/");
-    let uri = template.unwrap().expand("192.0.2.1", 53).unwrap();
     let mut response = driver
-        .finish(client.try_send_request(masque::http2_request(uri)))
+        .finish(client.try_send_request(connect_udp_request()))
         .unwrap();
     let mut tunnel = UdpTunnel::from_http2(&mut response).unwrap();
     let mut server = TokioIo::new(driver.finish(server_rx).unwrap());
@@ -730,7 +737,7 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
     use std::{future::poll_fn, pin::Pin};
 
     use futures_util::StreamExt as _;
-    use netty::proxy::masque::{self, MasqueError, Template, UdpTunnel};
+    use netty::proxy::masque::{self, MasqueError, UdpTunnel};
 
     let mut driver = Driver::new();
     let (mut client, conn, server_io) = driver.handshake(Default::default());
@@ -761,14 +768,10 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
     driver.run();
     let idle = driver.tasks.len();
 
-    let uri = Template::new("https://localhost:443/masque/{target_host}/{target_port}/")
-        .unwrap()
-        .expand("192.0.2.1", 53)
-        .unwrap();
     // Sends a CONNECT-UDP request that the proxy answers with `response`.
     let mut connect = |driver: &mut Driver, response: Response<Bytes>| {
         let success = response.status().is_success();
-        let mut sending = task::spawn(client.try_send_request(masque::http2_request(uri.clone())));
+        let mut sending = task::spawn(client.try_send_request(connect_udp_request()));
         assert_pending!(driver.poll(&mut sending));
         let (request, respond, upgrade) = driver.finish(requests.next()).unwrap();
         assert_eq!(request.method(), Method::CONNECT);
@@ -966,7 +969,7 @@ fn h2_connect_udp_treats_raw_proxy_framing_as_malformed() {
     use std::future::poll_fn;
 
     use futures_util::StreamExt as _;
-    use netty::proxy::masque::{self, MasqueError, Template, UdpTunnel};
+    use netty::proxy::masque::{MasqueError, UdpTunnel};
 
     let mut driver = Driver::new();
     let (mut client, conn, server_io) = driver.handshake(Default::default());
@@ -984,12 +987,8 @@ fn h2_connect_udp_treats_raw_proxy_framing_as_malformed() {
     });
     driver.run();
 
-    let uri = Template::new("https://localhost:443/masque/{target_host}/{target_port}/")
-        .unwrap()
-        .expand("192.0.2.1", 53)
-        .unwrap();
     let mut connect = |driver: &mut Driver, response: Response<()>| {
-        let mut sending = task::spawn(client.try_send_request(masque::http2_request(uri.clone())));
+        let mut sending = task::spawn(client.try_send_request(connect_udp_request()));
         assert_pending!(driver.poll(&mut sending));
         let (_request, mut respond) = driver.finish(requests.next()).unwrap();
         let send = respond.send_response(response, false).unwrap();

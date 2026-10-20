@@ -174,12 +174,7 @@ impl OnUpgrade {
     /// fulfilled upgrade in a task that has run out of it.
     #[cfg(feature = "masque")]
     pub(crate) fn take_fulfilled(self) -> Option<Upgraded> {
-        self.rx?
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .try_recv()
-            .ok()?
-            .ok()
+        self.rx?.lock().ignore_poison().try_recv().ok()?.ok()
     }
 }
 

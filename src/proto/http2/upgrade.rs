@@ -35,6 +35,8 @@ use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::{SendBuf, ping::Recorder};
+#[cfg(feature = "masque")]
+use crate::lock::LockResultExt;
 
 /// Splits an upgraded CONNECT stream into its IO and send task. `extensions`, if given,
 /// receives a [`StreamReset`] for the stream.
@@ -251,10 +253,7 @@ impl StreamReset {
         let Some(slot) = self.0.upgrade() else {
             return;
         };
-        let tx = slot
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
+        let tx = slot.lock().ignore_poison().take();
         if let Some(tx) = tx {
             let _ = tx.send(reason);
         }
