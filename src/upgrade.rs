@@ -167,6 +167,20 @@ impl OnUpgrade {
     pub(super) fn is_none(&self) -> bool {
         self.rx.is_none()
     }
+
+    /// Takes an upgrade the connection already fulfilled, without polling.
+    ///
+    /// Unlike polling, this never draws on tokio's cooperative budget, so it cannot miss a
+    /// fulfilled upgrade in a task that has run out of it.
+    #[cfg(feature = "masque")]
+    pub(crate) fn take_fulfilled(self) -> Option<Upgraded> {
+        self.rx?
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .try_recv()
+            .ok()?
+            .ok()
+    }
 }
 
 impl Future for OnUpgrade {

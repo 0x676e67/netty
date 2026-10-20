@@ -19,12 +19,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#[cfg(feature = "masque")]
-use std::sync::{Arc, Mutex};
 use std::{
     future::Future,
     io::{self, Cursor},
     pin::Pin,
+    sync::{Arc, Mutex},
     task::{Context, Poll, ready},
 };
 
@@ -37,20 +36,17 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::{SendBuf, ping::Recorder};
 
-/// Splits an upgraded CONNECT stream into its IO and send task. With MASQUE, `extensions`
+/// Splits an upgraded CONNECT stream into its IO and send task. `extensions`, if given,
 /// receives a [`StreamReset`] for the stream.
 pub(super) fn pair<B>(
     send_stream: SendStream<SendBuf<B>>,
     recv_stream: RecvStream,
     ping: Recorder,
-    #[cfg(feature = "masque")] extensions: Option<&mut http::Extensions>,
+    extensions: Option<&mut http::Extensions>,
 ) -> (H2Upgraded, UpgradedSendStreamTask<B>) {
     let (tx, rx) = mpsc::channel(1);
     let (error_tx, error_rx) = oneshot::channel();
-    #[cfg(feature = "masque")]
     let (reset, alive) = ResetRx::new(extensions);
-    #[cfg(not(feature = "masque"))]
-    let reset = ResetRx;
 
     (
         H2Upgraded {
@@ -58,7 +54,6 @@ pub(super) fn pair<B>(
             recv_stream,
             ping,
             buf: Bytes::new(),
-            #[cfg(feature = "masque")]
             _alive: alive,
         },
         UpgradedSendStreamTask {
@@ -67,6 +62,7 @@ pub(super) fn pair<B>(
             buffered: None,
             error_tx: Some(error_tx),
             reset,
+            ended: false,
         },
     )
 }
@@ -78,7 +74,6 @@ pub(super) struct H2Upgraded {
     recv_stream: RecvStream,
     buf: Bytes,
     /// Dropped with the stream, which ends the send task's wait for a reset.
-    #[cfg(feature = "masque")]
     _alive: Option<oneshot::Sender<()>>,
 }
 
@@ -99,30 +94,33 @@ pin_project! {
         buffered: Option<Cursor<Box<[u8]>>>,
         error_tx: Option<oneshot::Sender<crate::Error>>,
         reset: ResetRx,
+        // Whether END_STREAM went out.
+        ended: bool,
     }
 }
 
-/// Resets an upgraded CONNECT stream with a chosen code, for a protocol on the stream that finds
-/// the peer's data malformed. The send task outlives END_STREAM to apply it until the upgraded
-/// IO or every clone drops.
-#[cfg(feature = "masque")]
+/// The `:protocol` of a CONNECT-UDP request
+/// ([RFC 9298 §3.4](https://www.rfc-editor.org/rfc/rfc9298.html#section-3.4)); with MASQUE, its
+/// 200 response carries a [`StreamReset`].
+pub(crate) const CONNECT_UDP: &str = "connect-udp";
+
+/// Resets an upgraded CONNECT stream with a chosen code. MASQUE resets with `PROTOCOL_ERROR` on
+/// malformed capsules and with `CANCEL` when a tunnel drops before its close. The send task
+/// outlives END_STREAM to apply it until the upgraded IO or every clone drops.
+#[cfg_attr(
+    not(feature = "masque"),
+    expect(dead_code, reason = "only MASQUE resets")
+)]
 #[derive(Clone)]
 pub(crate) struct StreamReset(Arc<Mutex<Option<oneshot::Sender<Reason>>>>);
 
 /// The send task's end of a [`StreamReset`].
-#[cfg(feature = "masque")]
 #[derive(Default)]
 struct ResetRx {
     /// The reset request, and a receiver whose sender lives in the upgraded IO; `None` once
     /// nothing can ask for a reset.
     rx: Option<(oneshot::Receiver<Reason>, oneshot::Receiver<()>)>,
-    /// Whether END_STREAM went out.
-    ended: bool,
 }
-
-/// Nothing resets the stream without MASQUE.
-#[cfg(not(feature = "masque"))]
-struct ResetRx;
 
 // ===== impl UpgradedSendStreamTask =====
 
@@ -160,7 +158,7 @@ where
             }
 
             // After END_STREAM only a reset can follow.
-            if me.reset.ended() {
+            if *me.ended {
                 return if me.reset.waiting() {
                     Poll::Pending
                 } else {
@@ -210,12 +208,10 @@ where
                     me.h2_tx
                         .send_data(SendBuf::None, true)
                         .map_err(crate::Error::new_body_write)?;
-                    if me.reset.end() {
-                        // Shutdown completes here; the task stays only to apply a reset.
-                        me.error_tx.take();
-                        return Poll::Pending;
-                    }
-                    return Poll::Ready(Ok(()));
+                    // Shutdown completes here; the check above keeps the task only to apply a
+                    // reset.
+                    *me.ended = true;
+                    me.error_tx.take();
                 }
                 Poll::Pending => {
                     return Poll::Pending;
@@ -264,7 +260,6 @@ impl StreamReset {
 
 // ===== impl ResetRx =====
 
-#[cfg(feature = "masque")]
 impl ResetRx {
     /// Puts a [`StreamReset`] in `extensions`, if given, and returns the sender the upgraded IO
     /// keeps alive.
@@ -277,7 +272,6 @@ impl ResetRx {
         extensions.insert(StreamReset(Arc::new(Mutex::new(Some(tx)))));
         let reset = Self {
             rx: Some((rx, alive_rx)),
-            ended: false,
         };
         (reset, Some(alive_tx))
     }
@@ -299,39 +293,9 @@ impl ResetRx {
         Poll::Pending
     }
 
-    /// Records END_STREAM, returning whether the task waits for a reset.
-    fn end(&mut self) -> bool {
-        self.ended = true;
-        self.waiting()
-    }
-
-    /// Whether END_STREAM went out.
-    fn ended(&self) -> bool {
-        self.ended
-    }
-
     /// Whether a handle can still reset the stream.
     fn waiting(&self) -> bool {
         self.rx.is_some()
-    }
-}
-
-#[cfg(not(feature = "masque"))]
-impl ResetRx {
-    fn poll(&mut self, _: &mut Context<'_>) -> Poll<Reason> {
-        Poll::Pending
-    }
-
-    fn end(&mut self) -> bool {
-        false
-    }
-
-    fn ended(&self) -> bool {
-        false
-    }
-
-    fn waiting(&self) -> bool {
-        false
     }
 }
 

@@ -35,6 +35,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use super::{
     PipeToSendStream, SendBuf, ping,
     ping::{Ponger, Recorder},
+    upgrade::CONNECT_UDP,
 };
 use crate::{
     Error, Result,
@@ -504,20 +505,12 @@ where
     }
 }
 
-// pin_project_lite does not support cfg on fields.
-#[cfg(not(feature = "masque"))]
-type ConnectUdpFlag = ();
-
-/// Whether the request is CONNECT-UDP, whose tunnel MASQUE resets over malformed capsules.
-#[cfg(feature = "masque")]
-type ConnectUdpFlag = bool;
-
 struct FutCtx<B>
 where
     B: Body,
 {
     is_connect: bool,
-    connect_udp: ConnectUdpFlag,
+    connect_udp: bool,
     eos: bool,
     fut: ResponseFuture,
     body_tx: SendStream<SendBuf<B::Data>>,
@@ -706,7 +699,7 @@ pin_project! {
         #[pin]
         send_stream: Option<Option<SendStream<SendBuf<<B as Body>::Data>>>>,
         cancel_tx: Option<oneshot::Sender<()>>,
-        connect_udp: ConnectUdpFlag,
+        connect_udp: bool,
         exec: E,
     }
 }
@@ -744,7 +737,6 @@ where
                 // error of type PROTOCOL_ERROR.
                 // https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
                 // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.1.1
-                #[cfg(feature = "masque")]
                 if *this.connect_udp
                     && res.status().is_success()
                     && headers::breaks_capsule_protocol(res.status(), res.headers())
@@ -777,7 +769,6 @@ where
                         send_stream,
                         recv_stream,
                         ping,
-                        #[cfg(feature = "masque")]
                         this.connect_udp.then_some(res.extensions_mut()),
                     );
                     this.exec.execute_upgrade(task);
@@ -876,14 +867,12 @@ where
                     let is_connect = req.method() == Method::CONNECT;
                     let eos = body.is_end_stream();
                     // `send_request` takes the `:protocol` extension.
-                    #[cfg(feature = "masque")]
-                    let connect_udp = is_connect
+                    let connect_udp = cfg!(feature = "masque")
+                        && is_connect
                         && req
                             .extensions()
                             .get::<Protocol>()
-                            .is_some_and(|protocol| protocol.as_str() == "connect-udp");
-                    #[cfg(not(feature = "masque"))]
-                    let connect_udp = ();
+                            .is_some_and(|protocol| protocol.as_str() == CONNECT_UDP);
 
                     if is_connect
                         && headers::content_length_parse_all(req.headers())

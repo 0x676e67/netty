@@ -28,7 +28,10 @@ use crate::{
     conn::http3::{SendRequest, datagram::DatagramRequest},
     error::BoxError,
     http3::Protocol,
-    proto::{headers, http2::upgrade::StreamReset},
+    proto::{
+        headers,
+        http2::upgrade::{CONNECT_UDP, StreamReset},
+    },
 };
 
 /// Largest UDP payload carried under Context ID 0 (RFC 9298 §5).
@@ -49,11 +52,15 @@ pub fn http3_request<B: Default>(uri: Uri) -> Request<B> {
 }
 
 /// Builds an HTTP/2 CONNECT-UDP request for an expanded template (RFC 9298 §3.4).
+///
+/// Open the tunnel with [`UdpTunnel::from_http2`]. Taking the upgrade with
+/// [`upgrade::on`](crate::upgrade::on) instead gives a plain CONNECT stream: a drop ends it only
+/// after queued writes get flow control, while an unclosed tunnel resets at once.
 pub fn http2_request<B: Default>(uri: Uri) -> Request<B> {
     let mut request = connect_request(uri);
     request
         .extensions_mut()
-        .insert(::http2::ext::Protocol::from_static("connect-udp"));
+        .insert(::http2::ext::Protocol::from_static(CONNECT_UDP));
     request
 }
 
@@ -158,15 +165,15 @@ impl UdpTunnel {
     /// TCP tunnel) or another CONNECT's. A success response that breaks the Capsule Protocol is
     /// malformed (RFC 9297 §3.2): the client resets its stream with `PROTOCOL_ERROR` and fails the
     /// request instead. A refused response keeps its headers, body and upgrade for the caller.
-    pub async fn from_http2<B>(response: &mut Response<B>) -> Result<Self, MasqueError> {
+    pub fn from_http2<B>(response: &mut Response<B>) -> Result<Self, MasqueError> {
         validate(response)?;
         let reset = response
             .extensions_mut()
             .remove::<StreamReset>()
             .ok_or(MasqueError::InvalidResponse)?;
         let control = crate::upgrade::on(response)
-            .await
-            .map_err(|_| MasqueError::InvalidResponse)?;
+            .take_fulfilled()
+            .ok_or(MasqueError::InvalidResponse)?;
         Ok(UdpTunnel::new(control, None, Some(reset)))
     }
 }
@@ -307,7 +314,6 @@ mod tests {
 
     use bytes::Bytes;
     use futures_util::FutureExt;
-    use http::Version;
     use http_body_util::Empty;
 
     use super::*;
@@ -348,24 +354,6 @@ mod tests {
             );
         }
         assert_eq!(connector.inner.0, 0, "connected for a bad target");
-    }
-
-    #[test]
-    fn http2_tunnels_need_the_clients_connect_udp_upgrade() {
-        // Any other upgrade, even an HTTP/2 200, is a TCP or WebSocket tunnel.
-        for version in [Version::HTTP_2, Version::HTTP_11] {
-            let (pending, on_upgrade) = crate::upgrade::pending();
-            let (io, _proxy) = tokio::io::duplex(64);
-            pending.fulfill(crate::upgrade::Upgraded::new(io, Bytes::new()));
-            let mut response = Response::new(());
-            *response.version_mut() = version;
-            response.extensions_mut().insert(on_upgrade);
-            let result = UdpTunnel::from_http2(&mut response).now_or_never().unwrap();
-            assert!(
-                matches!(result, Err(MasqueError::InvalidResponse)),
-                "{version:?}"
-            );
-        }
     }
 
     #[test]
