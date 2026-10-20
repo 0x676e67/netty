@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792425960353,
+  "lastUpdate": 1792465927140,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -14363,6 +14363,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 5410238,
             "range": "± 71511.91",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f6dd9291f2823dfe615b1ae41c4f16afa3ae7cb0",
+          "message": "fix(http1): remove content-length if transfer-encoding is auto-added (#166)\n\nLocal adaptation: use netty's Encode fields in the regression test.\n\nCo-authored-by: Sean McArthur <sean@seanmonstar.com>",
+          "timestamp": "2026-10-20T11:08:26+08:00",
+          "tree_id": "b785bf7a4dd8f1bcf0cf64bc8eec20c2a9af8784",
+          "url": "https://github.com/0x676e67/netty/commit/f6dd9291f2823dfe615b1ae41c4f16afa3ae7cb0"
+        },
+        "date": 1792465926071,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 70181,
+            "range": "± 820.66",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 4130278,
+            "range": "± 212743.03",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 21506,
+            "range": "± 516.28",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 23559,
+            "range": "± 928.71",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 34381,
+            "range": "± 1018.86",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 102863,
+            "range": "± 1814.65",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 41000219,
+            "range": "± 25770.80",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 86838,
+            "range": "± 1795.37",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 8012176,
+            "range": "± 273148.82",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 28708941,
+            "range": "± 13135325.65",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 7715633,
+            "range": "± 105468.70",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 49727551,
+            "range": "± 429207.26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 51987636,
+            "range": "± 285199.25",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 5337272,
+            "range": "± 94158.05",
             "unit": "ns/iter"
           }
         ]
