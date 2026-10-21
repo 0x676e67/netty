@@ -503,8 +503,9 @@ impl Http2OptionsBuilder {
     /// have not yet started.
     ///
     /// Also note that if the remote *does* exceed the value set here, it is not
-    /// a protocol level error. Instead, the `h2` library will immediately reset
-    /// the stream.
+    /// a protocol level error. Instead, the `http2` library will immediately reset
+    /// the stream, and each such reset counts toward
+    /// [`max_local_error_reset_streams`](Self::max_local_error_reset_streams).
     ///
     /// See [Section 5.1.2] in the HTTP/2 spec for more details.
     ///
