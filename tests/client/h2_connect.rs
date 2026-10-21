@@ -731,6 +731,40 @@ async fn h2_connect_reset_during_backpressure() {
     );
 }
 
+// Any 2xx to CONNECT opens the tunnel, not only 200.
+// https://www.rfc-editor.org/rfc/rfc9113.html#section-8.5
+#[test]
+fn h2_connect_any_2xx_opens_tunnel() {
+    let mut driver = Driver::new();
+    let (mut client, conn, server_io) = driver.handshake(Default::default());
+    let mut proxy = HyperProxy::spawn(&driver, server_io, |_| {});
+    driver.spawn(async move {
+        let _ = conn.await;
+    });
+    driver.run();
+
+    let request = Request::connect("localhost:443")
+        .body(Empty::<Bytes>::new())
+        .unwrap();
+    let accepted = Response::builder()
+        .status(StatusCode::ACCEPTED)
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let (response, _request, server) = proxy.exchange(&mut driver, &mut client, request, accepted);
+    let response = response.unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let mut upgraded = driver.finish(netty::upgrade::on(response)).unwrap();
+    let mut server = server.unwrap();
+
+    driver.finish(upgraded.write_all(b"ping")).unwrap();
+    let mut received = [0; 4];
+    driver.finish(server.read_exact(&mut received)).unwrap();
+    assert_eq!(&received, b"ping");
+    driver.finish(server.write_all(b"pong")).unwrap();
+    driver.finish(upgraded.read_exact(&mut received)).unwrap();
+    assert_eq!(&received, b"pong");
+}
+
 // Use only the low-level API so this also checks CONNECT-UDP without the masque feature.
 #[test]
 fn h2_connect_udp_rejects_capsule_headers() {
@@ -756,6 +790,7 @@ fn h2_connect_udp_rejects_capsule_headers() {
         .body(Full::new(Bytes::new()))
         .unwrap();
     let (result, request, server) = proxy.exchange(&mut driver, &mut client, request, response);
+    assert_eq!(request.method(), Method::CONNECT);
     let protocol = request.extensions().get::<hyper::ext::Protocol>().unwrap();
     assert_eq!(protocol.as_str(), "connect-udp");
     assert!(result.is_err(), "{result:?}");
@@ -830,8 +865,11 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
     // Sends a CONNECT-UDP request that the proxy answers with `response`.
     let mut connect = |driver: &mut Driver, response: Response<Bytes>| {
         let request = connect_udp_request();
-        let (result, _request, server) =
+        let (result, request, server) =
             proxy.exchange(driver, &mut client, request, response.map(Full::new));
+        assert_eq!(request.method(), Method::CONNECT);
+        let protocol = request.extensions().get::<hyper::ext::Protocol>().unwrap();
+        assert_eq!(protocol.as_str(), "connect-udp");
         (result, server)
     };
 
@@ -1009,7 +1047,6 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
 fn h2_connect_udp_treats_raw_proxy_framing_as_malformed() {
     use std::future::poll_fn;
 
-    use futures_util::StreamExt as _;
     use netty::proxy::masque::{MasqueError, UdpTunnel};
 
     let mut driver = Driver::new();
