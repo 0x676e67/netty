@@ -57,7 +57,7 @@ pub struct Upgraded {
 /// A future for a possible HTTP upgrade.
 ///
 /// If no upgrade was available, or it doesn't succeed, yields an `Error`. Clones share one
-/// upgrade: the first to complete takes it, and the others yield an `Error`.
+/// upgrade, so await only one: once it is taken, a clone polled later yields an `Error`.
 #[derive(Clone)]
 pub struct OnUpgrade {
     rx: Option<Arc<Mutex<oneshot::Receiver<Result<Upgraded>>>>>,
