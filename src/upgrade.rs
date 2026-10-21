@@ -29,7 +29,7 @@ use std::{
     io,
     pin::Pin,
     sync::{Arc, Mutex},
-    task::{Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::Bytes;
@@ -56,11 +56,16 @@ pub struct Upgraded {
 
 /// A future for a possible HTTP upgrade.
 ///
-/// If no upgrade was available, or it doesn't succeed, yields an `Error`.
+/// If no upgrade was available, or it doesn't succeed, yields an `Error`. Clones share one
+/// upgrade: the first to complete takes it, and the others yield an `Error`.
 #[derive(Clone)]
 pub struct OnUpgrade {
-    rx: Option<Arc<Mutex<oneshot::Receiver<Result<Upgraded>>>>>,
+    rx: Option<UpgradeRx>,
 }
+
+/// The receiver shared by [`OnUpgrade`] clones; `None` once one took the result, since a spent
+/// receiver must not be polled again.
+type UpgradeRx = Arc<Mutex<Option<oneshot::Receiver<Result<Upgraded>>>>>;
 
 /// Gets a pending HTTP upgrade from this message.
 ///
@@ -84,7 +89,7 @@ pub(crate) fn pending() -> (Pending, OnUpgrade) {
     (
         Pending { tx },
         OnUpgrade {
-            rx: Some(Arc::new(Mutex::new(rx))),
+            rx: Some(Arc::new(Mutex::new(Some(rx)))),
         },
     )
 }
@@ -174,7 +179,14 @@ impl OnUpgrade {
     /// fulfilled upgrade in a task that has run out of it.
     #[cfg(feature = "masque")]
     pub(crate) fn take_fulfilled(self) -> Option<Upgraded> {
-        self.rx?.lock().ignore_poison().try_recv().ok()?.ok()
+        let rx = self.rx?;
+        let mut rx = rx.lock().ignore_poison();
+        let result = rx.as_mut()?.try_recv();
+        // Any outcome but `Empty` consumes the receiver.
+        if !matches!(result, Err(oneshot::error::TryRecvError::Empty)) {
+            *rx = None;
+        }
+        result.ok()?.ok()
     }
 }
 
@@ -182,18 +194,21 @@ impl Future for OnUpgrade {
     type Output = Result<Upgraded, Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.rx {
-            Some(ref rx) => {
-                Pin::new(&mut *rx.lock().ignore_poison())
-                    .poll(cx)
-                    .map(|res| match res {
-                        Ok(Ok(upgraded)) => Ok(upgraded),
-                        Ok(Err(err)) => Err(err),
-                        Err(_oneshot_canceled) => Err(Error::new_canceled().with(UpgradeExpected)),
-                    })
-            }
-            None => Poll::Ready(Err(Error::new_user_no_upgrade())),
-        }
+        let Some(rx) = &self.rx else {
+            return Poll::Ready(Err(Error::new_user_no_upgrade()));
+        };
+        let mut rx = rx.lock().ignore_poison();
+        // Another clone already took the upgrade.
+        let Some(receiver) = rx.as_mut() else {
+            return Poll::Ready(Err(Error::new_user_no_upgrade()));
+        };
+        let result = ready!(Pin::new(receiver).poll(cx));
+        *rx = None;
+        Poll::Ready(match result {
+            Ok(Ok(upgraded)) => Ok(upgraded),
+            Ok(Err(err)) => Err(err),
+            Err(_oneshot_canceled) => Err(Error::new_canceled().with(UpgradeExpected)),
+        })
     }
 }
 
@@ -424,6 +439,34 @@ mod rewind {
             stream.read_exact(&mut buf).await.expect("read1");
 
             assert_eq!(&buf, &underlying);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::Upgraded;
+
+    #[tokio::test]
+    async fn clones_share_one_upgrade() {
+        let upgraded = || Upgraded::new(tokio_test::io::Builder::new().build(), Bytes::new());
+
+        let (pending, on_upgrade) = super::pending();
+        let clone = on_upgrade.clone();
+        pending.fulfill(upgraded());
+        on_upgrade.await.unwrap();
+        // The other clone gets an error instead of polling a spent receiver.
+        assert!(clone.await.unwrap_err().is_user());
+
+        #[cfg(feature = "masque")]
+        {
+            let (pending, on_upgrade) = super::pending();
+            let clone = on_upgrade.clone();
+            pending.fulfill(upgraded());
+            assert!(on_upgrade.take_fulfilled().is_some());
+            assert!(clone.await.unwrap_err().is_user());
         }
     }
 }
