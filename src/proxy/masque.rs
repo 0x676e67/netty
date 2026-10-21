@@ -159,22 +159,22 @@ impl UdpTunnel {
     /// Opens the tunnel from this crate's HTTP/2 client's successful response to
     /// [`http2_request`].
     ///
-    /// A refusal is [`Unsuccessful`](MasqueError::Unsuccessful). The client opens a CONNECT-UDP
-    /// tunnel only on status 200, so any other success is
-    /// [`InvalidResponse`](MasqueError::InvalidResponse): another 2xx, an HTTP/1.1 response (a
-    /// TCP tunnel) or another CONNECT's. A success response that breaks the Capsule Protocol is
-    /// malformed (RFC 9297 §3.2): the client resets its stream with `PROTOCOL_ERROR` and fails the
-    /// request instead. A refused response keeps its headers, body and upgrade for the caller.
+    /// A refusal is [`Unsuccessful`](MasqueError::Unsuccessful). A success that is not the
+    /// client's CONNECT-UDP tunnel is [`InvalidResponse`](MasqueError::InvalidResponse): an
+    /// HTTP/1.1 response (a TCP tunnel), another CONNECT's, or one whose upgrade was already taken.
+    /// A success response that breaks the Capsule Protocol is malformed (RFC 9297 §3.2): the
+    /// client resets its stream with `PROTOCOL_ERROR` and fails the request instead. A refused
+    /// response keeps its headers, body and upgrade for the caller.
     pub fn from_http2<B>(response: &mut Response<B>) -> Result<Self, MasqueError> {
         validate(response)?;
-        let reset = response
-            .extensions_mut()
-            .remove::<StreamReset>()
-            .ok_or(MasqueError::InvalidResponse)?;
-        let control = crate::upgrade::on(response)
+        if response.extensions().get::<StreamReset>().is_none() {
+            return Err(MasqueError::InvalidResponse);
+        }
+        let control = crate::upgrade::on(&mut *response)
             .take_fulfilled()
             .ok_or(MasqueError::InvalidResponse)?;
-        Ok(UdpTunnel::new(control, None, Some(reset)))
+        let reset = response.extensions_mut().remove::<StreamReset>();
+        Ok(UdpTunnel::new(control, None, reset))
     }
 }
 

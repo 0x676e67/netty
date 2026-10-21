@@ -22,7 +22,7 @@ use futures_util::{
     stream::{FusedStream, Stream},
     task::AtomicWaker,
 };
-use http::{Method, Request, Response, StatusCode};
+use http::{Method, Request, Response};
 use http_body::Body;
 use http2::{
     SendStream,
@@ -751,7 +751,9 @@ where
                 }
 
                 let content_length = headers::content_length_parse_all(res.headers());
-                if let (Some(mut send_stream), StatusCode::OK) = (send_stream, res.status()) {
+                // Any 2xx opens the tunnel.
+                // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.5
+                if let Some(mut send_stream) = send_stream.filter(|_| res.status().is_success()) {
                     if content_length.is_some_and(|len| len != 0) {
                         warn!("h2 connect response with non-zero body not supported");
 
