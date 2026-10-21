@@ -362,7 +362,7 @@ impl Client {
             }
             // Any 2xx to CONNECT switches to tunnel mode, 204 included.
             // https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
-            204 if *method == Some(Method::CONNECT) => {
+            200..=299 if *method == Some(Method::CONNECT) => {
                 return Ok(Some((DecodedLength::ZERO, true)));
             }
             204 | 304 => return Ok(Some((DecodedLength::ZERO, false))),
@@ -371,11 +371,6 @@ impl Client {
         match *method {
             Some(Method::HEAD) => {
                 return Ok(Some((DecodedLength::ZERO, false)));
-            }
-            Some(Method::CONNECT) => {
-                if let 200..=299 = inc.subject.as_u16() {
-                    return Ok(Some((DecodedLength::ZERO, true)));
-                }
             }
             Some(_) => {}
             None => {
