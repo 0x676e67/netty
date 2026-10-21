@@ -733,8 +733,8 @@ async fn h2_connect_reset_during_backpressure() {
 
 // Any 2xx to CONNECT opens the tunnel, not only 200. Neither it nor a 1xx before it has content,
 // so the client ignores their content-length and relays what follows as tunneled data. Hyper
-// drops or refuses the header on a 2xx to CONNECT and cannot send a 1xx over HTTP/2, so a bare
-// h2 server plays the proxy.
+// drops or refuses the header on a 2xx to CONNECT and cannot send a 1xx before the final
+// response, so a bare h2 server plays the proxy.
 // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.5
 // https://www.rfc-editor.org/rfc/rfc9110.html#section-8.6
 // https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
