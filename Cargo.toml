@@ -145,4 +145,4 @@ incremental = false
 [patch.crates-io]
 # Remove once an http2 release includes `Connection::extended_connect_protocol` and ignores
 # content-length on 2xx responses to CONNECT.
-http2 = { git = "https://github.com/0x676e67/http2", rev = "2a711f1241cb5c9dc77fa0875ab718759c518f31" }
+http2 = { git = "https://github.com/0x676e67/http2", rev = "66e647684db3672bba389dfa2c693b8d67354d43" }
