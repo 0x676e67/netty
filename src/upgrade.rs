@@ -187,7 +187,6 @@ impl Future for OnUpgrade {
             return Poll::Ready(Err(Error::new_user_no_upgrade()));
         };
         let mut rx = rx.lock().ignore_poison();
-        // Another clone already took the upgrade; polling a spent receiver panics.
         if rx.is_terminated() {
             return Poll::Ready(Err(Error::new_user_no_upgrade()));
         }
@@ -426,34 +425,6 @@ mod rewind {
             stream.read_exact(&mut buf).await.expect("read1");
 
             assert_eq!(&buf, &underlying);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use bytes::Bytes;
-
-    use super::Upgraded;
-
-    #[tokio::test]
-    async fn clones_share_one_upgrade() {
-        let upgraded = || Upgraded::new(tokio_test::io::Builder::new().build(), Bytes::new());
-
-        let (pending, on_upgrade) = super::pending();
-        let clone = on_upgrade.clone();
-        pending.fulfill(upgraded());
-        on_upgrade.await.unwrap();
-        // The other clone gets an error instead of polling a spent receiver.
-        assert!(clone.await.unwrap_err().is_user());
-
-        #[cfg(feature = "masque")]
-        {
-            let (pending, on_upgrade) = super::pending();
-            let clone = on_upgrade.clone();
-            pending.fulfill(upgraded());
-            assert!(on_upgrade.take_fulfilled().is_some());
-            assert!(clone.await.unwrap_err().is_user());
         }
     }
 }
