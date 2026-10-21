@@ -15,7 +15,7 @@ use hyper::service::service_fn;
 use netty::{
     conn::{TrySendError, http2},
     rt::Executor as _,
-    upgrade::Upgraded,
+    upgrade::{OnUpgrade, Upgraded},
 };
 use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, DuplexStream};
 use tokio_test::{assert_pending, assert_ready, task};
@@ -731,10 +731,11 @@ async fn h2_connect_reset_during_backpressure() {
     );
 }
 
-// Any 2xx to CONNECT opens the tunnel, not only 200. Such a response has no content, so the
-// client ignores its content-length and relays what follows as tunneled data. Hyper drops the
-// header on these responses, so a bare h2 server plays the proxy.
+// Any 2xx to CONNECT opens the tunnel, not only 200. Neither it nor a 1xx before it has content,
+// so the client ignores their content-length and relays what follows as tunneled data. Hyper
+// drops or refuses the header on these responses, so a bare h2 server plays the proxy.
 // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.5
+// https://www.rfc-editor.org/rfc/rfc9110.html#section-8.6
 // https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
 #[test]
 fn h2_connect_2xx_opens_tunnel() {
@@ -752,30 +753,55 @@ fn h2_connect_2xx_opens_tunnel() {
     });
     driver.run();
 
-    for (status, length) in [(202, None), (200, Some("0")), (202, Some("5"))] {
+    // (content-length of a 103 before the final response, final status, final content-length)
+    for (early, status, length) in [
+        (None, 202, None),
+        (None, 200, Some("0")),
+        (None, 202, Some("5")),
+        (Some("2"), 200, None),
+    ] {
+        let case = format!("{early:?} {status} {length:?}");
         let request = Request::connect("localhost:443")
             .body(Empty::<Bytes>::new())
             .unwrap();
         let mut sending = task::spawn(client.try_send_request(request));
         assert_pending!(driver.poll(&mut sending));
-        let (mut request, mut respond) = driver.finish(requests.next()).unwrap();
+        let (mut request, mut respond) = driver.finish(requests.next()).expect(&case);
+        if let Some(length) = early {
+            let early = Response::builder()
+                .status(StatusCode::EARLY_HINTS)
+                .header("content-length", length)
+                .body(())
+                .unwrap();
+            respond.send_informational(early).expect(&case);
+        }
         let mut response = Response::builder().status(status);
         if let Some(length) = length {
             response = response.header("content-length", length);
         }
         let response = response.body(()).unwrap();
-        let mut send = respond.send_response(response, false).unwrap();
-        let mut response = assert_ready!(driver.poll(&mut sending)).unwrap();
-        let mut upgraded = driver.finish(netty::upgrade::on(&mut response)).unwrap();
+        let mut send = respond.send_response(response, false).expect(&case);
+        let mut response = assert_ready!(driver.poll(&mut sending)).expect(&case);
+        let clone = response
+            .extensions()
+            .get::<OnUpgrade>()
+            .cloned()
+            .expect(&case);
+        let mut upgraded = driver
+            .finish(netty::upgrade::on(&mut response))
+            .expect(&case);
+        assert!(driver.finish(clone).unwrap_err().is_user(), "{case}");
 
         send.send_data(Bytes::from_static(b"tunneled"), false)
-            .unwrap();
+            .expect(&case);
         let mut received = [0; 8];
-        driver.finish(upgraded.read_exact(&mut received)).unwrap();
-        assert_eq!(&received, b"tunneled", "{status} {length:?}");
-        driver.finish(upgraded.write_all(b"ping")).unwrap();
-        let data = driver.finish(request.body_mut().data()).unwrap().unwrap();
-        assert_eq!(data, "ping", "{status} {length:?}");
+        driver
+            .finish(upgraded.read_exact(&mut received))
+            .expect(&case);
+        assert_eq!(&received, b"tunneled", "{case}");
+        driver.finish(upgraded.write_all(b"ping")).expect(&case);
+        let data = driver.finish(request.body_mut().data()).expect(&case);
+        assert_eq!(data.expect(&case), "ping", "{case}");
     }
 }
 
