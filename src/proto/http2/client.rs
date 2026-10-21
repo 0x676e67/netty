@@ -750,19 +750,11 @@ where
                     )));
                 }
 
-                let content_length = headers::content_length_parse_all(res.headers());
-                // Any 2xx opens the tunnel.
+                // Any 2xx opens the tunnel, and its content-length is ignored: the response has
+                // no content, and what follows is tunneled data.
                 // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.5
-                if let Some(mut send_stream) = send_stream.filter(|_| res.status().is_success()) {
-                    if content_length.is_some_and(|len| len != 0) {
-                        warn!("h2 connect response with non-zero body not supported");
-
-                        send_stream.send_reset(http2::Reason::INTERNAL_ERROR);
-                        return Poll::Ready(Err((
-                            Error::new_h2(http2::Reason::INTERNAL_ERROR.into()),
-                            None::<Request<B>>,
-                        )));
-                    }
+                // https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
+                if let Some(send_stream) = send_stream.filter(|_| res.status().is_success()) {
                     let (parts, recv_stream) = res.into_parts();
                     let mut res = Response::from_parts(parts, Incoming::empty());
 
@@ -783,6 +775,7 @@ where
 
                     Poll::Ready(Ok(res))
                 } else {
+                    let content_length = headers::content_length_parse_all(res.headers());
                     let res = res.map(|stream| {
                         let ping = ping.for_stream(&stream);
                         Incoming::h2(stream, content_length.into(), ping)

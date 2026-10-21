@@ -765,6 +765,53 @@ fn h2_connect_any_2xx_opens_tunnel() {
     assert_eq!(&received, b"pong");
 }
 
+// A 2xx to CONNECT has no content, so the client ignores its content-length and relays what
+// follows as tunneled data. Hyper drops the header on such responses, so a bare h2 server plays
+// the proxy.
+// https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
+#[test]
+fn h2_connect_2xx_ignores_content_length() {
+    let mut driver = Driver::new();
+    let (mut client, conn, server_io) = driver.handshake(Default::default());
+    driver.spawn(async move {
+        let _ = conn.await;
+    });
+    let (requests_tx, mut requests) = futures_channel::mpsc::unbounded();
+    driver.spawn(async move {
+        let mut server = h2::server::handshake(server_io).await.unwrap();
+        while let Some(Ok(request)) = server.accept().await {
+            requests_tx.unbounded_send(request).unwrap();
+        }
+    });
+    driver.run();
+
+    for (status, length) in [(200, "0"), (202, "5")] {
+        let request = Request::connect("localhost:443")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let mut sending = task::spawn(client.try_send_request(request));
+        assert_pending!(driver.poll(&mut sending));
+        let (mut request, mut respond) = driver.finish(requests.next()).unwrap();
+        let response = Response::builder()
+            .status(status)
+            .header("content-length", length)
+            .body(())
+            .unwrap();
+        let mut send = respond.send_response(response, false).unwrap();
+        let mut response = assert_ready!(driver.poll(&mut sending)).unwrap();
+        let mut upgraded = driver.finish(netty::upgrade::on(&mut response)).unwrap();
+
+        send.send_data(Bytes::from_static(b"tunneled"), false)
+            .unwrap();
+        let mut received = [0; 8];
+        driver.finish(upgraded.read_exact(&mut received)).unwrap();
+        assert_eq!(&received, b"tunneled", "{status}");
+        driver.finish(upgraded.write_all(b"ping")).unwrap();
+        let data = driver.finish(request.body_mut().data()).unwrap().unwrap();
+        assert_eq!(data, "ping", "{status}");
+    }
+}
+
 // Use only the low-level API so this also checks CONNECT-UDP without the masque feature.
 #[test]
 fn h2_connect_udp_rejects_capsule_headers() {

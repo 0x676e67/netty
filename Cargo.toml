@@ -143,5 +143,6 @@ codegen-units = 1
 incremental = false
 
 [patch.crates-io]
-# Remove once an http2 release includes `Connection::extended_connect_protocol`.
-http2 = { git = "https://github.com/0x676e67/http2", rev = "c932fc91f3139f5613a579b7b11df2860d66745c" }
+# Remove once an http2 release includes `Connection::extended_connect_protocol` and ignores
+# content-length on 2xx responses to CONNECT.
+http2 = { git = "https://github.com/0x676e67/http2", rev = "2a711f1241cb5c9dc77fa0875ab718759c518f31" }
