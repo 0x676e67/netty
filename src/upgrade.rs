@@ -29,7 +29,7 @@ use std::{
     io,
     pin::Pin,
     sync::{Arc, Mutex},
-    task::{Context, Poll, ready},
+    task::{Context, Poll},
 };
 
 use bytes::Bytes;
@@ -60,12 +60,8 @@ pub struct Upgraded {
 /// upgrade: the first to complete takes it, and the others yield an `Error`.
 #[derive(Clone)]
 pub struct OnUpgrade {
-    rx: Option<UpgradeRx>,
+    rx: Option<Arc<Mutex<oneshot::Receiver<Result<Upgraded>>>>>,
 }
-
-/// The receiver shared by [`OnUpgrade`] clones; `None` once one took the result, since a spent
-/// receiver must not be polled again.
-type UpgradeRx = Arc<Mutex<Option<oneshot::Receiver<Result<Upgraded>>>>>;
 
 /// Gets a pending HTTP upgrade from this message.
 ///
@@ -89,7 +85,7 @@ pub(crate) fn pending() -> (Pending, OnUpgrade) {
     (
         Pending { tx },
         OnUpgrade {
-            rx: Some(Arc::new(Mutex::new(Some(rx)))),
+            rx: Some(Arc::new(Mutex::new(rx))),
         },
     )
 }
@@ -179,14 +175,7 @@ impl OnUpgrade {
     /// fulfilled upgrade in a task that has run out of it.
     #[cfg(feature = "masque")]
     pub(crate) fn take_fulfilled(self) -> Option<Upgraded> {
-        let rx = self.rx?;
-        let mut rx = rx.lock().ignore_poison();
-        let result = rx.as_mut()?.try_recv();
-        // Any outcome but `Empty` consumes the receiver.
-        if !matches!(result, Err(oneshot::error::TryRecvError::Empty)) {
-            *rx = None;
-        }
-        result.ok()?.ok()
+        self.rx?.lock().ignore_poison().try_recv().ok()?.ok()
     }
 }
 
@@ -198,13 +187,11 @@ impl Future for OnUpgrade {
             return Poll::Ready(Err(Error::new_user_no_upgrade()));
         };
         let mut rx = rx.lock().ignore_poison();
-        // Another clone already took the upgrade.
-        let Some(receiver) = rx.as_mut() else {
+        // Another clone already took the upgrade; polling a spent receiver panics.
+        if rx.is_terminated() {
             return Poll::Ready(Err(Error::new_user_no_upgrade()));
-        };
-        let result = ready!(Pin::new(receiver).poll(cx));
-        *rx = None;
-        Poll::Ready(match result {
+        }
+        Pin::new(&mut *rx).poll(cx).map(|res| match res {
             Ok(Ok(upgraded)) => Ok(upgraded),
             Ok(Err(err)) => Err(err),
             Err(_oneshot_canceled) => Err(Error::new_canceled().with(UpgradeExpected)),
