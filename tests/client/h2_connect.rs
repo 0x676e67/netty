@@ -8,11 +8,15 @@ use std::{
 
 use bytes::Bytes;
 use futures_channel::oneshot;
-use futures_util::future::BoxFuture;
+use futures_util::{StreamExt as _, future::BoxFuture};
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::service::service_fn;
-use netty::{conn::http2, rt::Executor as _, upgrade::Upgraded};
+use netty::{
+    conn::{TrySendError, http2},
+    rt::Executor as _,
+    upgrade::Upgraded,
+};
 use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, DuplexStream};
 use tokio_test::{assert_pending, assert_ready, task};
 
@@ -31,6 +35,17 @@ struct Driver {
     rx: mpsc::Receiver<BoxFuture<'static, ()>>,
     tasks: Vec<task::Spawn<BoxFuture<'static, ()>>>,
 }
+
+/// A request the proxy received, the sender of its response, and its upgrade.
+type Accepted = (
+    Request<hyper::body::Incoming>,
+    oneshot::Sender<Response<Full<Bytes>>>,
+    hyper::upgrade::OnUpgrade,
+);
+
+/// A Hyper HTTP/2 server playing the proxy at the far end of a driver's pipe; the test answers
+/// each request it receives.
+struct HyperProxy(futures_channel::mpsc::UnboundedReceiver<Accepted>);
 
 // ===== impl Executor =====
 
@@ -130,6 +145,71 @@ impl Driver {
     }
 }
 
+// ===== impl HyperProxy =====
+
+impl HyperProxy {
+    /// Serves `io` on `driver`, with `configure` setting up the Hyper builder.
+    fn spawn(
+        driver: &Driver,
+        io: DuplexStream,
+        configure: impl FnOnce(&mut hyper::server::conn::http2::Builder<Executor>),
+    ) -> Self {
+        let (tx, rx) = futures_channel::mpsc::unbounded();
+        let service = service_fn(move |mut request: Request<hyper::body::Incoming>| {
+            let upgrade = hyper::upgrade::on(&mut request);
+            let (respond, response) = oneshot::channel();
+            tx.unbounded_send((request, respond, upgrade)).unwrap();
+            async move { Ok::<_, Infallible>(response.await.unwrap()) }
+        });
+        let mut builder = hyper::server::conn::http2::Builder::new(driver.executor.clone());
+        configure(&mut builder);
+        driver.spawn(async move {
+            builder
+                .serve_connection(TokioIo::new(io), service)
+                .await
+                .unwrap();
+        });
+        Self(rx)
+    }
+
+    /// Sends `request` and answers it with `response`. Returns the client's result, the request
+    /// as the proxy saw it, and the proxy's end of a successful upgrade.
+    fn exchange(
+        &mut self,
+        driver: &mut Driver,
+        client: &mut http2::SendRequest<Empty<Bytes>>,
+        request: Request<Empty<Bytes>>,
+        response: Response<Full<Bytes>>,
+    ) -> (
+        Result<Response<netty::body::Incoming>, TrySendError<Request<Empty<Bytes>>>>,
+        Request<hyper::body::Incoming>,
+        Option<TokioIo<hyper::upgrade::Upgraded>>,
+    ) {
+        let success = response.status().is_success();
+        let mut sending = task::spawn(client.try_send_request(request));
+        assert_pending!(driver.poll(&mut sending));
+        let (request, respond, upgrade) = driver.finish(self.0.next()).unwrap();
+        respond.send(response).unwrap();
+        let server = success.then(|| TokioIo::new(driver.finish(upgrade).unwrap()));
+        (assert_ready!(driver.poll(&mut sending)), request, server)
+    }
+}
+
+/// The code the client reset the proxy's upgraded stream with. Hyper's reader maps `CANCEL` to
+/// EOF, so this reads the code from a write's error.
+fn proxy_reset(driver: &mut Driver, server: &mut TokioIo<hyper::upgrade::Upgraded>) -> h2::Reason {
+    driver.run();
+    let error = driver.finish(server.write_all(b"after-reset")).unwrap_err();
+    let mut source = std::error::Error::source(&error);
+    while let Some(error) = source {
+        if let Some(error) = error.downcast_ref::<h2::Error>() {
+            return error.reason().unwrap();
+        }
+        source = error.source();
+    }
+    panic!("reset without an h2 reason: {error:?}");
+}
+
 fn extended_connect(path: &str) -> Request<Empty<Bytes>> {
     let mut request = Request::connect(format!("https://localhost:443{path}"))
         .body(Empty::<Bytes>::new())
@@ -173,49 +253,17 @@ fn connect_request(
     http2::SendRequest<Empty<Bytes>>,
 ) {
     let mut driver = Driver::new();
-    let executor = driver.executor.clone();
-    let (server_tx, server_rx) = oneshot::channel();
-    let server_tx = std::sync::Mutex::new(Some(server_tx));
-    let upgrade_executor = executor.clone();
-    let service = service_fn(move |request: Request<hyper::body::Incoming>| {
-        assert_eq!(request.method(), http::Method::CONNECT);
-        if enable_connect_protocol {
-            assert_eq!(
-                request
-                    .extensions()
-                    .get::<hyper::ext::Protocol>()
-                    .unwrap()
-                    .as_str(),
-                "websocket"
-            );
-            assert_eq!(request.uri().scheme_str(), Some("https"));
-            assert_eq!(request.uri().authority().unwrap(), "localhost:443");
-            assert_eq!(request.uri().path_and_query().unwrap(), "/chat?room=1");
-        }
-        let upgrade = hyper::upgrade::on(request);
-        let tx = server_tx.lock().unwrap().take().unwrap();
-        upgrade_executor.execute(async move {
-            tx.send(upgrade.await.unwrap()).unwrap();
-        });
-        async { Ok::<_, std::convert::Infallible>(Response::new(Empty::<Bytes>::new())) }
-    });
-    let server_executor = executor.clone();
     let (mut client, conn, server_io) = driver.handshake(
         netty::http2::Http2Options::builder()
             .initial_window_size(1024)
             .build(),
     );
     assert!(!conn.is_extended_connect_protocol_enabled());
-    driver.spawn(async move {
-        let mut builder = hyper::server::conn::http2::Builder::new(server_executor);
+    let mut proxy = HyperProxy::spawn(&driver, server_io, |builder| {
         builder.initial_stream_window_size(1024);
         if enable_connect_protocol {
             builder.enable_connect_protocol();
         }
-        builder
-            .serve_connection(TokioIo::new(server_io), service)
-            .await
-            .unwrap();
     });
     driver.run();
     assert_eq!(
@@ -225,11 +273,20 @@ fn connect_request(
     driver.spawn(async move {
         conn.await.unwrap();
     });
-    let response = driver.finish(client.try_send_request(request)).unwrap();
+    let empty = Response::new(Full::new(Bytes::new()));
+    let (response, request, server) = proxy.exchange(&mut driver, &mut client, request, empty);
+    assert_eq!(request.method(), Method::CONNECT);
+    if enable_connect_protocol {
+        let protocol = request.extensions().get::<hyper::ext::Protocol>().unwrap();
+        assert_eq!(protocol.as_str(), "websocket");
+        assert_eq!(request.uri().scheme_str(), Some("https"));
+        assert_eq!(request.uri().authority().unwrap(), "localhost:443");
+        assert_eq!(request.uri().path_and_query().unwrap(), "/chat?room=1");
+    }
+    let response = response.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let upgraded = driver.finish(netty::upgrade::on(response)).unwrap();
-    let server = TokioIo::new(driver.finish(server_rx).unwrap());
-    (driver, upgraded, server, client)
+    (driver, upgraded, server.unwrap(), client)
 }
 
 #[tokio::test]
@@ -678,36 +735,9 @@ async fn h2_connect_reset_during_backpressure() {
 #[test]
 fn h2_connect_udp_rejects_capsule_headers() {
     let mut driver = Driver::new();
-    let executor = driver.executor.clone();
-    let (server_tx, server_rx) = oneshot::channel();
-    let server_tx = Mutex::new(Some(server_tx));
-    let upgrade_executor = executor.clone();
-    let service = service_fn(move |request: Request<hyper::body::Incoming>| {
-        assert_eq!(request.method(), Method::CONNECT);
-        let protocol = request.extensions().get::<hyper::ext::Protocol>().unwrap();
-        assert_eq!(protocol.as_str(), "connect-udp");
-        let upgrade = hyper::upgrade::on(request);
-        let tx = server_tx.lock().unwrap().take().unwrap();
-        upgrade_executor.execute(async move {
-            tx.send(upgrade.await.unwrap()).unwrap();
-        });
-        async {
-            Ok::<_, Infallible>(
-                Response::builder()
-                    .header("content-type", "application/octet-stream")
-                    .body(Empty::<Bytes>::new())
-                    .unwrap(),
-            )
-        }
-    });
     let (mut client, conn, server_io) = driver.handshake(Default::default());
-    driver.spawn(async move {
-        let mut builder = hyper::server::conn::http2::Builder::new(executor);
+    let mut proxy = HyperProxy::spawn(&driver, server_io, |builder| {
         builder.enable_connect_protocol();
-        builder
-            .serve_connection(TokioIo::new(server_io), service)
-            .await
-            .unwrap();
     });
     driver.spawn(async move {
         let _ = conn.await;
@@ -721,20 +751,16 @@ fn h2_connect_udp_rejects_capsule_headers() {
     request
         .extensions_mut()
         .insert(::http2::ext::Protocol::from_static("connect-udp"));
-    let result = driver.finish(client.try_send_request(request));
+    let response = Response::builder()
+        .header("content-type", "application/octet-stream")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let (result, request, server) = proxy.exchange(&mut driver, &mut client, request, response);
+    let protocol = request.extensions().get::<hyper::ext::Protocol>().unwrap();
+    assert_eq!(protocol.as_str(), "connect-udp");
     assert!(result.is_err(), "{result:?}");
-
-    let mut server = TokioIo::new(driver.finish(server_rx).unwrap());
-    let error = driver.finish(server.write_all(b"after-reset")).unwrap_err();
-    let mut source = std::error::Error::source(&error);
-    while let Some(error) = source {
-        if let Some(error) = error.downcast_ref::<h2::Error>() {
-            assert_eq!(error.reason(), Some(h2::Reason::PROTOCOL_ERROR));
-            return;
-        }
-        source = error.source();
-    }
-    panic!("reset without an h2 reason: {error:?}");
+    let reason = proxy_reset(&mut driver, &mut server.unwrap());
+    assert_eq!(reason, h2::Reason::PROTOCOL_ERROR);
 }
 
 #[cfg(feature = "masque")]
@@ -743,43 +769,30 @@ async fn h2_connect_udp_carries_capsules() {
     use netty::proxy::masque::UdpTunnel;
 
     let mut driver = Driver::new();
-    let executor = driver.executor.clone();
-    let (server_tx, server_rx) = oneshot::channel();
-    let server_tx = Mutex::new(Some(server_tx));
-    let upgrade_executor = executor.clone();
-    let service = service_fn(move |request: Request<hyper::body::Incoming>| {
-        assert_eq!(request.method(), Method::CONNECT);
-        let protocol = request.extensions().get::<hyper::ext::Protocol>().unwrap();
-        assert_eq!(protocol.as_str(), "connect-udp");
-        assert_eq!(request.uri(), "https://localhost:443/masque/192.0.2.1/53/");
-        assert_eq!(request.headers()["capsule-protocol"], "?1");
-        let upgrade = hyper::upgrade::on(request);
-        let tx = server_tx.lock().unwrap().take().unwrap();
-        upgrade_executor.execute(async move {
-            tx.send(upgrade.await.unwrap()).unwrap();
-        });
-        async { Ok::<_, Infallible>(Response::new(Empty::<Bytes>::new())) }
-    });
     let (mut client, conn, server_io) =
         driver.handshake(netty::http2::Http2Options::builder().build());
-    driver.spawn(async move {
-        let mut builder = hyper::server::conn::http2::Builder::new(executor);
+    let mut proxy = HyperProxy::spawn(&driver, server_io, |builder| {
         builder.enable_connect_protocol();
-        builder
-            .serve_connection(TokioIo::new(server_io), service)
-            .await
-            .unwrap();
     });
     driver.run();
     driver.spawn(async move {
         conn.await.unwrap();
     });
 
-    let mut response = driver
-        .finish(client.try_send_request(connect_udp_request()))
+    // Any 2xx opens the tunnel, not just 200 (RFC 9298 §3.5).
+    let accepted = Response::builder()
+        .status(StatusCode::ACCEPTED)
+        .body(Full::new(Bytes::new()))
         .unwrap();
-    let mut tunnel = UdpTunnel::from_http2(&mut response).unwrap();
-    let mut server = TokioIo::new(driver.finish(server_rx).unwrap());
+    let (response, request, server) =
+        proxy.exchange(&mut driver, &mut client, connect_udp_request(), accepted);
+    assert_eq!(request.method(), Method::CONNECT);
+    let protocol = request.extensions().get::<hyper::ext::Protocol>().unwrap();
+    assert_eq!(protocol.as_str(), "connect-udp");
+    assert_eq!(request.uri(), "https://localhost:443/masque/192.0.2.1/53/");
+    assert_eq!(request.headers()["capsule-protocol"], "?1");
+    let mut tunnel = UdpTunnel::from_http2(&mut response.unwrap()).unwrap();
+    let mut server = server.unwrap();
     assert_eq!(tunnel.max_payload_size(), 65527);
     tunnel.try_send(b"ping").unwrap();
     let mut capsule = [0; 7];
@@ -799,7 +812,6 @@ async fn h2_connect_udp_carries_capsules() {
 fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
     use std::{future::poll_fn, pin::Pin};
 
-    use futures_util::StreamExt as _;
     use netty::proxy::masque::{self, MasqueError, UdpTunnel};
 
     let mut driver = Driver::new();
@@ -807,55 +819,20 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
     driver.spawn(async move {
         let _ = conn.await;
     });
-    // Hyper hands out each upgrade while its connection keeps running.
-    let (requests_tx, mut requests) = futures_channel::mpsc::unbounded();
-    let service = service_fn(move |mut request: Request<hyper::body::Incoming>| {
-        let upgrade = hyper::upgrade::on(&mut request);
-        let (response_tx, response_rx) = oneshot::channel();
-        requests_tx
-            .unbounded_send((request, response_tx, upgrade))
-            .unwrap();
-        async move { Ok::<_, Infallible>(response_rx.await.unwrap()) }
-    });
-    let executor = driver.executor.clone();
-    driver.spawn(async move {
-        let mut builder = hyper::server::conn::http2::Builder::new(executor);
+    let mut proxy = HyperProxy::spawn(&driver, server_io, |builder| {
         builder
             .enable_connect_protocol()
             .initial_stream_window_size(16);
-        builder
-            .serve_connection(TokioIo::new(server_io), service)
-            .await
-            .unwrap();
     });
     driver.run();
     let idle = driver.tasks.len();
 
     // Sends a CONNECT-UDP request that the proxy answers with `response`.
     let mut connect = |driver: &mut Driver, response: Response<Bytes>| {
-        let success = response.status().is_success();
-        let mut sending = task::spawn(client.try_send_request(connect_udp_request()));
-        assert_pending!(driver.poll(&mut sending));
-        let (request, respond, upgrade) = driver.finish(requests.next()).unwrap();
-        assert_eq!(request.method(), Method::CONNECT);
-        let protocol = request.extensions().get::<hyper::ext::Protocol>().unwrap();
-        assert_eq!(protocol.as_str(), "connect-udp");
-        respond.send(response.map(Full::new)).unwrap();
-        let server = success.then(|| TokioIo::new(driver.finish(upgrade).unwrap()));
-        (assert_ready!(driver.poll(&mut sending)), server)
-    };
-    // Hyper's upgraded reader maps CANCEL to EOF, so observe the reason on its writer.
-    let reset = |driver: &mut Driver, server: &mut TokioIo<hyper::upgrade::Upgraded>| {
-        driver.run();
-        let error = driver.finish(server.write_all(b"after-reset")).unwrap_err();
-        let mut source = std::error::Error::source(&error);
-        while let Some(error) = source {
-            if let Some(error) = error.downcast_ref::<h2::Error>() {
-                return error.reason().unwrap();
-            }
-            source = error.source();
-        }
-        panic!("reset without an h2 reason: {error:?}");
+        let request = connect_udp_request();
+        let (result, _request, server) =
+            proxy.exchange(driver, &mut client, request, response.map(Full::new));
+        (result, server)
     };
 
     // A success that breaks the Capsule Protocol is malformed (RFC 9297 §3.2).
@@ -871,7 +848,7 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
         let mut server = server.unwrap();
         assert!(result.is_err(), "{status} {header:?}");
         assert_eq!(
-            reset(&mut driver, &mut server),
+            proxy_reset(&mut driver, &mut server),
             h2::Reason::PROTOCOL_ERROR,
             "{status} {header:?}"
         );
@@ -921,7 +898,7 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
             drop(tunnel);
         }
         assert_eq!(
-            reset(&mut driver, &mut server),
+            proxy_reset(&mut driver, &mut server),
             h2::Reason::PROTOCOL_ERROR,
             "{close}"
         );
@@ -957,7 +934,7 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
         driver.run();
     }
     drop(tunnel);
-    assert_eq!(reset(&mut driver, &mut server), h2::Reason::CANCEL);
+    assert_eq!(proxy_reset(&mut driver, &mut server), h2::Reason::CANCEL);
     assert_eq!(driver.tasks.len(), idle, "a send task outlived its tunnel");
 
     // Hyper ends its side before it abandons the request and resets with NO_ERROR. The client
@@ -998,21 +975,22 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
         .finish(poll_fn(|cx| Pin::new(&mut io).poll_shutdown(cx)))
         .unwrap();
     drop(io);
-    assert_eq!(reset(&mut driver, &mut server), h2::Reason::CANCEL);
+    assert_eq!(proxy_reset(&mut driver, &mut server), h2::Reason::CANCEL);
     assert_eq!(driver.tasks.len(), idle, "a send task outlived its IO");
     drop(response);
 
     // Other Extended CONNECT protocols keep their rules: Content-Type is no reason to reset.
-    let mut sending = task::spawn(client.try_send_request(extended_connect("/chat")));
-    assert_pending!(driver.poll(&mut sending));
-    let (_request, respond, upgrade) = driver.finish(requests.next()).unwrap();
     let response = Response::builder()
         .header("content-type", "application/octet-stream")
         .body(Full::new(Bytes::new()))
         .unwrap();
-    respond.send(response).unwrap();
-    let _server = driver.finish(upgrade).unwrap();
-    let mut response = assert_ready!(driver.poll(&mut sending)).unwrap();
+    let (response, _request, _server) = proxy.exchange(
+        &mut driver,
+        &mut client,
+        extended_connect("/chat"),
+        response,
+    );
+    let mut response = response.unwrap();
     // Even with valid framing, `UdpTunnel` refuses it and leaves the upgrade to the caller.
     response.headers_mut().remove("content-type");
     let result = UdpTunnel::from_http2(&mut response);

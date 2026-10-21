@@ -104,7 +104,7 @@ pin_project! {
 
 /// The `:protocol` of a CONNECT-UDP request
 /// ([RFC 9298 §3.4](https://www.rfc-editor.org/rfc/rfc9298.html#section-3.4)); with MASQUE, its
-/// 200 response carries a [`StreamReset`].
+/// 2xx response carries a [`StreamReset`].
 pub(crate) const CONNECT_UDP: &str = "connect-udp";
 
 /// Resets an upgraded CONNECT stream with a chosen code. MASQUE resets with `PROTOCOL_ERROR` on
