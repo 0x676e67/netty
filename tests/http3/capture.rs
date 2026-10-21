@@ -18,30 +18,46 @@ struct State {
     changed: AtomicWaker,
 }
 
-pub struct Connection {
-    inner: h3_quinn::Connection,
-    capture: Capture,
-}
-
-pub struct RecvStream {
-    inner: h3_quinn::RecvStream,
+pub struct Connection<T> {
+    inner: T,
     capture: Capture,
 }
 
 // ===== impl Capture =====
 
 impl Capture {
-    pub fn connection(&self, connection: quinn::Connection) -> Connection {
+    pub fn connection(&self, connection: quinn::Connection) -> Connection<h3_quinn::Connection> {
+        self.wrap(h3_quinn::Connection::new(connection))
+    }
+
+    fn wrap<T>(&self, inner: T) -> Connection<T> {
         Connection {
-            inner: h3_quinn::Connection::new(connection),
+            inner,
             capture: self.clone(),
         }
+    }
+
+    pub fn header_names(&self, stream_id: u64) -> Vec<String> {
+        let streams = self.0.streams.lock().unwrap();
+        let mut bytes = streams.get(&stream_id).expect("captured request").as_ref();
+        assert_eq!(varint(&mut bytes), Some(1), "HEADERS must be first");
+        let len = usize::try_from(varint(&mut bytes).expect("HEADERS length")).unwrap();
+        let mut encoded = bytes.get(..len).expect("complete HEADERS payload");
+        http3::qpack::decode_stateless(&mut encoded, u64::MAX)
+            .unwrap()
+            .fields
+            .into_iter()
+            .map(|field| String::from_utf8(field.name.into_owned()).unwrap())
+            .collect()
     }
 
     pub async fn settings(&self) -> Vec<(u64, u64)> {
         std::future::poll_fn(|cx| {
             self.0.changed.register(cx.waker());
-            for bytes in self.0.streams.lock().unwrap().values() {
+            for (&id, bytes) in self.0.streams.lock().unwrap().iter() {
+                if id % 4 != 2 {
+                    continue;
+                }
                 let mut bytes = bytes.as_ref();
                 if varint(&mut bytes) != Some(0) {
                     continue;
@@ -83,38 +99,47 @@ fn varint(bytes: &mut &[u8]) -> Option<u64> {
 
 // ===== impl Connection =====
 
-impl quic::Connection<Bytes> for Connection {
-    type RecvStream = RecvStream;
+impl<T> quic::Connection<Bytes> for Connection<T>
+where
+    T: quic::Connection<Bytes>,
+    T::RecvStream: quic::RecvStream<Buf = Bytes>,
+    T::BidiStream: quic::RecvStream<Buf = Bytes>,
+{
+    type RecvStream = Connection<T::RecvStream>;
 
-    type OpenStreams = h3_quinn::OpenStreams;
+    type OpenStreams = Connection<T::OpenStreams>;
 
     fn poll_accept_recv(
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Self::RecvStream, quic::ConnectionErrorIncoming>> {
-        <h3_quinn::Connection as quic::Connection<Bytes>>::poll_accept_recv(&mut self.inner, cx)
-            .map_ok(|inner| RecvStream {
-                inner,
-                capture: self.capture.clone(),
-            })
+        self.inner
+            .poll_accept_recv(cx)
+            .map_ok(|inner| self.capture.wrap(inner))
     }
 
     fn poll_accept_bidi(
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Self::BidiStream, quic::ConnectionErrorIncoming>> {
-        self.inner.poll_accept_bidi(cx)
+        self.inner
+            .poll_accept_bidi(cx)
+            .map_ok(|inner| self.capture.wrap(inner))
     }
 
     fn opener(&self) -> Self::OpenStreams {
-        <h3_quinn::Connection as quic::Connection<Bytes>>::opener(&self.inner)
+        self.capture.wrap(self.inner.opener())
     }
 }
 
-impl quic::OpenStreams<Bytes> for Connection {
-    type SendStream = h3_quinn::SendStream<Bytes>;
+impl<T> quic::OpenStreams<Bytes> for Connection<T>
+where
+    T: quic::OpenStreams<Bytes>,
+    T::BidiStream: quic::RecvStream<Buf = Bytes>,
+{
+    type SendStream = T::SendStream;
 
-    type BidiStream = h3_quinn::BidiStream<Bytes>;
+    type BidiStream = Connection<T::BidiStream>;
 
     fn poll_open_send(
         &mut self,
@@ -127,17 +152,17 @@ impl quic::OpenStreams<Bytes> for Connection {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Self::BidiStream, quic::StreamErrorIncoming>> {
-        self.inner.poll_open_bidi(cx)
+        self.inner
+            .poll_open_bidi(cx)
+            .map_ok(|inner| self.capture.wrap(inner))
     }
 
     fn close(&mut self, code: h3::error::Code, reason: &[u8]) {
-        <h3_quinn::Connection as quic::OpenStreams<Bytes>>::close(&mut self.inner, code, reason);
+        self.inner.close(code, reason);
     }
 }
 
-// ===== impl RecvStream =====
-
-impl quic::RecvStream for RecvStream {
+impl<T: quic::RecvStream<Buf = Bytes>> quic::RecvStream for Connection<T> {
     type Buf = Bytes;
 
     fn poll_data(
@@ -164,5 +189,45 @@ impl quic::RecvStream for RecvStream {
 
     fn recv_id(&self) -> quic::StreamId {
         self.inner.recv_id()
+    }
+}
+
+impl<T: quic::SendStream<Bytes>> quic::SendStream<Bytes> for Connection<T> {
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), quic::StreamErrorIncoming>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn send_data<D: Into<quic::WriteBuf<Bytes>>>(
+        &mut self,
+        data: D,
+    ) -> Result<(), quic::StreamErrorIncoming> {
+        self.inner.send_data(data)
+    }
+
+    fn poll_finish(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), quic::StreamErrorIncoming>> {
+        self.inner.poll_finish(cx)
+    }
+
+    fn reset(&mut self, code: u64) {
+        self.inner.reset(code);
+    }
+
+    fn send_id(&self) -> quic::StreamId {
+        self.inner.send_id()
+    }
+}
+
+impl<T> quic::BidiStream<Bytes> for Connection<T>
+where
+    T: quic::BidiStream<Bytes> + quic::RecvStream<Buf = Bytes>,
+    T::RecvStream: quic::RecvStream<Buf = Bytes>,
+{
+    type SendStream = T::SendStream;
+
+    type RecvStream = Connection<T::RecvStream>;
+
+    fn split(self) -> (Self::SendStream, Self::RecvStream) {
+        let (send, recv) = self.inner.split();
+        (send, self.capture.wrap(recv))
     }
 }

@@ -730,8 +730,7 @@ dependencies = [
 [[package]]
 name = "http3"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "daf8014b014f52d76dd0652d424e60569227cdb29f11a29f3e98814521a287bf"
+source = "git+https://github.com/0x676e67/http3?rev=777df2a06427f907923a0f84f94ba45ae972cdd7#777df2a06427f907923a0f84f94ba45ae972cdd7"
 dependencies = [
  "bytes",
  "fastrand",
