@@ -167,14 +167,16 @@ impl UdpTunnel {
     /// response keeps its headers, body and upgrade for the caller.
     pub fn from_http2<B>(response: &mut Response<B>) -> Result<Self, MasqueError> {
         validate(response)?;
-        if response.extensions().get::<StreamReset>().is_none() {
-            return Err(MasqueError::InvalidResponse);
-        }
+        let reset = response
+            .extensions()
+            .get::<StreamReset>()
+            .cloned()
+            .ok_or(MasqueError::InvalidResponse)?;
         let control = crate::upgrade::on(&mut *response)
             .take_fulfilled()
             .ok_or(MasqueError::InvalidResponse)?;
-        let reset = response.extensions_mut().remove::<StreamReset>();
-        Ok(UdpTunnel::new(control, None, reset))
+        response.extensions_mut().remove::<StreamReset>();
+        Ok(UdpTunnel::new(control, None, Some(reset)))
     }
 }
 
