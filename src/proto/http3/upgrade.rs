@@ -1,17 +1,19 @@
 //! CONNECT tunnels over HTTP/3 request streams.
 
-#[cfg(feature = "http3-datagram")]
-use std::sync::Arc;
 use std::{
     future::Future,
     io,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll, ready},
 };
 
 use bytes::{Buf, Bytes};
 use http::Response;
-use http3::quic;
+use http3::{
+    error::{Code, StreamError},
+    quic,
+};
 use pin_project_lite::pin_project;
 #[cfg(feature = "http3-datagram")]
 use tokio::sync::futures::OwnedNotified;
@@ -25,7 +27,7 @@ use tokio_util::sync::{CancellationToken, PollSender, WaitForCancellationFutureO
 use super::client::malformed_datagram_error;
 use super::{
     client::{CHUNK, H3ClientFuture, RecvGuard, SendGuard, invalid_datagram_error},
-    shared::Active,
+    shared::{Active, Shared},
 };
 use crate::{
     Error, Result,
@@ -225,6 +227,7 @@ where
                     body: Some(body),
                     data: None,
                     data_done: false,
+                    shared: active.shared().clone(),
                 }),
                 invalid: invalid.map(CancellationToken::cancelled_owned),
             }),
@@ -396,13 +399,14 @@ where
     }
 }
 
-/// Forwards received DATA with channel backpressure and delivers EOF after
-/// trailers. The current QUIC buffer stays here until the reader accepts it.
+/// Forwards received DATA with channel backpressure and delivers EOF at the
+/// end of the stream. The current QUIC buffer stays here until the reader accepts it.
 struct RecvStream<R: quic::RecvStream> {
     recv: RecvGuard<R>,
     body: Option<chan::Sender>,
     data: Option<Bytes>,
     data_done: bool,
+    shared: Arc<Shared>,
 }
 
 // ===== impl RecvStream =====
@@ -441,7 +445,23 @@ impl<R: quic::RecvStream> Future for RecvStream<R> {
                     None => this.data_done = true,
                 }
             }
-            ready!(this.recv.stream.poll_recv_trailers(cx)).map_err(Error::new_h3)?;
+            // Only DATA follows a CONNECT response, so HEADERS is a connection error. Once the
+            // DATA ends, http3 holds a HEADERS frame until FIN, so a pending poll means one came,
+            // as do the errors for one it cannot take as trailers.
+            // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.4
+            match this.recv.stream.poll_recv_trailers(cx) {
+                Poll::Ready(Ok(None)) => {}
+                Poll::Ready(
+                    Ok(Some(_))
+                    | Err(StreamError::StreamError { .. } | StreamError::HeaderTooBig { .. }),
+                )
+                | Poll::Pending => {
+                    let reason = "HEADERS frame after a CONNECT response";
+                    this.shared.violate(Code::H3_FRAME_UNEXPECTED, reason);
+                    return Poll::Ready(Err(this.shared.error()));
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(Error::new_h3(error))),
+            }
             this.recv.finished = true;
             #[cfg(feature = "http3-datagram")]
             if let Some(datagrams) = &this.recv.datagrams {
