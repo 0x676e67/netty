@@ -1,3 +1,44 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## netty [0.3.0](https://github.com/0x676e67/netty/compare/v0.2.5...v0.3.0) - 2026-10-22
+
+
+
+### 🚀 Features
+
+- *(http1)* Add max_header_size limit for server and client ([#149](https://github.com/0x676e67/netty/issues/149)) - ([22a2b4a](https://github.com/0x676e67/netty/commit/22a2b4aa4fa8cfa532792ecfa6cc176d891fda10))
+- *(http2)* Gate extended CONNECT on peer SETTINGS ([#151](https://github.com/0x676e67/netty/issues/151)) - ([3703f25](https://github.com/0x676e67/netty/commit/3703f250846b832f222dc284e84af771c7e855a2))
+- *(http3)* 💥 **breaking:** Configure pseudo-header order through options ([#167](https://github.com/0x676e67/netty/issues/167)) - ([3070e05](https://github.com/0x676e67/netty/commit/3070e0515e28af4177695cb2b2bfcbed6dbb561c))
+- *(proxy)* Add SOCKS5 UDP ASSOCIATE with sans-IO datagram framing ([#154](https://github.com/0x676e67/netty/issues/154)) - ([e83ecb4](https://github.com/0x676e67/netty/commit/e83ecb4a23ef6b96ea55f9a410a4955cf1e49683))
+- *(proxy)* Add SOCKS connector backed by tokio-socks ([#161](https://github.com/0x676e67/netty/issues/161)) - ([6c475e7](https://github.com/0x676e67/netty/commit/6c475e73d4ade28d43d0f9530a58262623c2a24a))
+- *(proxy)* Add HTTP CONNECT tunnel connector ([#152](https://github.com/0x676e67/netty/issues/152)) - ([6e89ccb](https://github.com/0x676e67/netty/commit/6e89ccbf31331f9b3638e447632bab3a3b72e997))
+
+### 🐛 Bug Fixes
+
+- *(http1)* Remove content-length if transfer-encoding is auto-added ([#166](https://github.com/0x676e67/netty/issues/166)) - ([f6dd929](https://github.com/0x676e67/netty/commit/f6dd9291f2823dfe615b1ae41c4f16afa3ae7cb0))
+- *(http1)* Always remove content-length if transfer-encoding is sent ([#165](https://github.com/0x676e67/netty/issues/165)) - ([688f481](https://github.com/0x676e67/netty/commit/688f481deeebc3a2d592efd6866ed8636f542da9))
+- *(http1)* Let a Connection close token win over a later keep-alive ([#147](https://github.com/0x676e67/netty/issues/147)) - ([a5ec550](https://github.com/0x676e67/netty/commit/a5ec55002583e16c0730247e1a3a406e76d3bd24))
+- *(http1)* Close canceled connections without flushing ([#145](https://github.com/0x676e67/netty/issues/145)) - ([f8652dd](https://github.com/0x676e67/netty/commit/f8652ddf5e386d66b7f03cceedbc6b319d849762))
+- *(http2)* Do not reserve capacity for idle Upgraded streams ([#140](https://github.com/0x676e67/netty/issues/140)) - ([f598a3e](https://github.com/0x676e67/netty/commit/f598a3edfcc72c4ad0ca7e1a0aff884ee1cff3d7))
+
+### ⚡ Performance
+
+- *(body)* Skip waking a closed peer when a channel end drops ([#150](https://github.com/0x676e67/netty/issues/150)) - ([663b094](https://github.com/0x676e67/netty/commit/663b094fe80389c393880d8d5168c73131629336))
+
+### 🎨 Styling
+
+- *(lib)* Address cast-possible-truncation clippy findings ([#148](https://github.com/0x676e67/netty/issues/148)) - ([3fa9152](https://github.com/0x676e67/netty/commit/3fa91527201cd138ad3c20ef50547cfc17b734a2))
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump MSRV to 1.98 and edition to 2024 ([#142](https://github.com/0x676e67/netty/issues/142)) - ([0b1799b](https://github.com/0x676e67/netty/commit/0b1799b6459a72186108bd8808f9ed11e0402999))
 ## [0.2.5] - 2026-09-25
 
 ### 🚀 Features
