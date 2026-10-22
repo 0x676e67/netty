@@ -1,6 +1,6 @@
 //! Pieces pertaining to the HTTP message protocol.
 
-mod headers;
+pub(crate) mod headers;
 
 pub mod http1;
 pub mod http2;

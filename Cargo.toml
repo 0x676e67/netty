@@ -35,7 +35,7 @@ tunnel = ["dep:tower-service"]
 # SOCKS4/4a and SOCKS5/5h proxies as a tower connector.
 socks = ["dep:tower-service", "dep:tokio-socks"]
 
-# MASQUE CONNECT-UDP (RFC 9298) over HTTP/3 as a tower connector.
+# MASQUE CONNECT-UDP (RFC 9298): a tower connector over HTTP/3, and tunnels over HTTP/2.
 masque = ["http3-datagram", "dep:tower-service"]
 
 # Enable tracing logging.
@@ -143,5 +143,6 @@ codegen-units = 1
 incremental = false
 
 [patch.crates-io]
-# Remove once an http2 release includes `Connection::extended_connect_protocol`.
-http2 = { git = "https://github.com/0x676e67/http2", rev = "c932fc91f3139f5613a579b7b11df2860d66745c" }
+# Remove once an http2 release includes `Connection::extended_connect_protocol` and ignores
+# content-length on 1xx responses and on 2xx responses to CONNECT.
+http2 = { git = "https://github.com/0x676e67/http2", rev = "fb5bf8bdbf3e9d9aad7073759a6f06f47373342e" }

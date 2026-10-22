@@ -56,7 +56,8 @@ pub struct Upgraded {
 
 /// A future for a possible HTTP upgrade.
 ///
-/// If no upgrade was available, or it doesn't succeed, yields an `Error`.
+/// If no upgrade was available, or it doesn't succeed, yields an `Error`. Clones share one
+/// upgrade, so await only one: once it is taken, a clone polled later yields an `Error`.
 #[derive(Clone)]
 pub struct OnUpgrade {
     rx: Option<Arc<Mutex<oneshot::Receiver<Result<Upgraded>>>>>,
@@ -167,22 +168,33 @@ impl OnUpgrade {
     pub(super) fn is_none(&self) -> bool {
         self.rx.is_none()
     }
+
+    /// Takes an upgrade the connection already fulfilled, without polling.
+    ///
+    /// Unlike polling, this never draws on tokio's cooperative budget, so it cannot miss a
+    /// fulfilled upgrade in a task that has run out of it.
+    #[cfg(feature = "masque")]
+    pub(crate) fn take_fulfilled(self) -> Option<Upgraded> {
+        self.rx?.lock().ignore_poison().try_recv().ok()?.ok()
+    }
 }
 
 impl Future for OnUpgrade {
     type Output = Result<Upgraded, Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.rx {
-            Some(ref rx) => Pin::new(&mut *rx.lock().panic_if_poisoned())
-                .poll(cx)
-                .map(|res| match res {
-                    Ok(Ok(upgraded)) => Ok(upgraded),
-                    Ok(Err(err)) => Err(err),
-                    Err(_oneshot_canceled) => Err(Error::new_canceled().with(UpgradeExpected)),
-                }),
-            None => Poll::Ready(Err(Error::new_user_no_upgrade())),
+        let Some(rx) = &self.rx else {
+            return Poll::Ready(Err(Error::new_user_no_upgrade()));
+        };
+        let mut rx = rx.lock().ignore_poison();
+        if rx.is_terminated() {
+            return Poll::Ready(Err(Error::new_user_no_upgrade()));
         }
+        Pin::new(&mut *rx).poll(cx).map(|res| match res {
+            Ok(Ok(upgraded)) => Ok(upgraded),
+            Ok(Err(err)) => Err(err),
+            Err(_oneshot_canceled) => Err(Error::new_canceled().with(UpgradeExpected)),
+        })
     }
 }
 

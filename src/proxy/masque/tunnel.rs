@@ -9,11 +9,13 @@ use std::{
 
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::task::AtomicWaker;
+use http2::Reason;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::{MAX_UDP_PAYLOAD, MasqueError, SendError, capsule};
 use crate::{
     conn::http3::datagram::{Receiver, SendErrorKind, Sender},
+    proto::http2::upgrade::StreamReset,
     upgrade::Upgraded,
 };
 
@@ -29,10 +31,14 @@ const READ_CHUNK: usize = 8 * 1024;
 /// as DATAGRAM capsules on the request stream; received capsules are always accepted. Methods
 /// take `&mut self`: share a tunnel between send and receive tasks behind a mutex.
 ///
-/// Dropping the tunnel aborts the request stream, which closes the tunnel at the proxy.
+/// Dropping the tunnel aborts the request stream unless both sides have ended it, which closes
+/// the tunnel at the proxy and may discard capsules not yet delivered; to deliver them, close
+/// the tunnel and receive to the end first.
 pub struct UdpTunnel {
     control: Upgraded,
     native: Option<Native>,
+    /// Resets the HTTP/2 request stream; over HTTP/3, `native` aborts it.
+    reset: Option<StreamReset>,
 
     decoder: capsule::Decoder,
     read_buf: BytesMut,
@@ -80,7 +86,11 @@ struct Wakers {
 // ===== impl UdpTunnel =====
 
 impl UdpTunnel {
-    pub(super) fn new(control: Upgraded, native: Option<(Sender, Receiver)>) -> Self {
+    pub(super) fn new(
+        control: Upgraded,
+        native: Option<(Sender, Receiver)>,
+        reset: Option<StreamReset>,
+    ) -> Self {
         let wakers = Arc::new(Wakers::default());
         UdpTunnel {
             control,
@@ -89,6 +99,7 @@ impl UdpTunnel {
                 receiver,
                 recv_open: true,
             }),
+            reset,
             decoder: capsule::Decoder::default(),
             read_buf: BytesMut::new(),
             recv_error: None,
@@ -186,9 +197,12 @@ impl UdpTunnel {
     /// Receives the next UDP payload; `None` once the proxy closed the tunnel.
     ///
     /// Also finishes writing buffered capsules. An error ends receiving and later calls report
-    /// it again, with the same kind and message. A capsule cut short by the end of the stream
-    /// also resets the request stream with `H3_MESSAGE_ERROR` (RFC 9297 §3.3), and an oversized
-    /// payload with `H3_DATAGRAM_ERROR` (RFC 9298 §5).
+    /// it again, with the same kind and message. A malformed capsule or payload also resets the
+    /// request stream, also after [`poll_close`](Self::poll_close) unless both sides have ended
+    /// it: over HTTP/3 with `H3_MESSAGE_ERROR` for a capsule cut short by the end of the stream
+    /// (RFC 9297 §3.3) and `H3_DATAGRAM_ERROR` for an oversized payload (RFC 9298 §5), over
+    /// HTTP/2 with `PROTOCOL_ERROR`. Over HTTP/2, a proxy reset with `NO_ERROR` or `CANCEL` reads
+    /// as the end of the stream, so one that cuts a capsule short is malformed.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, MasqueError>> {
         if let Some(err) = &self.recv_error {
             return Poll::Ready(Err(err.clone().into()));
@@ -207,11 +221,16 @@ impl UdpTunnel {
                 MasqueError::Io(err) => RecvError::Io(err.kind(), err.to_string()),
                 _ => RecvError::Malformed,
             };
-            if let (RecvError::Malformed, Some(native)) = (&failed, &self.native) {
-                if truncated {
-                    native.receiver.abort_malformed_message();
-                } else {
-                    native.receiver.abort_malformed();
+            if let RecvError::Malformed = failed {
+                if let Some(native) = &self.native {
+                    if truncated {
+                        native.receiver.abort_malformed_message();
+                    } else {
+                        native.receiver.abort_malformed();
+                    }
+                }
+                if let Some(reset) = &self.reset {
+                    reset.reset(Reason::PROTOCOL_ERROR);
                 }
             }
             self.recv_error = Some(failed);
@@ -346,6 +365,18 @@ impl UdpTunnel {
     }
 }
 
+impl Drop for UdpTunnel {
+    fn drop(&mut self) {
+        // Over HTTP/2 the send task may hold a capsule that waits on the proxy's flow control,
+        // which would keep the stream open; after a close, the stream ends as usual.
+        if !self.write_closed
+            && let Some(reset) = &self.reset
+        {
+            reset.reset(Reason::CANCEL);
+        }
+    }
+}
+
 impl fmt::Debug for UdpTunnel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UdpTunnel")
@@ -409,7 +440,7 @@ mod tests {
 
     use super::*;
 
-    /// A capsule-only tunnel and the proxy's end of its request stream.
+    /// A capsule-only tunnel, as over HTTP/2, and the proxy's end of its request stream.
     ///
     /// `buffered` puts a write buffer in between, so capsules only reach the proxy if flushed.
     fn capsule_tunnel(capacity: usize, buffered: bool) -> (UdpTunnel, tokio::io::DuplexStream) {
@@ -419,7 +450,7 @@ mod tests {
         } else {
             Upgraded::new(client, Bytes::new())
         };
-        (UdpTunnel::new(control, None), proxy)
+        (UdpTunnel::new(control, None, None), proxy)
     }
 
     async fn bounded<F: Future>(future: F) -> F::Output {
@@ -679,7 +710,7 @@ mod tests {
         }
 
         // An I/O error comes back with its kind and message.
-        let mut tunnel = UdpTunnel::new(Upgraded::new(Failing, Bytes::new()), None);
+        let mut tunnel = UdpTunnel::new(Upgraded::new(Failing, Bytes::new()), None, None);
         for _ in 0..2 {
             let result = poll_fn(|cx| tunnel.poll_recv(cx)).await;
             let Err(MasqueError::Io(err)) = result else {

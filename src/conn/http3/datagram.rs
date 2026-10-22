@@ -16,6 +16,7 @@ use tokio::sync::futures::OwnedNotified;
 
 pub use crate::proto::http3::datagram::SendErrorKind;
 use crate::{
+    lock::LockResultExt,
     proto::http3::datagram::{Abort, RequestState},
     rt::quic::StreamId,
     upgrade::Upgraded,
@@ -66,7 +67,7 @@ pub fn on<B>(response: &mut Response<B>) -> Option<Session> {
         .remove::<Pending>()?
         .0
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
+        .ignore_poison()
         .take()
 }
 
