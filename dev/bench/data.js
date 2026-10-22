@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792551955812,
+  "lastUpdate": 1792635416157,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -14687,6 +14687,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4594815,
             "range": "± 56870.85",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e83ecb4a23ef6b96ea55f9a410a4955cf1e49683",
+          "message": "feat(proxy): add SOCKS5 UDP ASSOCIATE with sans-IO datagram framing (#154)\n\n* feat(proxy): add HTTP CONNECT tunnel connector\n\n* feat(proxy): add SOCKS connector backed by tokio-socks\n\n* feat(proxy): add SOCKS5 UDP ASSOCIATE with sans-IO datagram framing\n\n* fix(proxy): validate CONNECT target and harden tunnel handshake\n\n* test(proxy): use Hyper for CONNECT regressions\n\n* fix(proxy): check SOCKS destination and credentials before connecting\n\n* fix(proxy): split mixed SOCKS5 UDP batches and read mapped addresses as IPv4\n\n* test(proxy): relay SOCKS5 UDP through fast-socks5\n\n* fix(proxy): match link-local SOCKS5 relays by scope\n\n* test(proxy): move QUIC relay fixture to local harness\n\n* feat(proxy): keep the control peer's scope in SOCKS5 relay_addr\n\n* test(proxy): answer SOCKS5 handshakes with fast-socks5",
+          "timestamp": "2026-10-22T10:13:21+08:00",
+          "tree_id": "20f91c9896251342bb02877c136bcc8dc34fb1ba",
+          "url": "https://github.com/0x676e67/netty/commit/e83ecb4a23ef6b96ea55f9a410a4955cf1e49683"
+        },
+        "date": 1792635415607,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 69735,
+            "range": "± 1252.46",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 4264982,
+            "range": "± 274014.96",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 21075,
+            "range": "± 588.16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 23184,
+            "range": "± 662.95",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 34095,
+            "range": "± 977.23",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 105054,
+            "range": "± 2571.50",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 41000631,
+            "range": "± 52640.51",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 86535,
+            "range": "± 1327.34",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 24798362,
+            "range": "± 8258228.89",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 7899565,
+            "range": "± 115170.04",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 7687781,
+            "range": "± 111348.41",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 92997281,
+            "range": "± 41999966.82",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 52236638,
+            "range": "± 1283889.47",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 5428026,
+            "range": "± 94961.08",
             "unit": "ns/iter"
           }
         ]
