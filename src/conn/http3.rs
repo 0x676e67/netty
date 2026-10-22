@@ -487,11 +487,8 @@ where
         if !self.completed {
             self.shared
                 .terminate(Error::new_canceled().with("HTTP/3 connection dropped"));
-            quic::OpenStreams::close(
-                &mut self.opener,
-                Code::H3_NO_ERROR.value(),
-                b"client connection dropped",
-            );
+            let (code, reason) = self.shared.close_reason("client connection dropped");
+            quic::OpenStreams::close(&mut self.opener, code.value(), reason.as_bytes());
         }
     }
 }
