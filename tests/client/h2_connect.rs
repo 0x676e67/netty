@@ -731,6 +731,54 @@ async fn h2_connect_reset_during_backpressure() {
     );
 }
 
+// Any 2xx to CONNECT opens the tunnel, not only 200. Such a response has no content, so the
+// client ignores its content-length and relays what follows as tunneled data. Hyper drops the
+// header on these responses, so a bare h2 server plays the proxy.
+// https://www.rfc-editor.org/rfc/rfc9113.html#section-8.5
+// https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
+#[test]
+fn h2_connect_2xx_opens_tunnel() {
+    let mut driver = Driver::new();
+    let (mut client, conn, server_io) = driver.handshake(Default::default());
+    driver.spawn(async move {
+        let _ = conn.await;
+    });
+    let (requests_tx, mut requests) = futures_channel::mpsc::unbounded();
+    driver.spawn(async move {
+        let mut server = h2::server::handshake(server_io).await.unwrap();
+        while let Some(Ok(request)) = server.accept().await {
+            requests_tx.unbounded_send(request).unwrap();
+        }
+    });
+    driver.run();
+
+    for (status, length) in [(202, None), (200, Some("0")), (202, Some("5"))] {
+        let request = Request::connect("localhost:443")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let mut sending = task::spawn(client.try_send_request(request));
+        assert_pending!(driver.poll(&mut sending));
+        let (mut request, mut respond) = driver.finish(requests.next()).unwrap();
+        let mut response = Response::builder().status(status);
+        if let Some(length) = length {
+            response = response.header("content-length", length);
+        }
+        let response = response.body(()).unwrap();
+        let mut send = respond.send_response(response, false).unwrap();
+        let mut response = assert_ready!(driver.poll(&mut sending)).unwrap();
+        let mut upgraded = driver.finish(netty::upgrade::on(&mut response)).unwrap();
+
+        send.send_data(Bytes::from_static(b"tunneled"), false)
+            .unwrap();
+        let mut received = [0; 8];
+        driver.finish(upgraded.read_exact(&mut received)).unwrap();
+        assert_eq!(&received, b"tunneled", "{status} {length:?}");
+        driver.finish(upgraded.write_all(b"ping")).unwrap();
+        let data = driver.finish(request.body_mut().data()).unwrap().unwrap();
+        assert_eq!(data, "ping", "{status} {length:?}");
+    }
+}
+
 // Use only the low-level API so this also checks CONNECT-UDP without the masque feature.
 #[test]
 fn h2_connect_udp_rejects_capsule_headers() {
@@ -756,6 +804,7 @@ fn h2_connect_udp_rejects_capsule_headers() {
         .body(Full::new(Bytes::new()))
         .unwrap();
     let (result, request, server) = proxy.exchange(&mut driver, &mut client, request, response);
+    assert_eq!(request.method(), Method::CONNECT);
     let protocol = request.extensions().get::<hyper::ext::Protocol>().unwrap();
     assert_eq!(protocol.as_str(), "connect-udp");
     assert!(result.is_err(), "{result:?}");
@@ -830,8 +879,11 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
     // Sends a CONNECT-UDP request that the proxy answers with `response`.
     let mut connect = |driver: &mut Driver, response: Response<Bytes>| {
         let request = connect_udp_request();
-        let (result, _request, server) =
+        let (result, request, server) =
             proxy.exchange(driver, &mut client, request, response.map(Full::new));
+        assert_eq!(request.method(), Method::CONNECT);
+        let protocol = request.extensions().get::<hyper::ext::Protocol>().unwrap();
+        assert_eq!(protocol.as_str(), "connect-udp");
         (result, server)
     };
 
@@ -1009,7 +1061,6 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
 fn h2_connect_udp_treats_raw_proxy_framing_as_malformed() {
     use std::future::poll_fn;
 
-    use futures_util::StreamExt as _;
     use netty::proxy::masque::{MasqueError, UdpTunnel};
 
     let mut driver = Driver::new();
@@ -1036,8 +1087,8 @@ fn h2_connect_udp_treats_raw_proxy_framing_as_malformed() {
         (assert_ready!(driver.poll(&mut sending)), send)
     };
 
-    // Content-Length breaks the Capsule Protocol even at zero (RFC 9297 §3.2), and a nonzero one
-    // gets this reset rather than the plain CONNECT `INTERNAL_ERROR`.
+    // Content-Length breaks the Capsule Protocol even at zero (RFC 9297 §3.2), although a plain
+    // CONNECT ignores it.
     for length in ["0", "5"] {
         let response = Response::builder()
             .header("content-length", length)
