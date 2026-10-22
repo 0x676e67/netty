@@ -5,21 +5,19 @@
 
 use std::{
     error::Error as StdError,
-    fmt,
-    future::{self, poll_fn},
+    fmt, future,
     io::{self, Write as _},
-    pin::Pin,
-    task::{Context, Poll, ready},
+    task::{Context, Poll},
 };
 
 use http::{
     HeaderMap, HeaderValue, StatusCode, Uri,
     header::{CONTENT_LENGTH, Entry, HOST, PROXY_AUTHORIZATION, TRANSFER_ENCODING},
 };
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tower_service::Service;
 
-use super::{ProxyDst, Tunneling, dst_host, dst_port};
+use super::{ProxyDst, Tunneling, dst_host, dst_port, read, send};
 use crate::error::BoxError;
 
 /// Maximum number of headers accepted in the proxy response.
@@ -182,10 +180,7 @@ async fn tunnel<T>(mut io: T, req: &[u8]) -> Result<T, TunnelError>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    write_all(&mut io, req).await.map_err(TunnelError::Io)?;
-    poll_fn(|cx| Pin::new(&mut io).poll_flush(cx))
-        .await
-        .map_err(TunnelError::Io)?;
+    send(&mut io, req).await.map_err(TunnelError::Io)?;
 
     read_response(&mut io).await?;
     Ok(io)
@@ -260,32 +255,6 @@ where
     }
 }
 
-async fn write_all<T>(io: &mut T, mut buf: &[u8]) -> io::Result<()>
-where
-    T: AsyncWrite + Unpin,
-{
-    while !buf.is_empty() {
-        let n = poll_fn(|cx| Pin::new(&mut *io).poll_write(cx, buf)).await?;
-        if n == 0 {
-            return Err(io::ErrorKind::WriteZero.into());
-        }
-        buf = &buf[n..];
-    }
-    Ok(())
-}
-
-async fn read<T>(io: &mut T, buf: &mut [u8]) -> io::Result<usize>
-where
-    T: AsyncRead + Unpin,
-{
-    poll_fn(|cx| {
-        let mut buf = ReadBuf::new(&mut *buf);
-        ready!(Pin::new(&mut *io).poll_read(cx, &mut buf))?;
-        Poll::Ready(Ok(buf.filled().len()))
-    })
-    .await
-}
-
 // ===== impl TunnelError =====
 
 impl fmt::Display for TunnelError {
@@ -317,7 +286,7 @@ impl StdError for TunnelError {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Ready;
+    use std::future::{Ready, poll_fn};
 
     use tokio::io::{DuplexStream, duplex};
 
