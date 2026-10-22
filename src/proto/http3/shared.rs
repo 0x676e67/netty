@@ -10,6 +10,7 @@ use std::{
 };
 
 use futures_util::task::AtomicWaker;
+use http3::error::Code;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -25,6 +26,8 @@ pub(crate) struct Shared {
     pub(crate) settings_ready: CancellationToken,
     pub(crate) draining: AtomicBool,
     pub(crate) error: OnceLock<Arc<Error>>,
+    /// A connection error a stream found; the driver closes the connection with it.
+    pub(crate) violation: OnceLock<(Code, &'static str)>,
 
     /// Local admission; closed by a shutdown so waiting requests are returned.
     pub(crate) permits: Semaphore,
@@ -67,6 +70,7 @@ impl Shared {
             peer_extended_connect: OnceLock::new(),
             settings_ready: CancellationToken::new(),
             draining: AtomicBool::new(false),
+            violation: OnceLock::new(),
             permits: Semaphore::new(limit.min(Semaphore::MAX_PERMITS)),
             reserved: AtomicUsize::new(0),
             active: AtomicUsize::new(0),
@@ -97,6 +101,24 @@ impl Shared {
             self.settings_ready.cancel();
             self.waker.wake();
         }
+    }
+
+    /// Fails the connection with `code` for a protocol violation a stream found. The error is
+    /// published at once; the driver then closes the connection.
+    pub(crate) fn violate(&self, code: Code, reason: &'static str) {
+        if self.violation.set((code, reason)).is_ok() {
+            self.terminate(Error::new_h3(reason));
+        }
+        self.waker.wake();
+    }
+
+    /// The code and reason to close the connection with: a stream's violation, else
+    /// H3_NO_ERROR with `reason`.
+    pub(crate) fn close_reason(&self, reason: &'static str) -> (Code, &'static str) {
+        self.violation
+            .get()
+            .copied()
+            .unwrap_or((Code::H3_NO_ERROR, reason))
     }
 
     /// Publishes the connection error and fails everything still waiting on it.

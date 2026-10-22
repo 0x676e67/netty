@@ -231,6 +231,14 @@ where
         }
     }
 
+    /// Closes the connection over a violation a stream found, if any.
+    fn close_on_violation(&mut self) -> Option<Poll<()>> {
+        let &(code, reason) = self.shared.violation.get()?;
+        rt::quic::OpenStreams::close(&mut self.opener, code.value(), reason.as_bytes());
+        let error = self.shared.error();
+        Some(self.finish(Err(error)))
+    }
+
     /// Reports the outcome; the handle may already be gone.
     fn finish(&mut self, result: Result<()>) -> Poll<()> {
         if let Some(done) = self.done.take() {
@@ -253,8 +261,11 @@ where
         }
 
         this.shared.register(cx);
+        if let Some(done) = this.close_on_violation() {
+            return done;
+        }
         if let Poll::Ready(error) = this.driver.poll_close(cx) {
-            let normal = error.is_h3_no_error();
+            let normal = closed_normally(&error);
             this.shared.terminate(Error::new_h3(error));
             let result = if normal {
                 Ok(())
@@ -308,6 +319,10 @@ where
         // The waker is registered above, so a completion racing this check
         // still wakes the task.
         if this.shared.is_draining() && this.shared.is_idle() {
+            // A violation published during this poll drains the connection as well.
+            if let Some(done) = this.close_on_violation() {
+                return done;
+            }
             rt::quic::OpenStreams::close(&mut this.opener, Code::H3_NO_ERROR.value(), b"");
             this.shared.terminate(Error::new_closed());
             return this.finish(Ok(()));
@@ -324,11 +339,8 @@ where
         if self.done.is_some() {
             self.shared
                 .terminate(Error::new_canceled().with("HTTP/3 connection task dropped"));
-            rt::quic::OpenStreams::close(
-                &mut self.opener,
-                Code::H3_NO_ERROR.value(),
-                b"connection task dropped",
-            );
+            let (code, reason) = self.shared.close_reason("connection task dropped");
+            rt::quic::OpenStreams::close(&mut self.opener, code.value(), reason.as_bytes());
             let error = self.shared.error();
             let _ = self.finish(Err(error));
         }
@@ -578,8 +590,7 @@ where
             finished = Some(send);
             None
         } else {
-            Some(Box::pin(PipeToSendStream::new(send, body, length))
-                as BoxFuture<'static, Result<()>>)
+            Some(Box::pin(PipeToSendStream::new(send, body, length)))
         };
 
         let mut headers = match initial_response {
@@ -600,14 +611,24 @@ where
                     response.as_mut().poll(cx)
                 })
                 .await
-                .map_err(|error| lost(shared.error_or(error)))?
             }
+            .map_err(|error| {
+                // A malformed head is a stream error in both directions.
+                if let Some(pipe) = pipe.as_mut() {
+                    pipe.as_mut().reset_with(recv.code);
+                }
+                lost(shared.error_or(error))
+            })?,
         };
 
         let mut remaining = content_length(headers.headers()).map_err(|error| {
-            // A malformed response is a stream error, not a local cancellation.
+            // A malformed response is a stream error in both directions, not a local
+            // cancellation.
             // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1.2
             recv.code = Code::H3_MESSAGE_ERROR;
+            if let Some(pipe) = pipe.as_mut() {
+                pipe.as_mut().reset_with(Code::H3_MESSAGE_ERROR);
+            }
             lost(error)
         })?;
         if head
@@ -620,6 +641,7 @@ where
         }
         *headers.version_mut() = http::Version::HTTP_3;
 
+        let mut pipe = pipe.map(|pipe| pipe as BoxFuture<'static, Result<()>>);
         // The peer's response packet normally carries the acknowledgment of the
         // packet that held HEADERS and FIN; only a late one needs a task.
         if let Some(mut send) = finished.take()
@@ -724,6 +746,22 @@ where
     }
 }
 
+/// Whether the connection closed without an error: with H3_NO_ERROR, or by the peer with a code
+/// this endpoint does not know, which counts the same.
+/// https://www.rfc-editor.org/rfc/rfc9114.html#section-8
+fn closed_normally(error: &http3::error::ConnectionError) -> bool {
+    use http3::{error::ConnectionError, quic::ConnectionErrorIncoming};
+
+    // HTTP/3 (RFC 9114 §8.1), QPACK (RFC 9204 §6) and HTTP Datagram (RFC 9297 §5) codes.
+    let known = |code: u64| matches!(code, 0x33 | 0x100..=0x110 | 0x200..=0x202);
+    error.is_h3_no_error()
+        || matches!(
+            error,
+            ConnectionError::Remote(ConnectionErrorIncoming::ApplicationClose { error_code })
+                if !known(*error_code)
+        )
+}
+
 /// Failure before the request left the caller; the request is returned.
 fn rejected<B>(error: Error, request: Request<B>) -> TrySendError<Request<B>> {
     TrySendError {
@@ -774,6 +812,11 @@ where
             trailers_sent: false,
             finishing: false,
         }
+    }
+
+    /// Resets an unfinished send direction with `code` once dropped.
+    fn reset_with(self: Pin<&mut Self>, code: Code) {
+        self.project().send.code = code;
     }
 }
 
@@ -935,6 +978,17 @@ fn validate_request<B>(request: &Request<B>) -> Result<Option<u64>> {
         return Err(Error::new_h3(
             "HTTP/3 request requires scheme and authority",
         ));
+    }
+    // Userinfo is deprecated in http and https authorities and has no place in the CONNECT
+    // authority-form, so it is never sent.
+    // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.3.1
+    // https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
+    if request
+        .uri()
+        .authority()
+        .is_some_and(|authority| authority.as_str().contains('@'))
+    {
+        return Err(Error::new_h3("HTTP/3 authority includes userinfo"));
     }
     // Reject this before the lower layer consumes the request and turns a local
     // header construction error into a connection failure.
