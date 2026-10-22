@@ -385,7 +385,9 @@ impl Wake for Wakers {
 
 /// Strips Context ID 0 from an HTTP Datagram payload (RFC 9298 §4).
 ///
-/// Unknown contexts, and payloads too short to carry a Context ID, are dropped.
+/// Unknown contexts, and payloads too short to carry a Context ID, are dropped: RFC 9298 §5
+/// aborts only for an oversized Context ID 0 payload, and both encodings share this path
+/// (RFC 9297 §3.5).
 fn udp_payload(mut datagram: Bytes) -> Result<Option<Bytes>, MasqueError> {
     let Some((context, len)) = capsule::varint(&datagram) else {
         return Ok(None);
@@ -494,8 +496,10 @@ mod tests {
         bounded(proxy.read_exact(&mut written)).await.unwrap();
         assert_eq!(written, [0, 5, 0, b'p', b'i', b'n', b'g']);
 
-        // Unknown Context IDs are dropped; a capsule cut short by FIN is malformed.
+        // Unknown Context IDs and payloads without a whole Context ID are dropped; a capsule
+        // cut short by FIN is malformed.
         proxy.write_all(&[0, 2, 1, b'x']).await.unwrap();
+        proxy.write_all(&[0, 0, 0, 1, 0x40]).await.unwrap();
         proxy.write_all(&[0, 4, 0, b'e', b'n', b'd']).await.unwrap();
         proxy.write_all(&[0, 5, 0, b'c']).await.unwrap();
         proxy.shutdown().await.unwrap();
@@ -763,6 +767,8 @@ mod tests {
             (vec![0x40, 0, b'h', b'i'], Some(&b"hi"[..])),
             (vec![1, b'h', b'i'], None),
             (vec![], None),
+            // A Context ID cut short.
+            (vec![0x40], None),
             (max.clone(), Some(&max[1..])),
         ] {
             let payload = udp_payload(Bytes::from(datagram)).unwrap();

@@ -27,6 +27,7 @@ use crate::{
     conn::http3::{SendRequest, datagram::DatagramRequest},
     error::BoxError,
     http3::Protocol,
+    proto::headers,
 };
 
 /// Largest UDP payload carried under Context ID 0 (RFC 9298 §5).
@@ -62,12 +63,7 @@ fn validate<B>(response: &Response<B>) -> Result<(), MasqueError> {
     if !status.is_success() {
         return Err(MasqueError::Unsuccessful(status));
     }
-    let headers = response.headers();
-    if matches!(status.as_u16(), 204..=206)
-        || [CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING]
-            .iter()
-            .any(|name| headers.contains_key(name))
-    {
+    if headers::breaks_capsule_protocol(status, response.headers()) {
         return Err(MasqueError::InvalidResponse);
     }
     Ok(())
@@ -99,7 +95,8 @@ pub enum MasqueError {
     InvalidTarget,
     /// The inner connector failed to provide a connection to the proxy.
     ConnectFailed(BoxError),
-    /// The CONNECT-UDP request failed.
+    /// The CONNECT-UDP request failed, including a success response the client rejected as
+    /// malformed (RFC 9297 §3.2).
     Request(crate::Error),
     /// The proxy refused the tunnel with this status.
     Unsuccessful(StatusCode),
@@ -126,18 +123,16 @@ pub enum SendError {
 // ===== impl UdpTunnel =====
 
 impl UdpTunnel {
-    /// Opens the tunnel from a successful response to [`http3_request`].
+    /// Opens the tunnel from this crate's HTTP/3 client's successful response to
+    /// [`http3_request`].
     ///
-    /// A success response that breaks the Capsule Protocol is malformed (RFC 9297 §3.2), so its
-    /// request stream resets with `H3_MESSAGE_ERROR`.
+    /// A refusal is [`Unsuccessful`](MasqueError::Unsuccessful) and keeps its headers and body for
+    /// the caller; once the body ends or is dropped, the client aborts the request stream with
+    /// `H3_REQUEST_CANCELLED` (RFC 9298 §3.1). A success response that breaks the Capsule Protocol
+    /// is malformed (RFC 9297 §3.2): the client resets its stream with `H3_MESSAGE_ERROR` and fails
+    /// the request instead.
     pub fn from_http3<B>(response: &mut Response<B>) -> Result<Self, MasqueError> {
-        if let Err(err) = validate(response) {
-            // Only a success response carries a session, so refusals are left as they are.
-            if let Some(session) = crate::conn::http3::datagram::on(response) {
-                session.reject_malformed();
-            }
-            return Err(err);
-        }
+        validate(response)?;
         let (control, sender, receiver) = crate::conn::http3::datagram::on(response)
             .ok_or(MasqueError::InvalidResponse)?
             .into_parts();

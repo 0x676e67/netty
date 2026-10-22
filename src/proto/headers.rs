@@ -92,6 +92,18 @@ fn connection_has(value: &HeaderValue, needle: &str) -> bool {
     false
 }
 
+/// Whether a success response breaks the Capsule Protocol, which makes it malformed
+/// ([RFC 9297 §3.2](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2)).
+#[cfg(feature = "http3")]
+pub(crate) fn breaks_capsule_protocol(status: http::StatusCode, headers: &HeaderMap) -> bool {
+    use http::header::CONTENT_TYPE;
+
+    matches!(status.as_u16(), 204..=206)
+        || [CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING]
+            .iter()
+            .any(|name| headers.contains_key(name))
+}
+
 #[inline]
 pub(super) fn content_length_parse_all(headers: &HeaderMap) -> Option<u64> {
     content_length_parse_all_values(headers.get_all(CONTENT_LENGTH).into_iter())

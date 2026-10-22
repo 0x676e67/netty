@@ -151,6 +151,11 @@ jobs:
           cargo check --no-default-features --features http3
           cargo check --no-default-features --features http3-datagram
 
+      - name: Test HTTP/3 CONNECT-UDP without MASQUE
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo test -p netty --no-default-features --features http3 --test http3 headers::connect_udp_success_that_breaks_capsules_resets_both_directions -- --exact
+
       - name: check --feature-powerset
         env:
           RUSTFLAGS: "-D dead_code -D unused_imports"
