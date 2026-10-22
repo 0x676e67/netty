@@ -93,8 +93,9 @@ pub struct ConnectUdp<S> {
 pub enum MasqueError {
     /// The URI template breaks RFC 9298 §2, for the given reason.
     InvalidTemplate(&'static str),
-    /// The target host is empty, a bracketed literal other than IPv6 or has an IPv6 zone ID,
-    /// or the port is missing, 0 or not a valid `u16`.
+    /// The target host is neither an IPv6 literal nor a reg-name (RFC 9298 §3): it is empty,
+    /// a bracketed literal other than IPv6, has an IPv6 zone ID or holds other characters than
+    /// unreserved and sub-delims; or the port is missing, 0 or not a valid `u16`.
     InvalidTarget,
     /// The inner connector failed to provide a connection to the proxy.
     ConnectFailed(BoxError),
@@ -163,11 +164,12 @@ impl<S> ConnectUdp<S> {
         self
     }
 
-    /// Adds extra headers to each CONNECT-UDP request.
+    /// Adds extra headers to each CONNECT-UDP request, replacing any set earlier under the same
+    /// name.
     ///
-    /// A `Proxy-Authorization` among them is marked sensitive and replaces one set earlier.
-    /// `Content-Length`, `Content-Type` and `Transfer-Encoding` are dropped, as the Capsule
-    /// Protocol forbids them (RFC 9297 §3.2), and so is `Capsule-Protocol`, which the request sets.
+    /// A `Proxy-Authorization` among them is marked sensitive. `Content-Length`, `Content-Type` and
+    /// `Transfer-Encoding` are dropped, as the Capsule Protocol forbids them (RFC 9297 §3.2),
+    /// and so is `Capsule-Protocol`, which the request sets.
     pub fn with_headers(mut self, mut headers: HeaderMap) -> Self {
         for name in [
             CONTENT_LENGTH,

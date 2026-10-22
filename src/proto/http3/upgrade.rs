@@ -36,7 +36,7 @@ use crate::{
 #[cfg(feature = "http3-datagram")]
 use crate::{
     conn::http3::datagram::Pending,
-    proto::http3::datagram::{Abort, Registration, RequestState},
+    proto::http3::datagram::{Registration, RequestState},
 };
 
 // pin_project_lite does not support cfg on fields; nothing is released
@@ -119,9 +119,7 @@ where
         if let (Err(error), Some(mut body), Some(active)) = (result, body, this.active.as_ref()) {
             #[cfg(feature = "http3-datagram")]
             let error = match this.release {
-                Some(Release::Datagram(SessionGuard(state)))
-                    if state.aborted() == Some(Abort::Datagram) =>
-                {
+                Some(Release::Datagram(SessionGuard(state))) if state.aborted().is_some() => {
                     malformed_datagram_error()
                 }
                 _ => error,
@@ -134,7 +132,8 @@ where
     }
 }
 
-/// Datagram semantics and the registration owned by a CONNECT tunnel task.
+/// Datagram semantics of a CONNECT tunnel: the tunnel task keeps an ordinary request's
+/// registration, the tunnel IO a Datagram session's.
 #[cfg(feature = "http3-datagram")]
 pub(super) enum TunnelDatagrams {
     Disabled,

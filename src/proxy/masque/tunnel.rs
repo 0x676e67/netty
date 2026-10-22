@@ -48,7 +48,7 @@ pub struct UdpTunnel {
     write_closed: bool,
     /// The first write error, reported once by `poll_flush` or `poll_close`.
     write_error: Option<io::Error>,
-    /// Tasks waiting to receive, send and close.
+    /// Tasks waiting to receive, send, flush and close.
     wakers: Arc<Wakers>,
     /// Waker for every control stream write, so its wakeup reaches each waiting task.
     write_waker: Waker,
@@ -68,12 +68,13 @@ enum RecvError {
     Io(io::ErrorKind, String),
 }
 
-/// The receive, send and close tasks, woken together when the request stream accepts
+/// The receive, send, flush and close tasks, woken together when the request stream accepts
 /// writes again. Each has its own slot, so one task registering never drops another.
 #[derive(Default)]
 struct Wakers {
     recv: AtomicWaker,
     send: AtomicWaker,
+    flush: AtomicWaker,
     close: AtomicWaker,
 }
 
@@ -275,7 +276,7 @@ impl UdpTunnel {
     ///
     /// Returns the first write error once.
     pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.wakers.send.register(cx.waker());
+        self.wakers.flush.register(cx.waker());
         ready!(self.poll_write_buf());
         Poll::Ready(self.write_error.take().map_or(Ok(()), Err))
     }
@@ -310,7 +311,7 @@ impl UdpTunnel {
     ///
     /// Polls with `write_waker`, so the tasks registered in `wakers` retry once the stream
     /// drains. A write error stops sending, keeps the error for `poll_flush` or `poll_close`
-    /// and wakes the tasks waiting to send or close.
+    /// and wakes the tasks waiting to send, flush or close.
     fn poll_write_buf(&mut self) -> Poll<()> {
         if self.write_closed {
             return Poll::Ready(());
@@ -340,6 +341,7 @@ impl UdpTunnel {
             self.write_closed = true;
             self.write_buf.clear();
             self.wakers.send.wake();
+            self.wakers.flush.wake();
             self.wakers.close.wake();
         }
         Poll::Ready(())
@@ -376,6 +378,7 @@ impl Wake for Wakers {
     fn wake_by_ref(self: &Arc<Self>) {
         self.recv.wake();
         self.send.wake();
+        self.flush.wake();
         self.close.wake();
     }
 }
@@ -435,6 +438,8 @@ mod tests {
         let lock = || tunnel.lock().unwrap();
         assert_eq!(lock().max_payload_size(), 65527);
         assert_eq!(lock().try_send(&[0; 65528]), Err(SendError::TooLarge));
+        let (mut limit, _proxy) = capsule_tunnel(4096, true);
+        assert_eq!(limit.try_send(&[0; 65527]), Ok(()));
 
         let recv = tokio::spawn({
             let tunnel = tunnel.clone();
@@ -527,7 +532,32 @@ mod tests {
             "{ready:?}"
         );
 
-        // A close parked on the stream still finishes after the send slot is registered.
+        // A sender parked on the full capsule buffer still wakes when another task flushes.
+        let (tunnel, mut proxy) = capsule_tunnel(4096, false);
+        let tunnel = Arc::new(Mutex::new(tunnel));
+        let mut sent = 0;
+        while tunnel.lock().unwrap().try_send(&[7; 8000]).is_ok() {
+            sent += 1;
+        }
+        let ready = tokio::spawn({
+            let tunnel = tunnel.clone();
+            async move { poll_fn(|cx| tunnel.lock().unwrap().poll_send_ready(cx)).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!ready.is_finished(), "ready over the capsule limit");
+        let mut written = vec![0; sent * 8004];
+        let (flushed, read) = bounded(async {
+            tokio::join!(
+                poll_fn(|cx| tunnel.lock().unwrap().poll_flush(cx)),
+                proxy.read_exact(&mut written)
+            )
+        })
+        .await;
+        flushed.unwrap();
+        read.unwrap();
+        assert_eq!(bounded(ready).await.unwrap(), Ok(()));
+
+        // A close parked on the stream still finishes after a flush registers its slot.
         let (tunnel, mut proxy) = capsule_tunnel(4096, false);
         let tunnel = Arc::new(Mutex::new(tunnel));
         tunnel.lock().unwrap().try_send(&[7; 8000]).unwrap();
@@ -727,6 +757,8 @@ mod tests {
         max[1..].fill(7);
         for (datagram, expected) in [
             (vec![0, b'h', b'i'], Some(&b"hi"[..])),
+            // An empty UDP payload (RFC 9298 §5).
+            (vec![0], Some(&b""[..])),
             // A non-minimal Context ID 0.
             (vec![0x40, 0, b'h', b'i'], Some(&b"hi"[..])),
             (vec![1, b'h', b'i'], None),

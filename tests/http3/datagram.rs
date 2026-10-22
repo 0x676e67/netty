@@ -408,9 +408,14 @@ async fn dropped_tunnel_task_closes_the_session() {
 }
 
 #[tokio::test]
-async fn abort_malformed_resets_with_a_datagram_error() {
-    // Before anything arrived, and after the proxy's Datagrams and FIN.
-    for after_fin in [false, true] {
+async fn abort_malformed_resets_with_its_code() {
+    // Before anything arrived, after the proxy's Datagrams and FIN, and for a malformed message.
+    for (after_fin, message) in [(false, false), (true, false), (false, true)] {
+        let code = if message {
+            h3::error::Code::H3_MESSAGE_ERROR
+        } else {
+            h3::error::Code::H3_DATAGRAM_ERROR
+        };
         bounded(async {
             let Pair {
                 mut tx,
@@ -441,8 +446,8 @@ async fn abort_malformed_resets_with_a_datagram_error() {
                     panic!("the request stream was not reset");
                 };
                 assert!(
-                    matches!(error, h3::error::StreamError::RemoteTerminate { code, .. }
-                        if code == h3::error::Code::H3_DATAGRAM_ERROR),
+                    matches!(error, h3::error::StreamError::RemoteTerminate { code: reset, .. }
+                        if reset == code),
                     "{error}"
                 );
             });
@@ -459,7 +464,11 @@ async fn abort_malformed_resets_with_a_datagram_error() {
                 let mut rest = Vec::new();
                 control.read_to_end(&mut rest).await.unwrap();
             }
-            receiver.abort_malformed();
+            if message {
+                receiver.abort_malformed_message();
+            } else {
+                receiver.abort_malformed();
+            }
             if !after_fin {
                 // The control stream names the cause.
                 let error = control.read(&mut [0; 1]).await.unwrap_err();

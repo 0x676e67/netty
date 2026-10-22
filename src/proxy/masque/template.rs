@@ -77,6 +77,9 @@ impl Template {
         let proxy: Uri = format!("{scheme}://{authority}/")
             .parse()
             .map_err(|_| invalid("invalid scheme or authority"))?;
+        if crate::proxy::dst_host(&proxy).is_none() {
+            return Err(invalid("empty host"));
+        }
         // `Uri` keeps a port it cannot read; the proxy's must be a nonzero u16.
         let has_port = proxy.authority().is_some_and(|a| a.as_str() != a.host());
         if has_port && proxy.port_u16().is_none_or(|port| port == 0) {
@@ -100,7 +103,7 @@ impl Template {
         })
     }
 
-    /// Returns the default template for a proxy (RFC 9298 §3):
+    /// Returns the default template for a proxy (RFC 9298 §2):
     /// `https://{proxy}/.well-known/masque/udp/{target_host}/{target_port}/`.
     pub fn well_known(proxy: &Authority) -> Result<Self, MasqueError> {
         Template::new(&format!(
@@ -115,7 +118,8 @@ impl Template {
 
     /// Expands the template for a target.
     ///
-    /// `host` is a DNS name or an IP literal; IPv6 may be bracketed. The proxy resolves names.
+    /// `host` is a DNS name, with IDNs as A-labels, or an IP literal; IPv6 may be bracketed. The
+    /// proxy resolves names.
     pub fn expand(&self, host: &str, port: u16) -> Result<Uri, MasqueError> {
         let host = target_host(host)?;
         if port == 0 {
@@ -271,20 +275,28 @@ fn is_pct_encoded(bytes: &[u8]) -> bool {
     matches!(bytes, [b'%', hi, lo, ..] if hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit())
 }
 
-/// Normalizes `target_host`: strips IPv6 brackets and rejects empty hosts, other bracketed
-/// literals and zone IDs.
+/// Normalizes `target_host`: strips IPv6 brackets and rejects anything but an IPv6 literal or a
+/// non-empty reg-name, which covers DNS names and IPv4 literals.
 fn target_host(host: &str) -> Result<&str, MasqueError> {
     let is_ipv6 = |host: &str| host.parse::<Ipv6Addr>().is_ok();
-    // RFC 9298 §3: IPv6 zone identifiers are not supported. Brackets hold only IPv6.
+    // RFC 9298 §3: IPv6address / IPv4address / reg-name, without IPv6 zone identifiers. Brackets
+    // hold only IPv6.
     let host = match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
         Some(ip) if is_ipv6(ip) => ip,
         Some(_) => return Err(MasqueError::InvalidTarget),
-        None if host.is_empty() || (host.contains(':') && !is_ipv6(host)) => {
+        None if host.is_empty() || !(is_ipv6(host) || is_reg_name(host)) => {
             return Err(MasqueError::InvalidTarget);
         }
         None => host,
     };
     Ok(host)
+}
+
+/// Whether `host` holds only unreserved and sub-delims characters, a reg-name without
+/// percent-encoding (RFC 3986 §3.2.2).
+fn is_reg_name(host: &str) -> bool {
+    host.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=".contains(&b))
 }
 
 /// Percent-encodes all but unreserved characters (RFC 6570 §3.2.1), so IPv6 colons become `%3A`.
@@ -371,9 +383,19 @@ mod tests {
                 "variables outside the path and query",
             ),
             (
+                "://proxy.example/{target_host}/{target_port}/",
+                "empty scheme or authority",
+            ),
+            (
+                "https:///{target_host}/{target_port}/",
+                "empty scheme or authority",
+            ),
+            (
                 "https://user:secret@proxy.example/{target_host}/{target_port}/",
                 "userinfo in the authority",
             ),
+            ("https://:443/{target_host}/{target_port}/", "empty host"),
+            ("https://[]/{target_host}/{target_port}/", "empty host"),
             (
                 "https://proxy.example:99999/{target_host}/{target_port}/",
                 "invalid port",
@@ -452,6 +474,11 @@ mod tests {
             // Brackets hold only IPv6 literals.
             ("[example.com]", 443),
             ("[v1.x]", 443),
+            // Anything else must be a reg-name.
+            ("a/b.example", 443),
+            ("user@a.example", 443),
+            ("a%2Eexample", 443),
+            ("ü.example", 443),
             ("a.example", 0),
         ] {
             assert!(
