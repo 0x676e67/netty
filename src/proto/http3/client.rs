@@ -289,12 +289,6 @@ where
             return this.close();
         }
         if let Poll::Ready(error) = this.driver.poll_close(cx) {
-            // Route what QUIC received before the close, so a session keeps the Datagrams that
-            // came before its stream's end.
-            #[cfg(feature = "http3-datagram")]
-            if let Some(mut datagrams) = this.datagrams.take() {
-                let _ = datagrams.as_mut().poll(cx);
-            }
             return this.closed(error);
         }
 
@@ -325,30 +319,24 @@ where
                         registry.close();
                     }
                 }
-                // The Datagram reader can see the close first, so convert and classify it as
-                // http3 does for its own reader.
+                // The Datagram reader can see the close first, so classify it as http3 does for
+                // its own reader.
                 Err(DriveError::Connection(error)) => {
                     use http3::error::ConnectionError;
-                    let error = match error {
-                        rt::quic::ConnectionError::Timeout => ConnectionError::Timeout,
-                        error => ConnectionError::Remote(error),
+                    return match error {
+                        rt::quic::ConnectionError::Timeout => this.closed(ConnectionError::Timeout),
+                        // The backend failed while the connection is still open.
+                        rt::quic::ConnectionError::InternalError(reason) => {
+                            let error = ConnectionError::Remote(
+                                rt::quic::ConnectionError::InternalError(reason.clone()),
+                            );
+                            this.fail(Code::H3_INTERNAL_ERROR, Error::new_h3(error), &reason)
+                        }
+                        error => this.closed(ConnectionError::Remote(error)),
                     };
-                    // The backend failed while the connection is still open.
-                    if let ConnectionError::Remote(rt::quic::ConnectionError::InternalError(
-                        reason,
-                    )) = &error
-                    {
-                        let reason = reason.clone();
-                        return this.fail(Code::H3_INTERNAL_ERROR, Error::new_h3(error), &reason);
-                    }
-                    return this.closed(error);
                 }
                 Err(DriveError::Malformed(error)) => {
                     return this.fail(Code::H3_DATAGRAM_ERROR, error, "malformed HTTP Datagram");
-                }
-                Err(DriveError::Settings) => {
-                    let reason = "H3_DATAGRAM without the max_datagram_frame_size parameter";
-                    return this.fail(Code::H3_SETTINGS_ERROR, Error::new_h3(reason), reason);
                 }
             }
         }

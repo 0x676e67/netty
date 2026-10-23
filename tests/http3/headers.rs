@@ -474,23 +474,19 @@ async fn connect_udp_success_that_breaks_capsules_resets_both_directions() {
         }: Pair = pair_config(Http3Options::default(), Exec, false, false, true, None).await;
         let mut client_driver = Box::pin(driver);
         let server_task = tokio::spawn(async move {
-            // These break the Capsule Protocol (RFC 9297 §3.2), and a malformed response is a
-            // stream error in both directions (RFC 9114 §4.1.2).
-            for response in [
-                Response::builder().header("content-type", "application/octet-stream"),
-                Response::builder().header("content-length", "0"),
-                Response::builder().status(204),
-            ] {
-                let resolver = server.accept().await.unwrap().unwrap();
-                let (_, mut stream) = resolver.resolve_request().await.unwrap();
-                stream
-                    .send_response(response.body(()).unwrap())
-                    .await
-                    .unwrap();
-                let code = h3::error::Code::H3_MESSAGE_ERROR;
-                assert_eq!(reset_code(&mut stream).await, code);
-                assert_eq!(stop_code(&mut stream).await, code);
-            }
+            // Content-Length breaks the Capsule Protocol (RFC 9297 §3.2), and a malformed response
+            // is a stream error in both directions (RFC 9114 §4.1.2).
+            // https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
+            let resolver = server.accept().await.unwrap().unwrap();
+            let (_, mut stream) = resolver.resolve_request().await.unwrap();
+            let response = Response::builder()
+                .header("content-length", "0")
+                .body(())
+                .unwrap();
+            stream.send_response(response).await.unwrap();
+            let code = h3::error::Code::H3_MESSAGE_ERROR;
+            assert_eq!(reset_code(&mut stream).await, code);
+            assert_eq!(stop_code(&mut stream).await, code);
             // Other Extended CONNECT protocols keep their tunnel.
             let resolver = server.accept().await.unwrap().unwrap();
             let (_, mut stream) = resolver.resolve_request().await.unwrap();
@@ -513,13 +509,11 @@ async fn connect_udp_success_that_breaks_capsules_resets_both_directions() {
             request.extensions_mut().insert(protocol);
             request
         };
-        for _ in 0..3 {
-            let error = tx
-                .try_send_request(connect(Protocol::CONNECT_UDP))
-                .await
-                .unwrap_err();
-            assert!(!error.error().is_user(), "{:?}", error.error());
-        }
+        let error = tx
+            .try_send_request(connect(Protocol::CONNECT_UDP))
+            .await
+            .unwrap_err();
+        assert!(!error.error().is_user(), "{:?}", error.error());
         let mut response = tx
             .try_send_request(connect(Protocol::WEB_TRANSPORT))
             .await

@@ -27,9 +27,8 @@ pub trait DatagramConnection {
 
 /// Sends complete, unreliable QUIC Datagram payloads.
 pub trait SendDatagram {
-    /// Current maximum QUIC Datagram payload. The value can change and is checked again
-    /// when sending. None means unavailable: after the handshake, that the peer sent no
-    /// max_datagram_frame_size transport parameter.
+    /// Current maximum QUIC Datagram payload; None means unavailable.
+    /// The value can change and is checked again when sending.
     fn max_datagram_size(&self) -> Option<usize>;
 
     /// Accepts an entire payload or returns an error. Pending must not accept it
