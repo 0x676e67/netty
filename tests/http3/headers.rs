@@ -458,3 +458,77 @@ async fn response_size_hint_tracks_data_and_keeps_trailers() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn connect_udp_success_that_breaks_capsules_resets_both_directions() {
+    use netty::http3::Protocol;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    bounded(async {
+        let Pair {
+            mut tx,
+            driver,
+            mut server,
+            _endpoints,
+            ..
+        }: Pair = pair_config(Http3Options::default(), Exec, false, false, true, None).await;
+        let mut client_driver = Box::pin(driver);
+        let server_task = tokio::spawn(async move {
+            // Content-Length breaks the Capsule Protocol (RFC 9297 §3.2), and a malformed response
+            // is a stream error in both directions (RFC 9114 §4.1.2).
+            // https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
+            let resolver = server.accept().await.unwrap().unwrap();
+            let (_, mut stream) = resolver.resolve_request().await.unwrap();
+            let response = Response::builder()
+                .header("content-length", "0")
+                .body(())
+                .unwrap();
+            stream.send_response(response).await.unwrap();
+            let code = h3::error::Code::H3_MESSAGE_ERROR;
+            assert_eq!(reset_code(&mut stream).await, code);
+            assert_eq!(stop_code(&mut stream).await, code);
+            // Other Extended CONNECT protocols keep their tunnel.
+            let resolver = server.accept().await.unwrap().unwrap();
+            let (_, mut stream) = resolver.resolve_request().await.unwrap();
+            let response = Response::builder()
+                .header("content-length", "0")
+                .body(())
+                .unwrap();
+            stream.send_response(response).await.unwrap();
+            let mut chunk = stream.recv_data().await.unwrap().unwrap();
+            assert_eq!(chunk.copy_to_bytes(chunk.remaining()), "ping");
+            stream.send_data(Bytes::from_static(b"pong")).await.unwrap();
+            stream.finish().await.unwrap();
+            let _ = server.accept().await;
+        });
+
+        let connect = |protocol| {
+            let mut request = Request::connect("https://localhost/tunnel")
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            request.extensions_mut().insert(protocol);
+            request
+        };
+        let error = tx
+            .try_send_request(connect(Protocol::CONNECT_UDP))
+            .await
+            .unwrap_err();
+        assert!(!error.error().is_user(), "{:?}", error.error());
+        let mut response = tx
+            .try_send_request(connect(Protocol::WEB_TRANSPORT))
+            .await
+            .unwrap();
+        let mut tunnel = netty::upgrade::on(&mut response).await.unwrap();
+        tunnel.write_all(b"ping").await.unwrap();
+        tunnel.flush().await.unwrap();
+        let mut pong = [0; 4];
+        tunnel.read_exact(&mut pong).await.unwrap();
+        assert_eq!(&pong, b"pong");
+        drop(tunnel);
+        drop(tx);
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
+        server_task.await.unwrap();
+    })
+    .await;
+}
