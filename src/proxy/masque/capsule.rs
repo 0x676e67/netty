@@ -1,4 +1,7 @@
-//! Capsule Protocol framing (RFC 9297 §3) for DATAGRAM capsules (§3.5).
+//! Capsule Protocol framing ([RFC 9297 §3]) for DATAGRAM capsules ([§3.5]).
+//!
+//! [RFC 9297 §3]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3
+//! [§3.5]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3.5
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -18,7 +21,9 @@ pub(super) fn encode_datagram(payload: &[u8], buf: &mut BytesMut) {
     buf.put_slice(payload);
 }
 
-/// Writes a QUIC variable-length integer (RFC 9000 §16); `value` must be below 2^62.
+/// Writes a QUIC variable-length integer ([RFC 9000 §16]); `value` must be below 2^62.
+///
+/// [RFC 9000 §16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-16
 fn put_varint(buf: &mut BytesMut, value: u64) {
     debug_assert!(value < 1 << 62);
     let (tag, len) = match value {
@@ -45,7 +50,10 @@ pub(super) fn varint(buf: &[u8]) -> Option<(u64, usize)> {
 /// Streaming capsule decoder yielding DATAGRAM capsule values.
 ///
 /// Capsules of other types, and DATAGRAM capsules too large to buffer whose Context ID is not
-/// 0, are skipped as their bytes arrive (RFC 9297 §3.2, §3.5).
+/// 0, are skipped as their bytes arrive ([RFC 9297 §3.2], [§3.5]).
+///
+/// [RFC 9297 §3.2]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
+/// [§3.5]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3.5
 #[derive(Debug, Default)]
 pub(super) struct Decoder {
     skip: u64,
@@ -54,7 +62,9 @@ pub(super) struct Decoder {
 impl Decoder {
     /// Takes the next DATAGRAM capsule value from `buf`; `None` means more bytes are needed.
     ///
-    /// A Context ID 0 capsule too large to carry a UDP payload is malformed (RFC 9298 §5).
+    /// A Context ID 0 capsule too large to carry a UDP payload is malformed ([RFC 9298 §5]).
+    ///
+    /// [RFC 9298 §5]: https://www.rfc-editor.org/rfc/rfc9298.html#section-5
     pub(super) fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Bytes>, MasqueError> {
         loop {
             if self.skip > 0 {
@@ -96,7 +106,7 @@ impl Decoder {
     }
 
     /// Whether the stream stopped inside a capsule, which is malformed at its end
-    /// (RFC 9297 §3.3).
+    /// ([RFC 9297 §3.3](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.3)).
     pub(super) fn is_partial(&self, buf: &BytesMut) -> bool {
         self.skip > 0 || !buf.is_empty()
     }
@@ -122,7 +132,8 @@ mod tests {
             assert_eq!(varint(&buf), Some((value, len)));
             assert_eq!(varint(&buf[..len - 1]), None, "{value} truncated");
         }
-        // Non-minimal encodings are valid (RFC 9000 §16).
+        // Non-minimal encodings are valid.
+        // https://www.rfc-editor.org/rfc/rfc9000.html#section-16
         assert_eq!(varint(&[0x40, 0x05]), Some((5, 2)));
     }
 
@@ -164,7 +175,8 @@ mod tests {
         assert_eq!(values[0].len(), 65528);
         assert_eq!(values[1].len(), 65535);
 
-        // A Context ID 0 capsule too large for a UDP payload aborts (RFC 9298 §5).
+        // A Context ID 0 capsule too large for a UDP payload aborts.
+        // https://www.rfc-editor.org/rfc/rfc9298.html#section-5
         let mut buf = BytesMut::from(&[0, 0x80, 1, 0, 0, 0][..]);
         assert!(matches!(
             Decoder::default().decode(&mut buf),

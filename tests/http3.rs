@@ -874,6 +874,79 @@ async fn headers_after_a_connect_response_close_the_connection() {
 }
 
 #[tokio::test]
+async fn stream_violation_closes_from_every_connection_exit() {
+    use tokio::io::AsyncReadExt;
+
+    // A stream's violation closes the connection with its code whether the task polls next, the
+    // task is dropped first, or the handle is.
+    // https://www.rfc-editor.org/rfc/rfc9114.html#section-8
+    for exit in ["task", "drop task", "drop handle"] {
+        bounded(async {
+            let hold = Hold::default();
+            let Pair {
+                mut tx,
+                driver,
+                mut server,
+                server_quic,
+                _endpoints,
+            }: Pair<_, Hold> = pair_with(Http3Options::default(), hold.clone()).await;
+            let (go, wait_go) = oneshot::channel();
+            let server_task = tokio::spawn(async move {
+                // The first tunnel stays open, so only the violation can end the connection.
+                let mut streams = Vec::new();
+                for _ in 0..2 {
+                    let resolver = server.accept().await.unwrap().unwrap();
+                    let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                    stream.send_response(Response::new(())).await.unwrap();
+                    streams.push(stream);
+                }
+                wait_go.await.unwrap();
+                streams[1]
+                    .send_data(Bytes::from_static(b"x"))
+                    .await
+                    .unwrap();
+                let mut trailers = HeaderMap::new();
+                trailers.insert("x-late", "trailers".parse().unwrap());
+                streams[1].send_trailers(trailers).await.unwrap();
+                let error = server_quic.closed().await;
+                let unexpected = h3::error::Code::H3_FRAME_UNEXPECTED.value();
+                assert!(
+                    matches!(error, quinn::ConnectionError::ApplicationClosed(ref close)
+                        if close.error_code.into_inner() == unexpected),
+                    "{exit}: {error}"
+                );
+                drop((server, streams));
+            });
+            let mut tunnels = Vec::new();
+            for _ in 0..2 {
+                let request = Request::connect("localhost:443")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap();
+                let mut response = tx.try_send_request(request).await.unwrap();
+                tunnels.push(netty::upgrade::on(&mut response).await.unwrap());
+            }
+            // Nothing polls a taken task, so its drop or the handle's must close the connection.
+            let task = (exit != "task").then(|| hold.take());
+            go.send(()).unwrap();
+            let mut bytes = Vec::new();
+            assert!(tunnels[1].read_to_end(&mut bytes).await.is_err(), "{exit}");
+            assert_eq!(bytes, b"x");
+            if exit == "drop handle" {
+                // The task outlives the close, so only the handle can have sent it.
+                drop(driver);
+                server_task.await.unwrap();
+                drop(task);
+            } else {
+                drop(task);
+                assert!(driver.await.is_err(), "{exit}");
+                server_task.await.unwrap();
+            }
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn extended_connect_requires_peer_permission() {
     bounded(async {
         let Pair {
@@ -920,6 +993,44 @@ impl<F: Future<Output = ()> + Send + 'static> Executor<F> for Discard {
         } else {
             tokio::spawn(future);
         }
+    }
+}
+
+type BoxTask = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Polls the connection task, submitted by handshake first, until the test takes it.
+#[derive(Clone, Default)]
+struct Hold {
+    submitted: Arc<AtomicBool>,
+    connection: Arc<std::sync::Mutex<Option<BoxTask>>>,
+}
+
+impl Hold {
+    fn take(&self) -> BoxTask {
+        self.connection.lock().unwrap().take().unwrap()
+    }
+}
+
+impl<F: Future<Output = ()> + Send + 'static> Executor<F> for Hold {
+    fn execute(&self, future: F) {
+        if self.submitted.swap(true, Ordering::Relaxed) {
+            tokio::spawn(future);
+            return;
+        }
+        *self.connection.lock().unwrap() = Some(Box::pin(future));
+        let connection = self.connection.clone();
+        tokio::spawn(std::future::poll_fn(move |cx| {
+            let mut slot = connection.lock().unwrap();
+            let Some(task) = slot.as_mut() else {
+                return std::task::Poll::Ready(());
+            };
+            let poll = task.as_mut().poll(cx);
+            if poll.is_ready() {
+                // Drop the finished task at once, as a real executor would.
+                *slot = None;
+            }
+            poll
+        }));
     }
 }
 

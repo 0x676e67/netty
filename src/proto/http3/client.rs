@@ -778,7 +778,10 @@ where
 fn closed_normally(error: &http3::error::ConnectionError) -> bool {
     use http3::{error::ConnectionError, quic::ConnectionErrorIncoming};
 
-    // HTTP/3 (RFC 9114 §8.1), QPACK (RFC 9204 §6) and HTTP Datagram (RFC 9297 §5) codes.
+    // HTTP/3, QPACK and HTTP Datagram codes.
+    // https://www.rfc-editor.org/rfc/rfc9114.html#section-8.1
+    // https://www.rfc-editor.org/rfc/rfc9204.html#section-6
+    // https://www.rfc-editor.org/rfc/rfc9297.html#section-5.2
     let known = |code: u64| matches!(code, 0x33 | 0x100..=0x110 | 0x200..=0x202);
     error.is_h3_no_error()
         || matches!(

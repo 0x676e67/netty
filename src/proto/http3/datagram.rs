@@ -1338,4 +1338,132 @@ mod tests {
         assert_eq!(driver.sender.accepted[0].len(), 1200);
         assert_eq!(registry.lock().outgoing, 0);
     }
+
+    #[test]
+    fn closed_send_side_releases_the_held_packet() {
+        let registry = registry();
+        let request = registry.register(
+            StreamId::try_from(0).unwrap(),
+            true,
+            CancellationToken::new(),
+        );
+        let state = request.0.clone();
+        state.try_send(&Bytes::from_static(b"held")).unwrap();
+        let mut driver = Driver {
+            sender: DatagramSender {
+                max: 1300,
+                blocked: true,
+                wake: None,
+                accepted: Vec::new(),
+            },
+            receiver: DatagramReceiver::default(),
+            registry: registry.clone(),
+            pending: None,
+        };
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
+        // A shutdown waits for the packet QUIC holds when the send side closes under it.
+        state.finish_send();
+        state.close_send();
+        assert!(!state.drained());
+        let shutdown = Arc::new(Wakes::default());
+        let shutdown_waker = futures_util::task::waker(shutdown.clone());
+        let mut drained = Box::pin(state.capacity_notify().notified_owned());
+        let mut shutdown_cx = Context::from_waker(&shutdown_waker);
+        assert!(drained.as_mut().poll(&mut shutdown_cx).is_pending());
+        assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
+        assert!(driver.pending.is_none() && driver.sender.accepted.is_empty());
+        assert!(state.drained(), "the discarded packet holds off the FIN");
+        assert!(shutdown.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[cfg(feature = "masque")]
+    fn masque_tunnel(
+        registry: &Arc<Registry>,
+    ) -> (
+        Registration,
+        crate::proxy::masque::UdpTunnel,
+        tokio::io::DuplexStream,
+    ) {
+        use crate::{conn::http3::datagram::Pending, proxy::masque::UdpTunnel};
+        let request = registry.register(
+            StreamId::try_from(0).unwrap(),
+            true,
+            CancellationToken::new(),
+        );
+        let (control, proxy) = tokio::io::duplex(64);
+        let mut response = http::Response::new(());
+        response.extensions_mut().insert(Pending::new(
+            crate::upgrade::Upgraded::new(control, Bytes::new()),
+            request.0.clone(),
+        ));
+        let tunnel = UdpTunnel::from_http3(&mut response).unwrap();
+        (request, tunnel, proxy)
+    }
+
+    #[cfg(feature = "masque")]
+    #[test]
+    fn masque_tunnel_ends_after_datagrams_quic_received_before_its_fin() {
+        let registry = registry();
+        let (request, mut tunnel, proxy) = masque_tunnel(&registry);
+        // The stream task saw the proxy's FIN while QUIC still held two Context ID 0 Datagrams.
+        let mut driver = Driver {
+            sender: DatagramSender {
+                max: 1300,
+                blocked: false,
+                wake: None,
+                accepted: Vec::new(),
+            },
+            receiver: DatagramReceiver(
+                [
+                    Bytes::from_static(&[0, 0, b'a']),
+                    Bytes::from_static(&[0, 0, b'b']),
+                ]
+                .into(),
+            ),
+            registry: registry.clone(),
+            pending: None,
+        };
+        request.0.finish_recv();
+        drop(proxy);
+        let wakes = Arc::new(Wakes::default());
+        let waker = futures_util::task::waker(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            tunnel.poll_recv(&mut cx).is_pending(),
+            "ended before routing"
+        );
+        let mut driver_cx = Context::from_waker(std::task::Waker::noop());
+        assert!(Pin::new(&mut driver).poll(&mut driver_cx).is_pending());
+        assert!(wakes.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        for payload in ["a", "b"] {
+            let Poll::Ready(Ok(Some(received))) = tunnel.poll_recv(&mut cx) else {
+                panic!("{payload} lost");
+            };
+            assert_eq!(received, payload);
+        }
+        assert!(matches!(tunnel.poll_recv(&mut cx), Poll::Ready(Ok(None))));
+    }
+
+    #[cfg(feature = "masque")]
+    #[tokio::test]
+    async fn masque_tunnel_alternates_datagrams_and_capsules() {
+        use tokio::io::AsyncWriteExt;
+        let registry = registry();
+        let (_request, mut tunnel, mut proxy) = masque_tunnel(&registry);
+        // Neither encoding holds back the other, and a quiet stream leaves the turn to datagrams.
+        for payload in *b"123" {
+            registry.receive(Bytes::from(vec![0, 0, payload])).unwrap();
+        }
+        proxy.write_all(&[0, 2, 0, b'c']).await.unwrap();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let mut received = Vec::new();
+        for _ in 0..4 {
+            let Poll::Ready(Ok(Some(payload))) = tunnel.poll_recv(&mut cx) else {
+                panic!("{received:?} then nothing");
+            };
+            received.push(payload);
+        }
+        assert_eq!(received, ["1", "c", "2", "3"]);
+    }
 }

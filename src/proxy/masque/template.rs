@@ -12,11 +12,13 @@ use super::MasqueError;
 /// A validated CONNECT-UDP URI template, such as
 /// `https://proxy.example:443/.well-known/masque/udp/{target_host}/{target_port}/`.
 ///
-/// Templates are checked against RFC 9298 §2 when parsed: absolute, variables only in the path
-/// or query, both `target_host` and `target_port` present, and no level 4 or reserved
+/// Templates are checked against [RFC 9298 §2] when parsed: absolute, variables only in the
+/// path or query, both `target_host` and `target_port` present, and no level 4 or reserved
 /// expansions. Variables other than those two expand as undefined. Userinfo is rejected, as it
 /// would travel in every request's `:authority`; send credentials with
 /// [`ConnectUdp::with_auth`](super::ConnectUdp::with_auth).
+///
+/// [RFC 9298 §2]: https://www.rfc-editor.org/rfc/rfc9298.html#section-2
 #[derive(Clone)]
 pub struct Template {
     raw: Box<str>,
@@ -78,9 +80,14 @@ impl Template {
         if crate::proxy::dst_host(&proxy).is_none() {
             return Err(invalid("empty host"));
         }
-        // `Uri` keeps a port it cannot read; the proxy's must be a nonzero u16.
+        // `Uri` keeps a port it cannot read, and `u16` parsing takes a leading "+"; the proxy's
+        // must be nonzero digits.
+        // https://www.rfc-editor.org/rfc/rfc3986.html#section-3.2.3
         let has_port = proxy.authority().is_some_and(|a| a.as_str() != a.host());
-        if has_port && proxy.port_u16().is_none_or(|port| port == 0) {
+        let valid_port = proxy.port().is_some_and(|port| {
+            port.as_u16() != 0 && port.as_str().bytes().all(|b| b.is_ascii_digit())
+        });
+        if has_port && !valid_port {
             return Err(invalid("invalid port"));
         }
 
@@ -101,8 +108,10 @@ impl Template {
         })
     }
 
-    /// Returns the default template for a proxy (RFC 9298 §2):
+    /// Returns the default template for a proxy ([RFC 9298 §2]):
     /// `https://{proxy}/.well-known/masque/udp/{target_host}/{target_port}/`.
+    ///
+    /// [RFC 9298 §2]: https://www.rfc-editor.org/rfc/rfc9298.html#section-2
     pub fn well_known(proxy: &Authority) -> Result<Self, MasqueError> {
         Template::new(&format!(
             "https://{proxy}/.well-known/masque/udp/{{target_host}}/{{target_port}}/"
@@ -217,7 +226,9 @@ fn parse_parts(mut rest: &str) -> Result<Vec<Part>, MasqueError> {
     Ok(parts)
 }
 
-/// RFC 6570 §2.1 literals, excluding a fragment.
+/// [RFC 6570 §2.1] literals, excluding a fragment.
+///
+/// [RFC 6570 §2.1]: https://www.rfc-editor.org/rfc/rfc6570.html#section-2.1
 fn validate_literal(literal: &str) -> Result<(), MasqueError> {
     let bytes = literal.as_bytes();
     let mut i = 0;
@@ -242,8 +253,10 @@ fn validate_literal(literal: &str) -> Result<(), MasqueError> {
     Ok(())
 }
 
-/// RFC 6570 §2.3: `varchar *( ["."] varchar )`, where varchar is ALPHA / DIGIT / "_" /
-/// pct-encoded.
+/// Whether `name` is a varname ([RFC 6570 §2.3]): `varchar *( ["."] varchar )`, where varchar
+/// is ALPHA / DIGIT / "_" / pct-encoded.
+///
+/// [RFC 6570 §2.3]: https://www.rfc-editor.org/rfc/rfc6570.html#section-2.3
 fn is_varname(name: &str) -> bool {
     let mut rest = name.as_bytes();
     // A varchar must start the name, end it, and follow each ".".
@@ -268,7 +281,8 @@ fn is_varname(name: &str) -> bool {
     !need_varchar
 }
 
-/// Whether `bytes` starts with `"%" HEXDIG HEXDIG` (RFC 6570 §1.5).
+/// Whether `bytes` starts with `"%" HEXDIG HEXDIG`
+/// ([RFC 6570 §1.5](https://www.rfc-editor.org/rfc/rfc6570.html#section-1.5)).
 fn is_pct_encoded(bytes: &[u8]) -> bool {
     matches!(bytes, [b'%', hi, lo, ..] if hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit())
 }
@@ -277,8 +291,9 @@ fn is_pct_encoded(bytes: &[u8]) -> bool {
 /// non-empty reg-name, which covers DNS names and IPv4 literals.
 fn target_host(host: &str) -> Result<&str, MasqueError> {
     let is_ipv6 = |host: &str| host.parse::<Ipv6Addr>().is_ok();
-    // RFC 9298 §3: IPv6address / IPv4address / reg-name, without IPv6 zone identifiers. Brackets
-    // hold only IPv6.
+    // IPv6address / IPv4address / reg-name, without IPv6 zone identifiers. Brackets hold only
+    // IPv6.
+    // https://www.rfc-editor.org/rfc/rfc9298.html#section-3
     let host = match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
         Some(ip) if is_ipv6(ip) => ip,
         Some(_) => return Err(MasqueError::InvalidTarget),
@@ -291,13 +306,18 @@ fn target_host(host: &str) -> Result<&str, MasqueError> {
 }
 
 /// Whether `host` holds only unreserved and sub-delims characters, a reg-name without
-/// percent-encoding (RFC 3986 §3.2.2).
+/// percent-encoding ([RFC 3986 §3.2.2]).
+///
+/// [RFC 3986 §3.2.2]: https://www.rfc-editor.org/rfc/rfc3986.html#section-3.2.2
 fn is_reg_name(host: &str) -> bool {
     host.bytes()
         .all(|b| b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=".contains(&b))
 }
 
-/// Percent-encodes all but unreserved characters (RFC 6570 §3.2.1), so IPv6 colons become `%3A`.
+/// Percent-encodes all but unreserved characters ([RFC 6570 §3.2.1]), so IPv6 colons become
+/// `%3A`.
+///
+/// [RFC 6570 §3.2.1]: https://www.rfc-editor.org/rfc/rfc6570.html#section-3.2.1
 fn percent_encode(value: &str, out: &mut String) {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for b in value.bytes() {
@@ -404,6 +424,10 @@ mod tests {
             ),
             (
                 "https://proxy.example:0/{target_host}/{target_port}/",
+                "invalid port",
+            ),
+            (
+                "https://proxy.example:+443/{target_host}/{target_port}/",
                 "invalid port",
             ),
             ("https://proxy.example/{target_host}", missing),

@@ -188,6 +188,12 @@ impl Sender {
             .map_err(|kind| SendError { kind, payload })
     }
 
+    /// Whether sends fail with `Closed`.
+    #[cfg(feature = "masque")]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.state.ready() == Err(SendErrorKind::Closed)
+    }
+
     /// Like [`Self::try_send`] for `prefix` followed by `payload`, framed in one copy.
     #[cfg(feature = "masque")]
     pub(crate) fn try_send_prefixed(
