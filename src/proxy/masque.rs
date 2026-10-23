@@ -39,7 +39,7 @@ const CAPSULE_PROTOCOL: HeaderName = HeaderName::from_static("capsule-protocol")
 /// Builds an HTTP/3 CONNECT-UDP request for an expanded template (RFC 9298 §3.4).
 ///
 /// The request declares HTTP Datagram semantics, so send it on a connection made with
-/// `conn::http3::Builder::handshake_with_datagrams`.
+/// [`Builder::handshake_with_datagrams`](crate::conn::http3::Builder::handshake_with_datagrams).
 pub fn http3_request<B: Default>(uri: Uri) -> Request<B> {
     let mut request = connect_request(uri);
     request.extensions_mut().insert(Protocol::CONNECT_UDP);
@@ -75,7 +75,7 @@ fn validate<B>(response: &Response<B>) -> Result<(), MasqueError> {
 /// [proxy](Template::proxy), so it can pool connections. `call` takes the UDP target as a URI
 /// whose host and port fill `target_host` and `target_port`; UDP has no default port, so the
 /// URI must name one. The request declares HTTP Datagrams, so the connection must come from
-/// `conn::http3::Builder::handshake_with_datagrams`.
+/// [`Builder::handshake_with_datagrams`](crate::conn::http3::Builder::handshake_with_datagrams).
 ///
 /// A refusal yields only its status; to read its headers, such as `Proxy-Authenticate`, send
 /// [`http3_request`] and open the tunnel with [`UdpTunnel::from_http3`].

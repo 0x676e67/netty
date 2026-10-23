@@ -93,6 +93,11 @@ pub struct SendRequest<B> {
 /// connection. It resolves once the task finishes; dropping it closes the
 /// QUIC connection and every outstanding exchange. The body and executor
 /// types are fixed by the handshake.
+///
+/// A peer that closes with an unknown error code ends it with `Ok`
+/// ([RFC 9114 §8](https://www.rfc-editor.org/rfc/rfc9114.html#section-8)); a HEADERS frame
+/// after a CONNECT response closes it with `H3_FRAME_UNEXPECTED`
+/// ([RFC 9114 §4.4](https://www.rfc-editor.org/rfc/rfc9114.html#section-4.4)).
 #[must_use = "dropping the connection handle closes the connection"]
 pub struct Connection<Q, B, E>
 where
