@@ -325,9 +325,23 @@ where
                         registry.close();
                     }
                 }
-                // The Datagram reader can see the close first, so classify it the same way.
+                // The Datagram reader can see the close first, so convert and classify it as
+                // http3 does for its own reader.
                 Err(DriveError::Connection(error)) => {
-                    return this.closed(http3::error::ConnectionError::Remote(error));
+                    use http3::error::ConnectionError;
+                    let error = match error {
+                        rt::quic::ConnectionError::Timeout => ConnectionError::Timeout,
+                        error => ConnectionError::Remote(error),
+                    };
+                    // The backend failed while the connection is still open.
+                    if let ConnectionError::Remote(rt::quic::ConnectionError::InternalError(
+                        reason,
+                    )) = &error
+                    {
+                        let reason = reason.clone();
+                        return this.fail(Code::H3_INTERNAL_ERROR, Error::new_h3(error), &reason);
+                    }
+                    return this.closed(error);
                 }
                 Err(DriveError::Malformed(error)) => {
                     return this.fail(Code::H3_DATAGRAM_ERROR, error, "malformed HTTP Datagram");

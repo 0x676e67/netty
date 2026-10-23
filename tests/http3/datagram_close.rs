@@ -378,13 +378,13 @@ where
 /// Lets a test make the Datagram reader see the peer's close before the streams do.
 struct CloseFirst<T> {
     inner: T,
-    close: Option<oneshot::Receiver<u64>>,
+    close: Option<oneshot::Receiver<rt::ConnectionError>>,
 }
 
 /// Reports the close the test sends, then reads from the transport.
 struct CloseFirstReceiver<R> {
     inner: R,
-    close: Option<oneshot::Receiver<u64>>,
+    close: Option<oneshot::Receiver<rt::ConnectionError>>,
 }
 
 // ===== impl CloseFirst =====
@@ -457,11 +457,11 @@ impl<R: rt::RecvDatagram> rt::RecvDatagram for CloseFirstReceiver<R> {
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<Bytes>, rt::ConnectionError>> {
         if let Some(close) = &mut self.close
-            && let Poll::Ready(code) = Pin::new(close).poll(cx)
+            && let Poll::Ready(error) = Pin::new(close).poll(cx)
         {
             self.close = None;
-            if let Ok(error_code) = code {
-                return Poll::Ready(Err(rt::ConnectionError::ApplicationClose { error_code }));
+            if let Ok(error) = error {
+                return Poll::Ready(Err(error));
             }
         }
         self.inner.poll_recv(cx)
@@ -470,12 +470,22 @@ impl<R: rt::RecvDatagram> rt::RecvDatagram for CloseFirstReceiver<R> {
 
 #[tokio::test]
 async fn peer_close_seen_first_by_the_datagram_reader_is_classified() {
+    use rt::ConnectionError::{ApplicationClose, InternalError};
+
     // H3_NO_ERROR and unknown codes close normally, whichever reader sees the close first.
     // https://www.rfc-editor.org/rfc/rfc9114.html#section-8
-    for (code, normal) in [(0x100, true), (0x21, true), (0x101, false)] {
+    // A backend's own failure leaves the connection open, so the client closes it.
+    let internal = h3::error::Code::H3_INTERNAL_ERROR.value();
+    for (error, normal, peer_code) in [
+        (ApplicationClose { error_code: 0x100 }, true, None),
+        (ApplicationClose { error_code: 0x21 }, true, None),
+        (ApplicationClose { error_code: 0x101 }, false, None),
+        (InternalError("queue failed".into()), false, Some(internal)),
+    ] {
         bounded(async {
             let (_, server_config, client_config) = tls::config();
             let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
+            let peer = server.clone();
             let (close, closing) = oneshot::channel();
             let ((tx, driver), server) = tokio::join!(
                 async {
@@ -495,9 +505,18 @@ async fn peer_close_seen_first_by_the_datagram_reader_is_classified() {
                         .unwrap()
                 }
             );
-            close.send(code).unwrap();
+            let name = format!("{error:?}");
+            close.send(error).unwrap();
             let result = driver.await;
-            assert_eq!(result.is_ok(), normal, "{code:#x}: {result:?}");
+            assert_eq!(result.is_ok(), normal, "{name}: {result:?}");
+            if let Some(code) = peer_code {
+                match peer.closed().await {
+                    quinn::ConnectionError::ApplicationClosed(close) => {
+                        assert_eq!(close.error_code.into_inner(), code, "{name}");
+                    }
+                    error => panic!("{name}: unexpected peer close: {error:?}"),
+                }
+            }
             drop((tx, server));
         })
         .await;

@@ -104,11 +104,12 @@ impl Shared {
     }
 
     /// Fails the connection with `code` for a protocol violation a stream found. The error is
-    /// published at once; the driver then closes the connection.
+    /// published before this returns, also to a later caller; the driver then closes the
+    /// connection.
     pub(crate) fn violate(&self, code: Code, reason: &'static str) {
-        if self.violation.set((code, reason)).is_ok() {
-            self.terminate(Error::new_h3(reason));
-        }
+        // Set first, so a drain never closes with H3_NO_ERROR once the error is visible.
+        let _ = self.violation.set((code, reason));
+        self.terminate(Error::new_h3(reason));
         self.waker.wake();
     }
 

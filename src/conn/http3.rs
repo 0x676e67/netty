@@ -308,9 +308,10 @@ impl<E> Builder<E> {
     /// Initializes HTTP/3 with a single raw Datagram reader and bounded routing.
     /// Advertises H3_DATAGRAM; native sends still require peer negotiation.
     /// The supplied QUIC transport must advertise support for receiving Datagram
-    /// frames in its transport parameters, and a peer that enables H3_DATAGRAM without
-    /// them closes the connection with `H3_SETTINGS_ERROR`
-    /// ([RFC 9297 §2.1.1](https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1.1)).
+    /// frames in its transport parameters. A peer that enables H3_DATAGRAM without sending
+    /// max_datagram_frame_size gets the connection closed with `H3_SETTINGS_ERROR`
+    /// ([RFC 9297 §2.1.1](https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1.1)); a peer
+    /// limit too small for any payload, 0 included, keeps it and fails sends with `TooLarge`.
     #[cfg(feature = "http3-datagram")]
     pub async fn handshake_with_datagrams<Q, B>(
         self,
