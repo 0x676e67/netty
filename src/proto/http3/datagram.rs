@@ -110,7 +110,18 @@ pub(crate) struct Registration(pub(super) Arc<RequestState>);
 
 /// Moves packets between the QUIC Datagram transport and the registry; the
 /// connection task polls it.
-pub(crate) type Drive = BoxFuture<'static, Result<(), (Code, Error)>>;
+pub(crate) type Drive = BoxFuture<'static, Result<(), DriveError>>;
+
+/// Why the Datagram driver stopped before the transport's normal closure.
+pub(crate) enum DriveError {
+    /// The peer enabled HTTP Datagrams without the QUIC Datagram transport parameter, an
+    /// `H3_SETTINGS_ERROR`.
+    Settings,
+    /// A received Datagram breaks the HTTP Datagram format, an `H3_DATAGRAM_ERROR`.
+    Malformed(Error),
+    /// The QUIC connection closed or failed.
+    Connection(quic::ConnectionError),
+}
 
 /// Drives a backend sender and receiver with bounded work per poll.
 struct Driver<S, R> {
@@ -118,6 +129,8 @@ struct Driver<S, R> {
     receiver: R,
     registry: Arc<Registry>,
     pending: Option<(u64, Bytes)>,
+    /// Whether the transport was checked against the peer's SETTINGS.
+    checked: bool,
 }
 
 /// Why an HTTP Datagram was not admitted to the local send queue.
@@ -156,6 +169,7 @@ impl Registry {
             receiver,
             registry: registry.clone(),
             pending: None,
+            checked: false,
         };
         (registry, Box::pin(driver))
     }
@@ -284,7 +298,9 @@ impl Registry {
             // Unreliable receive queues drop the newest packet.
             return Ok(());
         }
-        entry.incoming.push_back(payload);
+        // The backend's slice can keep a whole receive buffer, such as a GRO batch, alive
+        // while queued; a copy keeps the budgets a bound on memory.
+        entry.incoming.push_back(Bytes::copy_from_slice(&payload));
         entry.incoming_bytes += size;
         state.incoming += size;
         drop(state);
@@ -626,15 +642,28 @@ where
     S: quic::SendDatagram,
     R: quic::RecvDatagram,
 {
-    type Output = std::result::Result<(), (Code, Error)>;
+    type Output = std::result::Result<(), DriveError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         this.registry.waker.register(cx.waker());
         let max_size = this.sender.max_datagram_size();
-        if mem::replace(&mut this.registry.lock().max_size, max_size) != max_size {
+        let (changed, negotiated) = {
+            let mut state = this.registry.lock();
+            (
+                mem::replace(&mut state.max_size, max_size) != max_size,
+                state.negotiated,
+            )
+        };
+        if changed {
             // Readiness is measured against the limit, so a smaller one can admit a parked sender.
             this.registry.capacity_notify.notify_waiters();
+        }
+        if negotiated && !mem::replace(&mut this.checked, true) && max_size.is_none() {
+            // The peer's SETTINGS enabled HTTP Datagrams, but it sent no
+            // max_datagram_frame_size transport parameter.
+            // https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1.1
+            return Poll::Ready(Err(DriveError::Settings));
         }
         // A FIN taken now came after every Datagram QUIC holds, so routing a budget of them
         // before applying it keeps them; a flood beyond that budget may lose some.
@@ -643,14 +672,13 @@ where
         // directions moving even under a continuously ready producer.
         for index in 0..32 {
             match this.receiver.poll_recv(cx) {
-                Poll::Ready(Ok(Some(packet))) => this
-                    .registry
-                    .receive(packet)
-                    .map_err(|error| (Code::H3_DATAGRAM_ERROR, error))?,
-                Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
-                Poll::Ready(Err(error)) => {
-                    return Poll::Ready(Err((Code::H3_INTERNAL_ERROR, Error::new_h3(error))));
+                Poll::Ready(Ok(Some(packet))) => {
+                    this.registry
+                        .receive(packet)
+                        .map_err(DriveError::Malformed)?;
                 }
+                Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(DriveError::Connection(error))),
                 Poll::Pending => break,
             }
             if index == 31 {
@@ -684,7 +712,7 @@ where
             match this.sender.poll_send(cx, packet) {
                 Poll::Pending => break,
                 Poll::Ready(Err(quic::DatagramError::Connection(error))) => {
-                    return Poll::Ready(Err((Code::H3_INTERNAL_ERROR, Error::new_h3(error))));
+                    return Poll::Ready(Err(DriveError::Connection(error)));
                 }
                 // MTU/availability can change after local admission. Datagram
                 // delivery is unreliable; never turn TooLarge into Capsules.
@@ -826,6 +854,7 @@ mod tests {
             receiver: DatagramReceiver::default(),
             registry: registry.clone(),
             pending: None,
+            checked: false,
         };
         let noop = futures_util::task::noop_waker();
         let mut driver_cx = Context::from_waker(&noop);
@@ -926,6 +955,22 @@ mod tests {
         );
         assert_eq!(requests[1].0.poll_recv(&mut cx), Poll::Ready(None));
         assert_eq!(registry.lock().incoming, 0);
+
+        // A receiver parked after a FIN the driver has not applied wakes only on the close.
+        let registry = self::registry();
+        let request = registry.register(
+            StreamId::try_from(0).unwrap(),
+            true,
+            CancellationToken::new(),
+        );
+        request.0.finish_recv();
+        let wakes = Arc::new(Wakes::default());
+        let parked = futures_util::task::waker(wakes.clone());
+        let mut parked_cx = Context::from_waker(&parked);
+        assert!(request.0.poll_recv(&mut parked_cx).is_pending());
+        registry.close();
+        assert!(wakes.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        assert_eq!(request.0.poll_recv(&mut parked_cx), Poll::Ready(None));
     }
 
     #[test]
@@ -1016,8 +1061,14 @@ mod tests {
             true,
             CancellationToken::new(),
         );
-        registry.receive(Bytes::from_static(&[1, 7])).unwrap();
+        let packet = Bytes::from(vec![1, 7]);
+        registry.receive(packet.clone()).unwrap();
         assert_eq!(registry.lock().streams[&4].incoming.len(), 1);
+        // A copy, so the queue does not keep the backend's receive buffer alive.
+        assert_ne!(
+            registry.lock().streams[&4].incoming[0].as_ptr(),
+            packet[1..].as_ptr()
+        );
         other.0.close_recv();
         assert!(registry.lock().streams[&4].incoming.is_empty());
         assert_eq!(registry.lock().incoming, 0);
@@ -1094,6 +1145,7 @@ mod tests {
             ),
             registry: registry.clone(),
             pending: None,
+            checked: false,
         };
         let waker = futures_util::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -1156,6 +1208,7 @@ mod tests {
             ),
             registry: registry.clone(),
             pending: None,
+            checked: false,
         };
         assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
         assert!(
@@ -1171,6 +1224,79 @@ mod tests {
     }
 
     #[test]
+    fn driver_checks_the_transport_once_and_reports_its_close() {
+        /// A transport limit the test changes; `None` means no QUIC Datagrams.
+        struct Limit(Option<usize>);
+
+        impl quic::SendDatagram for Limit {
+            fn max_datagram_size(&self) -> Option<usize> {
+                self.0
+            }
+
+            fn poll_send(
+                &mut self,
+                _: &mut Context<'_>,
+                _: &Bytes,
+            ) -> Poll<std::result::Result<(), quic::DatagramError>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        /// Reports the peer's close.
+        struct Closed;
+
+        impl quic::RecvDatagram for Closed {
+            fn poll_recv(
+                &mut self,
+                _: &mut Context<'_>,
+            ) -> Poll<std::result::Result<Option<Bytes>, quic::ConnectionError>> {
+                Poll::Ready(Err(quic::ConnectionError::ApplicationClose {
+                    error_code: 0x100,
+                }))
+            }
+        }
+
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let driver = |limit, registry: &Arc<Registry>| Driver {
+            sender: Limit(limit),
+            receiver: DatagramReceiver::default(),
+            registry: registry.clone(),
+            pending: None,
+            checked: false,
+        };
+        // The peer's H3_DATAGRAM requires its max_datagram_frame_size transport parameter.
+        // https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1.1
+        let registry = registry();
+        registry.negotiated(false);
+        let mut unavailable = driver(None, &registry);
+        assert!(Pin::new(&mut unavailable).poll(&mut cx).is_pending());
+        registry.negotiated(true);
+        assert!(matches!(
+            Pin::new(&mut unavailable).poll(&mut cx),
+            Poll::Ready(Err(DriveError::Settings))
+        ));
+        // Checked against SETTINGS only: a later change is no peer error.
+        let mut available = driver(Some(1200), &registry);
+        assert!(Pin::new(&mut available).poll(&mut cx).is_pending());
+        available.sender.0 = None;
+        assert!(Pin::new(&mut available).poll(&mut cx).is_pending());
+
+        let mut closed = Driver {
+            sender: Limit(Some(1200)),
+            receiver: Closed,
+            registry,
+            pending: None,
+            checked: false,
+        };
+        assert!(matches!(
+            Pin::new(&mut closed).poll(&mut cx),
+            Poll::Ready(Err(DriveError::Connection(
+                quic::ConnectionError::ApplicationClose { error_code: 0x100 }
+            )))
+        ));
+    }
+
+    #[test]
     fn finishing_stops_admission_and_waits_for_the_held_packet() {
         let registry = registry();
         let request = registry.register(
@@ -1183,6 +1309,7 @@ mod tests {
         state.finish_send();
         assert_eq!(state.try_send(&Bytes::new()), Err(SendErrorKind::Closed));
         assert_eq!(state.ready(), Err(SendErrorKind::Closed));
+        assert_eq!(state.max_size(), None);
 
         let mut driver = Driver {
             sender: DatagramSender {
@@ -1194,6 +1321,7 @@ mod tests {
             receiver: DatagramReceiver::default(),
             registry: registry.clone(),
             pending: None,
+            checked: false,
         };
         let waker = futures_util::task::waker(Arc::new(Wakes::default()));
         let mut cx = Context::from_waker(&waker);
@@ -1243,6 +1371,7 @@ mod tests {
                 receiver: DatagramReceiver::default(),
                 registry: registry.clone(),
                 pending: None,
+                checked: false,
             };
             let wakes = Arc::new(Wakes::default());
             let waker = futures_util::task::waker(wakes.clone());
@@ -1297,6 +1426,7 @@ mod tests {
             receiver: DatagramReceiver::default(),
             registry: registry.clone(),
             pending: None,
+            checked: false,
         };
         let wakes = Arc::new(Wakes::default());
         let waker = futures_util::task::waker(wakes.clone());
@@ -1359,6 +1489,7 @@ mod tests {
             receiver: DatagramReceiver::default(),
             registry: registry.clone(),
             pending: None,
+            checked: false,
         };
         let mut cx = Context::from_waker(std::task::Waker::noop());
         assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
@@ -1423,6 +1554,7 @@ mod tests {
             ),
             registry: registry.clone(),
             pending: None,
+            checked: false,
         };
         request.0.finish_recv();
         drop(proxy);

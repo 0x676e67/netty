@@ -28,7 +28,10 @@ const READ_CHUNK: usize = 8 * 1024;
 ///
 /// Payloads travel as HTTP Datagrams when the HTTP/3 connection negotiated them, and otherwise
 /// as DATAGRAM capsules on the request stream; received capsules are always accepted. Methods
-/// take `&mut self`: share a tunnel between send and receive tasks behind a mutex.
+/// take `&mut self`: to share a tunnel between send and receive tasks, lock a
+/// `std::sync::Mutex` around each call, e.g.
+/// `poll_fn(|cx| tunnel.lock().unwrap().poll_recv(cx))`. A lock held while a poll is pending,
+/// such as a `tokio::sync::Mutex` guard across `.await`, blocks the other task.
 ///
 /// Dropping the tunnel aborts the request stream, which closes the tunnel at the proxy.
 pub struct UdpTunnel {

@@ -45,7 +45,7 @@ use crate::{
 #[cfg(feature = "http3-datagram")]
 use crate::{
     conn::http3::datagram::DatagramRequest,
-    proto::http3::datagram::{Drive, RequestState},
+    proto::http3::datagram::{Drive, DriveError, RequestState},
 };
 
 /// Protocol adapter for the send half of a bidirectional QUIC stream.
@@ -231,12 +231,36 @@ where
         }
     }
 
-    /// Closes the connection over a violation a stream found, if any.
-    fn close_on_violation(&mut self) -> Option<Poll<()>> {
-        let &(code, reason) = self.shared.violation.get()?;
+    /// Closes the connection with a stream's violation if one was published, else gracefully.
+    fn close(&mut self) -> Poll<()> {
+        let Some(&(code, reason)) = self.shared.violation.get() else {
+            rt::quic::OpenStreams::close(&mut self.opener, Code::H3_NO_ERROR.value(), b"");
+            self.shared.terminate(Error::new_closed());
+            return self.finish(Ok(()));
+        };
+        self.fail(code, Error::new_h3(reason), reason)
+    }
+
+    /// Closes the connection with `code`, failing it with `error` unless an earlier one was
+    /// published.
+    fn fail(&mut self, code: Code, error: Error, reason: &str) -> Poll<()> {
+        // Publish the cause before the transport close wakes exchanges.
+        self.shared.terminate(error);
         rt::quic::OpenStreams::close(&mut self.opener, code.value(), reason.as_bytes());
         let error = self.shared.error();
-        Some(self.finish(Err(error)))
+        self.finish(Err(error))
+    }
+
+    /// Reports the QUIC connection's close; a peer's normal close ends with `Ok`.
+    fn closed(&mut self, error: http3::error::ConnectionError) -> Poll<()> {
+        let normal = closed_normally(&error);
+        self.shared.terminate(Error::new_h3(error));
+        let result = if normal {
+            Ok(())
+        } else {
+            Err(self.shared.error())
+        };
+        self.finish(result)
     }
 
     /// Reports the outcome; the handle may already be gone.
@@ -261,18 +285,17 @@ where
         }
 
         this.shared.register(cx);
-        if let Some(done) = this.close_on_violation() {
-            return done;
+        if this.shared.violation.get().is_some() {
+            return this.close();
         }
         if let Poll::Ready(error) = this.driver.poll_close(cx) {
-            let normal = closed_normally(&error);
-            this.shared.terminate(Error::new_h3(error));
-            let result = if normal {
-                Ok(())
-            } else {
-                Err(this.shared.error())
-            };
-            return this.finish(result);
+            // Route what QUIC received before the close, so a session keeps the Datagrams that
+            // came before its stream's end.
+            #[cfg(feature = "http3-datagram")]
+            if let Some(mut datagrams) = this.datagrams.take() {
+                let _ = datagrams.as_mut().poll(cx);
+            }
+            return this.closed(error);
         }
 
         if this.shared.peer_extended_connect.get().is_none() {
@@ -296,19 +319,37 @@ where
             && let Poll::Ready(result) = datagrams.as_mut().poll(cx)
         {
             this.datagrams = None;
-            if let Err((code, error)) = result {
-                // Publish the cause before transport close wakes exchanges.
-                this.shared.terminate(error);
-                rt::quic::OpenStreams::close(
-                    &mut this.opener,
-                    code.value(),
-                    b"HTTP Datagram driver failed",
-                );
-                let error = this.shared.error();
-                return this.finish(Err(error));
-            }
-            if let Some(registry) = &this.shared.datagrams {
-                registry.close();
+            match result {
+                Ok(()) => {
+                    if let Some(registry) = &this.shared.datagrams {
+                        registry.close();
+                    }
+                }
+                // The Datagram reader can see the close first, so convert and classify it as
+                // http3 does for its own reader.
+                Err(DriveError::Connection(error)) => {
+                    use http3::error::ConnectionError;
+                    let error = match error {
+                        rt::quic::ConnectionError::Timeout => ConnectionError::Timeout,
+                        error => ConnectionError::Remote(error),
+                    };
+                    // The backend failed while the connection is still open.
+                    if let ConnectionError::Remote(rt::quic::ConnectionError::InternalError(
+                        reason,
+                    )) = &error
+                    {
+                        let reason = reason.clone();
+                        return this.fail(Code::H3_INTERNAL_ERROR, Error::new_h3(error), &reason);
+                    }
+                    return this.closed(error);
+                }
+                Err(DriveError::Malformed(error)) => {
+                    return this.fail(Code::H3_DATAGRAM_ERROR, error, "malformed HTTP Datagram");
+                }
+                Err(DriveError::Settings) => {
+                    let reason = "H3_DATAGRAM without the max_datagram_frame_size parameter";
+                    return this.fail(Code::H3_SETTINGS_ERROR, Error::new_h3(reason), reason);
+                }
             }
         }
 
@@ -317,15 +358,9 @@ where
         }
 
         // The waker is registered above, so a completion racing this check
-        // still wakes the task.
+        // still wakes the task. A violation published meanwhile picks the close code.
         if this.shared.is_draining() && this.shared.is_idle() {
-            // A violation published during this poll drains the connection as well.
-            if let Some(done) = this.close_on_violation() {
-                return done;
-            }
-            rt::quic::OpenStreams::close(&mut this.opener, Code::H3_NO_ERROR.value(), b"");
-            this.shared.terminate(Error::new_closed());
-            return this.finish(Ok(()));
+            return this.close();
         }
         Poll::Pending
     }

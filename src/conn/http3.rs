@@ -94,7 +94,7 @@ pub struct SendRequest<B> {
 /// QUIC connection and every outstanding exchange. The body and executor
 /// types are fixed by the handshake.
 ///
-/// A peer that closes with an unknown error code ends it with `Ok`
+/// A peer that closes with `H3_NO_ERROR` or an unknown error code ends it with `Ok`
 /// ([RFC 9114 §8](https://www.rfc-editor.org/rfc/rfc9114.html#section-8)); a HEADERS frame
 /// after a CONNECT response closes it with `H3_FRAME_UNEXPECTED`
 /// ([RFC 9114 §4.4](https://www.rfc-editor.org/rfc/rfc9114.html#section-4.4)).
@@ -308,7 +308,10 @@ impl<E> Builder<E> {
     /// Initializes HTTP/3 with a single raw Datagram reader and bounded routing.
     /// Advertises H3_DATAGRAM; native sends still require peer negotiation.
     /// The supplied QUIC transport must advertise support for receiving Datagram
-    /// frames in its transport parameters, as required by RFC 9297 Section 2.1.1.
+    /// frames in its transport parameters. A peer that enables H3_DATAGRAM without sending
+    /// max_datagram_frame_size gets the connection closed with `H3_SETTINGS_ERROR`
+    /// ([RFC 9297 §2.1.1](https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1.1)); a peer
+    /// limit too small for any payload, 0 included, keeps it and fails sends with `TooLarge`.
     #[cfg(feature = "http3-datagram")]
     pub async fn handshake_with_datagrams<Q, B>(
         self,

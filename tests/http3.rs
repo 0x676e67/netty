@@ -824,8 +824,24 @@ async fn headers_after_a_connect_response_close_the_connection() {
     use tokio::io::AsyncReadExt;
 
     // Only DATA follows a CONNECT response, so HEADERS is H3_FRAME_UNEXPECTED (RFC 9114 §4.4),
-    // with or without a FIN after it, and even when it is no valid trailer section.
-    for (name, finish) in [("x-late", false), ("x-late", true), ("te", true)] {
+    // with or without a FIN after it, and even when it is no valid trailer section or exceeds
+    // the field section limit, left unadvertised so the server still sends it.
+    let large = "x".repeat(256);
+    for (name, value, finish) in [
+        ("x-late", "trailers", false),
+        ("x-late", "trailers", true),
+        ("te", "trailers", true),
+        ("x-large", large.as_str(), true),
+    ] {
+        let options = if value.len() > 128 {
+            Http3Options::builder()
+                .max_field_section_size(128)
+                .settings_order(Vec::new())
+                .build()
+        } else {
+            Http3Options::default()
+        };
+        let value = http::HeaderValue::from_str(value).unwrap();
         bounded(async {
             let Pair {
                 mut tx,
@@ -833,14 +849,14 @@ async fn headers_after_a_connect_response_close_the_connection() {
                 mut server,
                 server_quic,
                 _endpoints,
-            } = pair(Http3Options::default()).await;
+            } = pair(options).await;
             let server_task = tokio::spawn(async move {
                 let resolver = server.accept().await.unwrap().unwrap();
                 let (_, mut stream) = resolver.resolve_request().await.unwrap();
                 stream.send_response(Response::new(())).await.unwrap();
                 stream.send_data(Bytes::from_static(b"x")).await.unwrap();
                 let mut trailers = http::HeaderMap::new();
-                trailers.insert(name, "trailers".parse().unwrap());
+                trailers.insert(name, value);
                 stream.send_trailers(trailers).await.unwrap();
                 if finish {
                     let _ = stream.finish().await;
