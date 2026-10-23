@@ -456,3 +456,69 @@ async fn refusal_stays_readable_until_the_request_aborts() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn tiny_datagram_limits_report_what_fits() {
+    bounded(async {
+        // A QUIC DATAGRAM frame takes up to 9 bytes of framing, so a 9-byte peer limit fits
+        // nothing, 10 bytes fit only the Quarter Stream ID and 11 bytes also fit Context ID 0.
+        // quinn charges 32 bytes of overhead per received datagram, so buffers this small take
+        // none and nothing is sent.
+        for (buffer, fits) in [(9, false), (10, false), (11, true)] {
+            let (_, mut server_config, client_config) = tls::config();
+            let mut transport = quinn::TransportConfig::default();
+            transport.datagram_receive_buffer_size(Some(buffer));
+            server_config.transport_config(std::sync::Arc::new(transport));
+            let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
+            let ((mut tx, driver), mut server) = tokio::join!(
+                async {
+                    Builder::new(Exec)
+                        .handshake_with_datagrams::<_, ClientBody>(crate::native::Connection::new(
+                            client,
+                        ))
+                        .await
+                        .unwrap()
+                },
+                async {
+                    h3::server::builder()
+                        .enable_datagram(true)
+                        .enable_extended_connect(true)
+                        .build::<_, Bytes>(h3_quinn::Connection::new(server))
+                        .await
+                        .unwrap()
+                }
+            );
+            let mut client_driver = Box::pin(driver);
+            let server_task = tokio::spawn(async move {
+                let resolver = server.accept().await.unwrap().unwrap();
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                stream.send_response(Response::new(())).await.unwrap();
+                assert!(stream.recv_data().await.unwrap().is_none(), "client FIN");
+                let _ = server.accept().await;
+            });
+
+            let template = Template::new("https://localhost/masque/{target_host}/{target_port}/");
+            let uri = template.unwrap().expand("192.0.2.1", 443).unwrap();
+            let mut response = tx
+                .try_send_request(masque::http3_request(uri))
+                .await
+                .unwrap();
+            let mut tunnel = UdpTunnel::from_http3(&mut response).unwrap();
+            assert_eq!(tunnel.max_payload_size(), 0, "buffer {buffer}");
+            let ready = poll_fn(|cx| tunnel.poll_send_ready(cx)).await;
+            if fits {
+                assert_eq!(ready, Ok(()));
+            } else {
+                assert_eq!(ready, Err(SendError::TooLarge), "buffer {buffer}");
+                assert_eq!(tunnel.try_send(b""), Err(SendError::TooLarge));
+            }
+            poll_fn(|cx| tunnel.poll_close(cx)).await.unwrap();
+            drop(tunnel);
+            drop(tx);
+            client_driver.as_mut().graceful_shutdown();
+            client_driver.await.unwrap();
+            server_task.await.unwrap();
+        }
+    })
+    .await;
+}

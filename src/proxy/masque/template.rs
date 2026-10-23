@@ -48,8 +48,6 @@ enum Var {
     Other,
 }
 
-// ===== impl Template =====
-
 impl Template {
     /// Parses and validates a template.
     pub fn new(template: &str) -> Result<Self, MasqueError> {

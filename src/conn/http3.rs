@@ -210,7 +210,9 @@ where
     /// # Errors
     ///
     /// If there was an error before trying to open the request stream, the message
-    /// will be returned as part of this error.
+    /// will be returned as part of this error. This includes a URI authority with
+    /// userinfo, which HTTP/3 forbids
+    /// ([RFC 9114 §4.3.1](https://www.rfc-editor.org/rfc/rfc9114.html#section-4.3.1)).
     ///
     /// # Cancel safety
     ///

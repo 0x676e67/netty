@@ -319,9 +319,9 @@ where
     finish: Option<oneshot::Sender<Result<()>>>,
 }
 
-impl<S> Unpin for SendStream<S> where S: quic::SendStream<Bytes> {}
-
 // ===== impl SendStream =====
+
+impl<S> Unpin for SendStream<S> where S: quic::SendStream<Bytes> {}
 
 impl<S> SendStream<S>
 where
@@ -527,15 +527,6 @@ impl H3Upgraded {
     }
 }
 
-// ===== impl SessionGuard =====
-
-#[cfg(feature = "http3-datagram")]
-impl Drop for SessionGuard {
-    fn drop(&mut self) {
-        self.0.close_send();
-    }
-}
-
 #[cfg(feature = "http3-datagram")]
 impl H3Upgraded {
     /// Stops new Datagrams and waits until the queued ones have been handed to QUIC, since
@@ -628,5 +619,14 @@ impl AsyncWrite for H3Upgraded {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.poll_barrier(cx, true)
+    }
+}
+
+// ===== impl SessionGuard =====
+
+#[cfg(feature = "http3-datagram")]
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.0.close_send();
     }
 }

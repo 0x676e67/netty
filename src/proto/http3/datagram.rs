@@ -125,7 +125,8 @@ struct Driver<S, R> {
 pub enum SendErrorKind {
     /// HTTP Datagrams or the QUIC Datagram transport are unavailable.
     Unavailable,
-    /// The payload exceeds the current transport or local buffer limit.
+    /// The payload exceeds the current transport or local buffer limit, or the limit fits
+    /// no payload.
     TooLarge,
     /// The bounded session or connection queue has no capacity.
     Full,
@@ -409,7 +410,8 @@ impl RequestState {
     }
 
     /// Checks that a payload of the current maximum size would be admitted, so a
-    /// ready sender's next `try_send` does not fail with `Full`.
+    /// ready sender's next `try_send` does not fail with `Full`; `TooLarge` when the
+    /// limit fits no payload.
     pub(crate) fn ready(&self) -> std::result::Result<(), SendErrorKind> {
         let state = self.registry.lock();
         let Some(entry) = state.streams.get(&self.id.into_inner()) else {
@@ -421,6 +423,9 @@ impl RequestState {
         let Some(max) = state.max_size.filter(|_| state.negotiated) else {
             return Err(SendErrorKind::Unavailable);
         };
+        if max < self.prefix_size() {
+            return Err(SendErrorKind::TooLarge);
+        }
         let size = max.min(SESSION_BYTES);
         if entry.outgoing.len() == PACKETS
             || size > SESSION_BYTES - entry.outgoing_bytes
@@ -434,6 +439,11 @@ impl RequestState {
     /// Tries to frame and queue one payload within the session and connection
     /// budgets. Returns `Full` immediately when either queue has no capacity.
     pub(crate) fn try_send(&self, payload: &Bytes) -> std::result::Result<(), SendErrorKind> {
+        self.try_send_buf(&payload[..])
+    }
+
+    /// Like [`Self::try_send`], for a payload that may be split across buffers.
+    pub(crate) fn try_send_buf(&self, payload: impl Buf) -> std::result::Result<(), SendErrorKind> {
         let mut state = self.registry.lock();
         let Some(entry) = state.streams.get(&self.id.into_inner()) else {
             return Err(SendErrorKind::Closed);
@@ -445,7 +455,7 @@ impl RequestState {
             return Err(SendErrorKind::Unavailable);
         };
         let size = payload
-            .len()
+            .remaining()
             .checked_add(self.prefix_size())
             .ok_or(SendErrorKind::TooLarge)?;
         if size > max || size > SESSION_BYTES {
@@ -457,7 +467,7 @@ impl RequestState {
         {
             return Err(SendErrorKind::Full);
         }
-        let mut packet = Datagram::new(self.id, payload.clone()).encode();
+        let mut packet = Datagram::new(self.id, payload).encode();
         // The raw QUIC API takes contiguous Bytes. This is the single framing
         // copy; neither queueing nor routing copies the packet again.
         let packet = packet.copy_to_bytes(packet.remaining());
@@ -1315,9 +1325,15 @@ mod tests {
         );
         request.0.try_send(&Bytes::from(vec![7; 1198])).unwrap();
         assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
-        // A limit below the Quarter Stream ID reads as 0 rather than as unavailable.
-        registry.lock().max_size = Some(0);
+        // A limit below the Quarter Stream ID reads as 0 rather than as unavailable, and
+        // readiness fails rather than promising room; at the prefix an empty payload fits.
+        let prefix = request.0.prefix_size();
+        registry.lock().max_size = Some(prefix - 1);
         assert_eq!(request.0.max_size(), Some(0));
+        assert_eq!(request.0.ready(), Err(SendErrorKind::TooLarge));
+        registry.lock().max_size = Some(prefix);
+        assert_eq!(request.0.max_size(), Some(0));
+        assert_eq!(request.0.ready(), Ok(()));
         registry.lock().max_size = Some(1200);
         assert_eq!(driver.sender.accepted[0].len(), 1200);
         assert_eq!(registry.lock().outgoing, 0);

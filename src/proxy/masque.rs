@@ -76,6 +76,9 @@ fn validate<B>(response: &Response<B>) -> Result<(), MasqueError> {
 /// whose host and port fill `target_host` and `target_port`; UDP has no default port, so the
 /// URI must name one. The request declares HTTP Datagrams, so the connection must come from
 /// `conn::http3::Builder::handshake_with_datagrams`.
+///
+/// A refusal yields only its status; to read its headers, such as `Proxy-Authenticate`, send
+/// [`http3_request`] and open the tunnel with [`UdpTunnel::from_http3`].
 #[derive(Clone, Debug)]
 pub struct ConnectUdp<S> {
     inner: S,
@@ -114,7 +117,7 @@ pub enum MasqueError {
 pub enum SendError {
     /// The send queue is full; wait with [`UdpTunnel::poll_send_ready`].
     Full,
-    /// The payload exceeds [`UdpTunnel::max_payload_size`].
+    /// The payload exceeds [`UdpTunnel::max_payload_size`], or the limit fits no payload.
     TooLarge,
     /// The tunnel can no longer send.
     Closed,
@@ -258,6 +261,8 @@ impl StdError for MasqueError {
         }
     }
 }
+
+// ===== impl SendError =====
 
 impl fmt::Display for SendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

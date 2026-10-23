@@ -121,8 +121,9 @@ impl Sender {
         self.poll_admit(cx, |state| state.try_send(payload))
     }
 
-    /// Waits until a payload of the current maximum size would be admitted.
-    /// Readiness is a hint, not a reservation: a cloned sender may take the room first.
+    /// Waits until a payload of the current maximum size would be admitted, failing with
+    /// `TooLarge` when the limit fits no payload. Readiness is a hint, not a reservation:
+    /// a cloned sender may take the room first.
     pub fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), SendErrorKind>> {
         self.poll_admit(cx, RequestState::ready)
     }
@@ -183,6 +184,16 @@ impl Sender {
         self.state
             .try_send(&payload)
             .map_err(|kind| SendError { kind, payload })
+    }
+
+    /// Like [`Self::try_send`] for `prefix` followed by `payload`, framed in one copy.
+    #[cfg(feature = "masque")]
+    pub(crate) fn try_send_prefixed(
+        &self,
+        prefix: &[u8],
+        payload: &[u8],
+    ) -> Result<(), SendErrorKind> {
+        self.state.try_send_buf(bytes::Buf::chain(prefix, payload))
     }
 }
 

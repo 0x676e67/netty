@@ -9,7 +9,7 @@ use std::{
 
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::task::AtomicWaker;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::AsyncWrite;
 
 use super::{MAX_UDP_PAYLOAD, MasqueError, SendError, capsule};
 use crate::{
@@ -131,18 +131,14 @@ impl UdpTunnel {
             return Err(SendError::TooLarge);
         }
         if let Some(native) = &self.native {
-            let mut datagram = BytesMut::with_capacity(1 + payload.len());
-            datagram.extend_from_slice(&[0]);
-            datagram.extend_from_slice(payload);
-            match native.sender.try_send(datagram.freeze()) {
+            // Context ID 0 carries UDP payloads (RFC 9298 §4).
+            match native.sender.try_send_prefixed(&[0], payload) {
                 Ok(()) => return Ok(()),
-                Err(err) => match err.kind() {
-                    SendErrorKind::Full => return Err(SendError::Full),
-                    SendErrorKind::TooLarge => return Err(SendError::TooLarge),
-                    SendErrorKind::Closed => return Err(SendError::Closed),
-                    // Datagrams were not negotiated: use capsules (RFC 9297 §3.5).
-                    SendErrorKind::Unavailable => {}
-                },
+                Err(SendErrorKind::Full) => return Err(SendError::Full),
+                Err(SendErrorKind::TooLarge) => return Err(SendError::TooLarge),
+                Err(SendErrorKind::Closed) => return Err(SendError::Closed),
+                // Datagrams were not negotiated: use capsules (RFC 9297 §3.5).
+                Err(SendErrorKind::Unavailable) => {}
             }
         }
         if self.write_closed {
@@ -160,20 +156,27 @@ impl UdpTunnel {
         Ok(())
     }
 
-    /// Waits until a payload of [`max_payload_size`](Self::max_payload_size) would be accepted.
+    /// Waits until a payload of [`max_payload_size`](Self::max_payload_size) would be accepted;
+    /// fails with [`TooLarge`](SendError::TooLarge) when the limit fits no payload.
     pub fn poll_send_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), SendError>> {
         if self.closing {
             return Poll::Ready(Err(SendError::Closed));
         }
+        // Register first, so a close or the stream's next wakeup reaches this task even while
+        // it waits for Datagram capacity.
+        self.wakers.send.register(cx.waker());
         if let Some(native) = &mut self.native {
             match ready!(native.sender.poll_ready(cx)) {
+                // The Context ID alone already exceeds the limit.
+                Ok(()) if native.sender.max_datagram_size() == Some(0) => {
+                    return Poll::Ready(Err(SendError::TooLarge));
+                }
                 Ok(()) => return Poll::Ready(Ok(())),
                 Err(SendErrorKind::Unavailable) => {}
+                Err(SendErrorKind::TooLarge) => return Poll::Ready(Err(SendError::TooLarge)),
                 Err(_) => return Poll::Ready(Err(SendError::Closed)),
             }
         }
-        // Register before writing, so the stream's next wakeup reaches this task.
-        self.wakers.send.register(cx.waker());
         let _ = self.poll_write_buf();
         if self.write_closed {
             Poll::Ready(Err(SendError::Closed))
@@ -246,13 +249,13 @@ impl UdpTunnel {
                     None => continue,
                 }
             }
-            let len = self.read_buf.len();
-            self.read_buf.resize(len + READ_CHUNK, 0);
-            let mut buf = ReadBuf::new(&mut self.read_buf[len..]);
-            let read = Pin::new(&mut self.control).poll_read(cx, &mut buf);
-            let n = buf.filled().len();
-            self.read_buf.truncate(len + n);
-            ready!(read).map_err(MasqueError::Io)?;
+            self.read_buf.reserve(READ_CHUNK);
+            let n = ready!(tokio_util::io::poll_read_buf(
+                Pin::new(&mut self.control),
+                cx,
+                &mut self.read_buf,
+            ))
+            .map_err(MasqueError::Io)?;
             if n == 0 {
                 // Datagrams that arrived before the FIN come first; the connection ends their
                 // direction once it has routed them.
@@ -351,7 +354,7 @@ impl UdpTunnel {
 impl fmt::Debug for UdpTunnel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UdpTunnel")
-            .field("datagrams", &self.native.is_some())
+            .field("datagrams", &self.native_limit().is_some())
             .field("max_payload_size", &self.max_payload_size())
             .finish_non_exhaustive()
     }
@@ -408,7 +411,7 @@ mod tests {
     use std::{future::poll_fn, sync::Mutex, time::Duration};
 
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
+        io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf},
         time::timeout,
     };
 
