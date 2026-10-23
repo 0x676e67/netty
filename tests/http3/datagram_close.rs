@@ -374,3 +374,290 @@ where
     })
     .await
 }
+
+/// Lets a test make the Datagram reader see the peer's close before the streams do.
+struct CloseFirst<T> {
+    inner: T,
+    close: Option<oneshot::Receiver<u64>>,
+}
+
+/// Reports the close the test sends, then reads from the transport.
+struct CloseFirstReceiver<R> {
+    inner: R,
+    close: Option<oneshot::Receiver<u64>>,
+}
+
+// ===== impl CloseFirst =====
+
+impl<T: rt::Connection<Bytes>> rt::Connection<Bytes> for CloseFirst<T> {
+    type RecvStream = T::RecvStream;
+
+    type OpenStreams = T::OpenStreams;
+
+    fn poll_accept_recv(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<Self::RecvStream>, rt::ConnectionError>> {
+        self.inner.poll_accept_recv(cx)
+    }
+
+    fn poll_accept_bidi(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<Self::BidiStream>, rt::ConnectionError>> {
+        self.inner.poll_accept_bidi(cx)
+    }
+
+    fn opener(&self) -> Self::OpenStreams {
+        self.inner.opener()
+    }
+}
+
+impl<T: OpenStreams<Bytes>> OpenStreams<Bytes> for CloseFirst<T> {
+    type SendStream = T::SendStream;
+
+    type BidiStream = T::BidiStream;
+
+    fn poll_open_bidi(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::BidiStream, rt::StreamError>> {
+        self.inner.poll_open_bidi(cx)
+    }
+
+    fn poll_open_send(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::SendStream, rt::StreamError>> {
+        self.inner.poll_open_send(cx)
+    }
+
+    fn close(&mut self, code: u64, reason: &[u8]) {
+        self.inner.close(code, reason);
+    }
+}
+
+impl<T: DatagramConnection> DatagramConnection for CloseFirst<T> {
+    type Sender = T::Sender;
+
+    type Receiver = CloseFirstReceiver<T::Receiver>;
+
+    fn take_datagrams(&mut self) -> Option<(Self::Sender, Self::Receiver)> {
+        let (sender, inner) = self.inner.take_datagrams()?;
+        let close = self.close.take();
+        Some((sender, CloseFirstReceiver { inner, close }))
+    }
+}
+
+// ===== impl CloseFirstReceiver =====
+
+impl<R: rt::RecvDatagram> rt::RecvDatagram for CloseFirstReceiver<R> {
+    fn poll_recv(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<Bytes>, rt::ConnectionError>> {
+        if let Some(close) = &mut self.close
+            && let Poll::Ready(code) = Pin::new(close).poll(cx)
+        {
+            self.close = None;
+            if let Ok(error_code) = code {
+                return Poll::Ready(Err(rt::ConnectionError::ApplicationClose { error_code }));
+            }
+        }
+        self.inner.poll_recv(cx)
+    }
+}
+
+#[tokio::test]
+async fn peer_close_seen_first_by_the_datagram_reader_is_classified() {
+    // H3_NO_ERROR and unknown codes close normally, whichever reader sees the close first.
+    // https://www.rfc-editor.org/rfc/rfc9114.html#section-8
+    for (code, normal) in [(0x100, true), (0x21, true), (0x101, false)] {
+        bounded(async {
+            let (_, server_config, client_config) = tls::config();
+            let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
+            let (close, closing) = oneshot::channel();
+            let ((tx, driver), server) = tokio::join!(
+                async {
+                    Builder::new(Exec)
+                        .handshake_with_datagrams::<_, ClientBody>(CloseFirst {
+                            inner: native::Connection::new(client),
+                            close: Some(closing),
+                        })
+                        .await
+                        .unwrap()
+                },
+                async {
+                    h3::server::builder()
+                        .enable_datagram(true)
+                        .build::<_, Bytes>(h3_quinn::Connection::new(server))
+                        .await
+                        .unwrap()
+                }
+            );
+            close.send(code).unwrap();
+            let result = driver.await;
+            assert_eq!(result.is_ok(), normal, "{code:#x}: {result:?}");
+            drop((tx, server));
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn datagrams_received_before_fin_survive_the_peer_close() {
+    bounded(async {
+        let (_, server_config, client_config) = tls::config();
+        let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
+        let observed = client.clone();
+        let server_quic = server.clone();
+        let hold = Hold::default();
+        let ((mut tx, driver), mut server) = tokio::join!(
+            async {
+                Builder::new(hold.clone())
+                    .handshake_with_datagrams::<_, ClientBody>(native::Connection::new(client))
+                    .await
+                    .unwrap()
+            },
+            async {
+                h3::server::builder()
+                    .enable_datagram(true)
+                    .enable_extended_connect(true)
+                    .build::<_, Bytes>(h3_quinn::Connection::new(server))
+                    .await
+                    .unwrap()
+            }
+        );
+        let (qsid, stream_id) = oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let resolver = server.accept().await.unwrap().unwrap();
+            let (_, mut stream) = resolver.resolve_request().await.unwrap();
+            stream.send_response(Response::new(())).await.unwrap();
+            let qsid: u8 = stream_id.await.unwrap();
+            for i in 0..4 {
+                server_quic
+                    .send_datagram(Bytes::from(vec![qsid, i]))
+                    .unwrap();
+            }
+            stream.finish().await.unwrap();
+            (server, server_quic, stream)
+        });
+        let mut response = tx.try_send_request(datagram_request()).await.unwrap();
+        let (mut control, sender, mut receiver) = netty::conn::http3::datagram::on(&mut response)
+            .unwrap()
+            .into_parts();
+        let id = sender.stream_id().into_inner();
+        assert!(id / 4 < 64);
+        // Nothing routes Datagrams while the test holds the connection task.
+        let task = hold.take();
+        qsid.send((id / 4) as u8).unwrap();
+        let mut rest = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut control, &mut rest)
+            .await
+            .unwrap();
+        let (_server, peer, _stream) = server_task.await.unwrap();
+        while observed.stats().frame_rx.datagram < 4 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        peer.close(0x100u32.into(), b"");
+        observed.closed().await;
+        tokio::spawn(task);
+        driver.await.unwrap();
+        for i in 0..4 {
+            assert_eq!(
+                receiver.recv().await.as_deref(),
+                Some(&[i][..]),
+                "packet {i}"
+            );
+        }
+        assert!(receiver.recv().await.is_none());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn h3_datagram_without_the_transport_parameter_closes_the_connection() {
+    bounded(async {
+        // The peer enables H3_DATAGRAM but cannot receive QUIC Datagrams.
+        // https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1.1
+        let (_, mut server_config, client_config) = tls::config();
+        let mut transport = quinn::TransportConfig::default();
+        transport.datagram_receive_buffer_size(None);
+        server_config.transport_config(Arc::new(transport));
+        let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
+        let peer = server.clone();
+        let ((tx, driver), server) = tokio::join!(
+            async {
+                Builder::new(Exec)
+                    .handshake_with_datagrams::<_, ClientBody>(native::Connection::new(client))
+                    .await
+                    .unwrap()
+            },
+            async {
+                h3::server::builder()
+                    .enable_datagram(true)
+                    .build::<_, Bytes>(h3_quinn::Connection::new(server))
+                    .await
+                    .unwrap()
+            }
+        );
+        assert!(driver.await.is_err());
+        match peer.closed().await {
+            quinn::ConnectionError::ApplicationClosed(close) => {
+                let settings = h3::error::Code::H3_SETTINGS_ERROR.value();
+                assert_eq!(close.error_code.into_inner(), settings);
+            }
+            error => panic!("unexpected peer close: {error:?}"),
+        }
+        drop((tx, server));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_close_during_datagram_traffic_ends_normally() {
+    // On a multi-thread runtime either reader may see the peer's close first.
+    for _ in 0..16 {
+        bounded(async {
+            let Pair {
+                mut tx,
+                driver,
+                mut server,
+                server_quic,
+                _endpoints,
+            } = pair_config(Http3Options::default(), Exec, true, true, true, None).await;
+            let driver = tokio::spawn(driver);
+            let server_task = tokio::spawn(async move {
+                let resolver = server.accept().await.unwrap().unwrap();
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                stream.send_response(Response::new(())).await.unwrap();
+                let packet = server_quic.read_datagram().await.unwrap();
+                for _ in 0..8 {
+                    server_quic.send_datagram(packet.clone()).unwrap();
+                }
+                server_quic.close(0x100u32.into(), b"");
+                (server, stream)
+            });
+            let mut response = tx.try_send_request(datagram_request()).await.unwrap();
+            let (_control, mut sender, _receiver) = netty::conn::http3::datagram::on(&mut response)
+                .unwrap()
+                .into_parts();
+            let pump = tokio::spawn(async move {
+                while sender.send(Bytes::from_static(b"x")).await.is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            });
+            // A stateless reset means the close itself was lost under load, which the client
+            // cannot tell from a failure.
+            if let Err(error) = driver.await.unwrap() {
+                assert!(
+                    format!("{error:?}").contains("Undefined(Reset)"),
+                    "{error:?}"
+                );
+            }
+            pump.await.unwrap();
+            drop(server_task.await.unwrap());
+        })
+        .await;
+    }
+}

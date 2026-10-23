@@ -512,11 +512,13 @@ async fn tiny_datagram_limits_report_what_fits() {
                 }
             );
             let mut client_driver = Box::pin(driver);
+            let (fin_seen, wait_fin) = oneshot::channel();
             let server_task = tokio::spawn(async move {
                 let resolver = server.accept().await.unwrap().unwrap();
                 let (_, mut stream) = resolver.resolve_request().await.unwrap();
                 stream.send_response(Response::new(())).await.unwrap();
                 assert!(stream.recv_data().await.unwrap().is_none(), "client FIN");
+                fin_seen.send(()).unwrap();
                 let _ = server.accept().await;
             });
 
@@ -536,6 +538,9 @@ async fn tiny_datagram_limits_report_what_fits() {
                 assert_eq!(tunnel.try_send(b""), Err(SendError::TooLarge));
             }
             poll_fn(|cx| tunnel.poll_close(cx)).await.unwrap();
+            // The close only submits the FIN; dropping the tunnel lets the connection close
+            // before QUIC sends it.
+            wait_fin.await.unwrap();
             drop(tunnel);
             drop(tx);
             client_driver.as_mut().graceful_shutdown();

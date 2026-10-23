@@ -84,6 +84,12 @@ fn validate<B>(response: &Response<B>) -> Result<(), MasqueError> {
 /// URI must name one. The request declares HTTP Datagrams, so the connection must come from
 /// [`Builder::handshake_with_datagrams`](crate::conn::http3::Builder::handshake_with_datagrams).
 ///
+/// Each open tunnel holds a request stream and one
+/// [`max_concurrent_requests`](crate::http3::Http3Options::max_concurrent_requests)
+/// slot until dropped, so further calls on a full connection wait for a free slot. The
+/// handshake has no timeout of its own, so bound the returned future, e.g. with a connect
+/// timeout around the whole connector.
+///
 /// A refusal yields only its status; to read its headers, such as `Proxy-Authenticate`, send
 /// [`http3_request`] and open the tunnel with [`UdpTunnel::from_http3`].
 #[derive(Clone, Debug)]

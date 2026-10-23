@@ -363,6 +363,51 @@ async fn datagrams_queued_before_fin_outlive_the_tunnel_task() {
 }
 
 #[tokio::test]
+async fn shutdown_stops_a_busy_sender() {
+    bounded(async {
+        let Pair {
+            mut tx,
+            driver,
+            mut server,
+            _endpoints,
+            ..
+        } = pair_config(Http3Options::default(), Exec, true, true, true, None).await;
+        let mut client_driver = Box::pin(driver);
+        let server_task = tokio::spawn(async move {
+            let resolver = server.accept().await.unwrap().unwrap();
+            let (_, mut stream) = resolver.resolve_request().await.unwrap();
+            stream.send_response(Response::new(())).await.unwrap();
+            stream.finish().await.unwrap();
+            assert!(stream.recv_data().await.unwrap().is_none(), "client FIN");
+            let _ = server.accept().await;
+        });
+
+        let mut response = tx.try_send_request(datagram_request()).await.unwrap();
+        let (mut control, mut sender, _receiver) =
+            datagram::on(&mut response).unwrap().into_parts();
+        // Without the shutdown stopping it, the sender would keep the queue from draining.
+        let busy = tokio::spawn(async move {
+            loop {
+                if let Err(error) = sender.send(Bytes::from_static(b"x")).await {
+                    return (error.kind(), sender.max_datagram_size());
+                }
+            }
+        });
+        tokio::task::yield_now().await;
+        control.shutdown().await.unwrap();
+        assert_eq!(busy.await.unwrap(), (SendErrorKind::Closed, None));
+        let mut rest = Vec::new();
+        control.read_to_end(&mut rest).await.unwrap();
+        drop(control);
+        drop(tx);
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
+        server_task.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn dropped_tunnel_task_closes_the_session() {
     bounded(async {
         // The connection task runs; the tunnel task is dropped unpolled.
