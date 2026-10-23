@@ -1,7 +1,7 @@
 //! UDP payloads over a CONNECT-UDP request stream.
 
 use std::{
-    fmt, io,
+    fmt, io, mem,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, Wake, Waker, ready},
@@ -23,7 +23,8 @@ const WRITE_LIMIT: usize = 64 * 1024;
 /// Read size for the control stream.
 const READ_CHUNK: usize = 8 * 1024;
 
-/// A CONNECT-UDP tunnel carrying UDP payloads for one target (RFC 9298 §5).
+/// A CONNECT-UDP tunnel carrying UDP payloads for one target
+/// ([RFC 9298 §5](https://www.rfc-editor.org/rfc/rfc9298.html#section-5)).
 ///
 /// Payloads travel as HTTP Datagrams when the HTTP/3 connection negotiated them, and otherwise
 /// as DATAGRAM capsules on the request stream; received capsules are always accepted. Methods
@@ -38,6 +39,8 @@ pub struct UdpTunnel {
     read_buf: BytesMut,
     /// Why receiving failed, so later polls report it again.
     recv_error: Option<RecvError>,
+    /// Whether the next receive reads the request stream before HTTP Datagrams.
+    stream_first: bool,
 
     write_buf: BytesMut,
     /// Whether capsule bytes were written since the last flush.
@@ -93,6 +96,7 @@ impl UdpTunnel {
             decoder: capsule::Decoder::default(),
             read_buf: BytesMut::new(),
             recv_error: None,
+            stream_first: false,
             write_buf: BytesMut::new(),
             unflushed: false,
             closing: false,
@@ -103,14 +107,32 @@ impl UdpTunnel {
         }
     }
 
-    /// Returns the largest UDP payload a send currently accepts.
+    /// Returns the largest UDP payload a send currently accepts, or 0 once sends fail with
+    /// [`Closed`](SendError::Closed).
     ///
     /// With HTTP Datagrams this is the QUIC datagram limit less the Quarter Stream ID and
     /// Context ID; larger payloads are rejected rather than moved to capsules, so the path MTU
-    /// stays visible (RFC 9298 §6.1), and a limit too small for any payload reads as 0. Inner
-    /// QUIC needs at least 1200 bytes (RFC 9000 §14).
+    /// stays visible ([RFC 9298 §6.1]). A limit too small for any payload also reads as 0, which
+    /// [`poll_send_ready`](Self::poll_send_ready) reports as [`TooLarge`](SendError::TooLarge).
+    /// Inner QUIC needs at least 1200 bytes ([RFC 9000 §14]).
+    ///
+    /// [RFC 9298 §6.1]: https://www.rfc-editor.org/rfc/rfc9298.html#section-6.1
+    /// [RFC 9000 §14]: https://www.rfc-editor.org/rfc/rfc9000.html#section-14
     pub fn max_payload_size(&self) -> usize {
-        self.native_limit().unwrap_or(MAX_UDP_PAYLOAD)
+        // The same order as `try_send`.
+        if self.closing
+            || self
+                .native
+                .as_ref()
+                .is_some_and(|native| native.sender.is_closed())
+        {
+            return 0;
+        }
+        match self.native_limit() {
+            Some(limit) => limit,
+            None if self.write_closed => 0,
+            None => MAX_UDP_PAYLOAD,
+        }
     }
 
     /// Payload limit of HTTP Datagrams, if they are usable.
@@ -131,13 +153,15 @@ impl UdpTunnel {
             return Err(SendError::TooLarge);
         }
         if let Some(native) = &self.native {
-            // Context ID 0 carries UDP payloads (RFC 9298 §4).
+            // Context ID 0 carries UDP payloads.
+            // https://www.rfc-editor.org/rfc/rfc9298.html#section-4
             match native.sender.try_send_prefixed(&[0], payload) {
                 Ok(()) => return Ok(()),
                 Err(SendErrorKind::Full) => return Err(SendError::Full),
                 Err(SendErrorKind::TooLarge) => return Err(SendError::TooLarge),
                 Err(SendErrorKind::Closed) => return Err(SendError::Closed),
-                // Datagrams were not negotiated: use capsules (RFC 9297 §3.5).
+                // Datagrams were not negotiated: use capsules.
+                // https://www.rfc-editor.org/rfc/rfc9297.html#section-3.5
                 Err(SendErrorKind::Unavailable) => {}
             }
         }
@@ -191,8 +215,11 @@ impl UdpTunnel {
     ///
     /// Also finishes writing buffered capsules. An error ends receiving and later calls report
     /// it again, with the same kind and message. A capsule cut short by the end of the stream
-    /// also resets the request stream with `H3_MESSAGE_ERROR` (RFC 9297 §3.3), and an oversized
-    /// payload with `H3_DATAGRAM_ERROR` (RFC 9298 §5).
+    /// also resets the request stream with `H3_MESSAGE_ERROR` ([RFC 9297 §3.3]), and an oversized
+    /// payload with `H3_DATAGRAM_ERROR` ([RFC 9298 §5]).
+    ///
+    /// [RFC 9297 §3.3]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3.3
+    /// [RFC 9298 §5]: https://www.rfc-editor.org/rfc/rfc9298.html#section-5
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, MasqueError>> {
         if let Some(err) = &self.recv_error {
             return Poll::Ready(Err(err.clone().into()));
@@ -229,10 +256,15 @@ impl UdpTunnel {
         self.wakers.recv.register(cx.waker());
         // A write error only stops sending; `poll_flush` and `poll_close` report it.
         let _ = self.poll_write_buf();
+        // Alternate the first source, so a steady flow on one cannot hold back the other.
+        let mut stream_first = self.stream_first;
+        self.stream_first = !stream_first;
         // Each round drops at most one payload or reads once, so a proxy flooding unknown
         // contexts or capsule types cannot keep this call from yielding.
         for _ in 0..32 {
-            if let Some(native) = self.native.as_mut().filter(|native| native.recv_open) {
+            if !stream_first
+                && let Some(native) = self.native.as_mut().filter(|native| native.recv_open)
+            {
                 match native.receiver.poll_recv(cx) {
                     Poll::Ready(Some(datagram)) => match udp_payload(datagram)? {
                         Some(payload) => return Poll::Ready(Ok(Some(payload))),
@@ -250,12 +282,13 @@ impl UdpTunnel {
                 }
             }
             self.read_buf.reserve(READ_CHUNK);
-            let n = ready!(tokio_util::io::poll_read_buf(
-                Pin::new(&mut self.control),
-                cx,
-                &mut self.read_buf,
-            ))
-            .map_err(MasqueError::Io)?;
+            let read =
+                tokio_util::io::poll_read_buf(Pin::new(&mut self.control), cx, &mut self.read_buf);
+            // A quiet stream hands this call to the datagrams.
+            if read.is_pending() && mem::take(&mut stream_first) {
+                continue;
+            }
+            let n = ready!(read).map_err(MasqueError::Io)?;
             if n == 0 {
                 // Datagrams that arrived before the FIN come first; the connection ends their
                 // direction once it has routed them.
@@ -386,11 +419,15 @@ impl Wake for Wakers {
     }
 }
 
-/// Strips Context ID 0 from an HTTP Datagram payload (RFC 9298 §4).
+/// Strips Context ID 0 from an HTTP Datagram payload ([RFC 9298 §4]).
 ///
-/// Unknown contexts, and payloads too short to carry a Context ID, are dropped: RFC 9298 §5
+/// Unknown contexts, and payloads too short to carry a Context ID, are dropped: [RFC 9298 §5]
 /// aborts only for an oversized Context ID 0 payload, and both encodings share this path
-/// (RFC 9297 §3.5).
+/// ([RFC 9297 §3.5]).
+///
+/// [RFC 9298 §4]: https://www.rfc-editor.org/rfc/rfc9298.html#section-4
+/// [RFC 9298 §5]: https://www.rfc-editor.org/rfc/rfc9298.html#section-5
+/// [RFC 9297 §3.5]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3.5
 fn udp_payload(mut datagram: Bytes) -> Result<Option<Bytes>, MasqueError> {
     let Some((context, len)) = capsule::varint(&datagram) else {
         return Ok(None);
@@ -399,7 +436,8 @@ fn udp_payload(mut datagram: Bytes) -> Result<Option<Bytes>, MasqueError> {
         return Ok(None);
     }
     datagram.advance(len);
-    // RFC 9298 §5: a larger Context ID 0 payload MUST abort the stream.
+    // A larger Context ID 0 payload MUST abort the stream.
+    // https://www.rfc-editor.org/rfc/rfc9298.html#section-5
     if datagram.len() > MAX_UDP_PAYLOAD {
         return Err(MasqueError::Malformed);
     }
@@ -513,30 +551,21 @@ mod tests {
 
     #[tokio::test]
     async fn close_and_send_tasks_keep_their_wakeups() {
-        // A sender parked on the full capsule buffer still wakes when another task closes.
-        let (tunnel, mut proxy) = capsule_tunnel(4096, false);
-        let tunnel = Arc::new(Mutex::new(tunnel));
-        while tunnel.lock().unwrap().try_send(&[7; 8000]).is_ok() {}
-        let ready = tokio::spawn({
-            let tunnel = tunnel.clone();
-            async move { poll_fn(|cx| tunnel.lock().unwrap().poll_send_ready(cx)).await }
-        });
-        tokio::task::yield_now().await;
-        assert!(!ready.is_finished(), "ready over the capsule limit");
-        let mut written = Vec::new();
-        let (closed, read) = bounded(async {
-            tokio::join!(
-                poll_fn(|cx| tunnel.lock().unwrap().poll_close(cx)),
-                proxy.read_to_end(&mut written)
-            )
-        })
-        .await;
-        closed.unwrap();
-        read.unwrap();
-        let ready = bounded(ready).await.unwrap();
+        // A sender parked on the full capsule buffer wakes when another task starts a close that
+        // the stalled proxy holds up.
+        let (mut tunnel, _proxy) = capsule_tunnel(4096, false);
+        while tunnel.try_send(&[7; 8000]).is_ok() {}
+        let mut ready = tokio_test::task::spawn(());
+        assert!(ready.enter(|cx, _| tunnel.poll_send_ready(cx)).is_pending());
+        let mut cx = Context::from_waker(Waker::noop());
         assert!(
-            matches!(ready, Ok(()) | Err(SendError::Closed)),
-            "{ready:?}"
+            tunnel.poll_close(&mut cx).is_pending(),
+            "closed into a full stream"
+        );
+        assert!(ready.is_woken(), "close left the sender parked");
+        assert_eq!(
+            ready.enter(|cx, _| tunnel.poll_send_ready(cx)),
+            Poll::Ready(Err(SendError::Closed))
         );
 
         // A sender parked on the full capsule buffer still wakes when another task flushes.
@@ -663,6 +692,7 @@ mod tests {
         proxy.write_all(&[0, 3, 0, b'h', b'i']).await.unwrap();
         drop(proxy);
         assert_eq!(tunnel.try_send(b"x"), Err(SendError::Closed));
+        assert_eq!(tunnel.max_payload_size(), 0);
         let recv = bounded(poll_fn(|cx| tunnel.poll_recv(cx))).await;
         assert_eq!(recv.unwrap().unwrap(), "hi");
         let flushed = poll_fn(|cx| tunnel.poll_flush(cx)).await;
@@ -740,6 +770,7 @@ mod tests {
         assert_eq!(tunnel.try_send(b"late"), Err(SendError::Closed));
         let ready = poll_fn(|cx| tunnel.poll_send_ready(cx)).await;
         assert_eq!(ready, Err(SendError::Closed));
+        assert_eq!(tunnel.max_payload_size(), 0);
         let mut written = Vec::new();
         let (closed, read) = bounded(async {
             tokio::join!(
@@ -764,7 +795,8 @@ mod tests {
         max[1..].fill(7);
         for (datagram, expected) in [
             (vec![0, b'h', b'i'], Some(&b"hi"[..])),
-            // An empty UDP payload (RFC 9298 §5).
+            // An empty UDP payload.
+            // https://www.rfc-editor.org/rfc/rfc9298.html#section-5
             (vec![0], Some(&b""[..])),
             // A non-minimal Context ID 0.
             (vec![0x40, 0, b'h', b'i'], Some(&b"hi"[..])),

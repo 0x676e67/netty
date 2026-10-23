@@ -147,6 +147,7 @@ async fn connect_udp_carries_payloads_as_http_datagrams() {
             tunnel.try_send(&[i]).unwrap();
         }
         poll_fn(|cx| tunnel.poll_close(cx)).await.unwrap();
+        assert_eq!(tunnel.max_payload_size(), 0);
         drop(tunnel);
         drop(connector);
         client_driver.as_mut().graceful_shutdown();
@@ -332,6 +333,20 @@ async fn malformed_response_or_capsule_resets_the_stream() {
                 }
                 assert_eq!(reset_code(&mut stream).await, code);
             }
+
+            // A refusal whose body overruns its Content-Length is malformed as well; the client
+            // stops reading and cancels its unfinished request, as for any failed response body.
+            let resolver = server.accept().await.unwrap().unwrap();
+            let (_, mut stream) = resolver.resolve_request().await.unwrap();
+            let response = Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .header("content-length", "1")
+                .body(())
+                .unwrap();
+            stream.send_response(response).await.unwrap();
+            stream.send_data(Bytes::from_static(b"nope")).await.unwrap();
+            assert_eq!(stop_code(&mut stream).await, Code::H3_MESSAGE_ERROR);
+            assert_eq!(reset_code(&mut stream).await, Code::H3_REQUEST_CANCELLED);
         });
 
         let template = Template::new("https://localhost/masque/{target_host}/{target_port}/");
@@ -354,8 +369,16 @@ async fn malformed_response_or_capsule_resets_the_stream() {
                 let result = recv(&mut tunnel).await;
                 assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
             }
+            assert_eq!(tunnel.max_payload_size(), 0);
+            assert_eq!(tunnel.try_send(b"x"), Err(SendError::Closed));
             tunnels.push(tunnel);
         }
+        let response = tx
+            .try_send_request(masque::http3_request(uri))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(response.into_body().collect().await.is_err());
         server_task.await.unwrap();
         drop(tunnels);
         drop(tx);

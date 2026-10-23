@@ -64,7 +64,8 @@ struct State<S: quic::RecvStream> {
     registration: Option<Registration>,
     /// Body sending or FIN acknowledgment still runs on the executor.
     pipe_pending: bool,
-    /// Unfinished send half of a refused CONNECT-UDP; dropping it on release resets the stream.
+    /// Unfinished send half of a refused CONNECT-UDP; dropping it on release aborts the stream
+    /// with `H3_REQUEST_CANCELLED`, as a pending upload is when the response body fails.
     refused: Option<Box<dyn Send>>,
     error: Option<Error>,
     /// The body's waker, for a failure reported by the send task or a Datagram.
