@@ -422,6 +422,8 @@ where
 
         let connect = request.method() == Method::CONNECT;
         let head = request.method() == Method::HEAD;
+        let connect_udp =
+            connect && request.extensions().get::<Protocol>() == Some(&Protocol::CONNECT_UDP);
 
         #[cfg(feature = "http3-datagram")]
         let datagram_request = request.extensions().get::<DatagramRequest>().is_some();
@@ -557,6 +559,18 @@ where
                 lost(shared.error_or(error))
             })?;
             if headers.status().is_success() {
+                // A CONNECT-UDP success that breaks the Capsule Protocol is malformed.
+                // https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
+                // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1.2
+                if connect_udp
+                    && headers::breaks_capsule_protocol(headers.status(), headers.headers())
+                {
+                    recv.code = Code::H3_MESSAGE_ERROR;
+                    send.code = Code::H3_MESSAGE_ERROR;
+                    return Err(lost(shared.error_or(Error::new_h3(
+                        "CONNECT-UDP response breaks the Capsule Protocol",
+                    ))));
+                }
                 #[cfg(feature = "http3-datagram")]
                 let datagrams = match registration {
                     None => upgrade::TunnelDatagrams::Disabled,
@@ -583,7 +597,15 @@ where
         // An empty body finishes inline; its FIN acknowledgment is checked once
         // the head is in, so a drain cannot discard an unacknowledged FIN.
         let mut finished = None;
-        let mut pipe = if body.is_end_stream() {
+        // A refused CONNECT-UDP is aborted rather than closed: its send half resets once the
+        // refusal is read or dropped, which keeps the refusal body readable.
+        // https://www.rfc-editor.org/rfc/rfc9298.html#section-3.1
+        // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1.1
+        let mut refused = None;
+        let mut pipe = if connect_udp {
+            refused = Some(send);
+            None
+        } else if body.is_end_stream() {
             Finish { send: &mut send }
                 .await
                 .map_err(|error| lost(shared.error_or(error)))?;
@@ -626,6 +648,9 @@ where
             // cancellation.
             // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1.2
             recv.code = Code::H3_MESSAGE_ERROR;
+            if let Some(send) = refused.as_mut() {
+                send.code = Code::H3_MESSAGE_ERROR;
+            }
             if let Some(pipe) = pipe.as_mut() {
                 pipe.as_mut().reset_with(Code::H3_MESSAGE_ERROR);
             }
@@ -675,6 +700,7 @@ where
             #[cfg(feature = "http3-datagram")]
             registration,
             pipe.is_some(),
+            refused.map(|send| Box::new(send) as Box<dyn Send>),
         );
 
         #[cfg(feature = "http3-datagram")]

@@ -222,7 +222,10 @@ where
     /// Keep the executor and QUIC transport running so cancellation can reach the peer.
     ///
     /// After the response is delivered, dropping its body only cancels receiving;
-    /// unfinished request body sending can continue independently.
+    /// unfinished request body sending can continue independently. A refused
+    /// `connect-udp` request is aborted instead: its send direction resets with
+    /// `H3_REQUEST_CANCELLED` once the body ends or is dropped
+    /// ([RFC 9298 §3.1](https://www.rfc-editor.org/rfc/rfc9298.html#section-3.1)).
     #[allow(clippy::result_large_err)]
     pub fn try_send_request(
         &mut self,

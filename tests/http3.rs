@@ -183,6 +183,31 @@ async fn bounded<F: Future>(future: F) -> F::Output {
         .expect("HTTP/3 test timed out")
 }
 
+type ProxyStream = h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+
+/// Reads the request stream until the client resets it, returning the code.
+async fn reset_code(stream: &mut ProxyStream) -> h3::error::Code {
+    loop {
+        match stream.recv_data().await {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the request stream ended without a reset"),
+            Err(h3::error::StreamError::RemoteTerminate { code, .. }) => return code,
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
+/// Writes to the request stream until the client stops it, returning the code.
+async fn stop_code(stream: &mut ProxyStream) -> h3::error::Code {
+    loop {
+        match stream.send_data(Bytes::from_static(b"x")).await {
+            Ok(()) => tokio::task::yield_now().await,
+            Err(h3::error::StreamError::RemoteTerminate { code, .. }) => return code,
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn canceling_partially_written_headers_resets_stream_and_releases_slot() {
     bounded(async {

@@ -78,14 +78,6 @@ impl Session {
     pub fn into_parts(self) -> (Upgraded, Sender, Receiver) {
         (self.control, self.sender, self.receiver)
     }
-
-    /// Resets the request stream with `H3_MESSAGE_ERROR`, for a success response the protocol
-    /// treats as malformed, such as one that breaks the Capsule Protocol
-    /// ([RFC 9297 §3.2](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2)). Dropping the
-    /// session instead cancels the request.
-    pub fn reject_malformed(self) {
-        self.receiver.abort_malformed_message();
-    }
 }
 
 // ===== impl Pending =====
