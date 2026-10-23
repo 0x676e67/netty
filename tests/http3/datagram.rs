@@ -227,142 +227,6 @@ async fn control_fin_closes_only_its_datagram_direction() {
 }
 
 #[tokio::test]
-async fn datagrams_queued_before_fin_outlive_the_tunnel_task() {
-    /// How the exchange ends after the proxy's FIN.
-    #[derive(Clone, Copy, Debug, PartialEq)]
-    enum End {
-        /// The client closed first; a later request shows the tunnel task finished.
-        Clean,
-        /// The client closed first on a draining connection, which then closes.
-        Draining,
-        /// The client still sends when the proxy closes the connection.
-        PeerCloses,
-    }
-
-    async fn read_queued(receiver: &mut datagram::Receiver, end: &str) {
-        for i in 0..4 {
-            let packet = receiver.recv().await;
-            assert_eq!(packet.as_deref(), Some(&[i][..]), "{end}: packet {i}");
-        }
-        assert!(receiver.recv().await.is_none(), "{end}");
-    }
-
-    for end in [End::Clean, End::Draining, End::PeerCloses] {
-        bounded(async {
-            let Pair {
-                mut tx,
-                driver,
-                mut server,
-                server_quic,
-                _endpoints,
-            } = pair_config(
-                Http3Options::builder().max_concurrent_requests(1).build(),
-                Exec,
-                true,
-                true,
-                true,
-                None,
-            )
-            .await;
-            let mut client_driver = Box::pin(driver);
-            let (qsid, stream_id) = oneshot::channel();
-            let (finish_peer, finish) = oneshot::channel();
-            let (close_peer, close) = oneshot::channel::<()>();
-            let server_task = tokio::spawn(async move {
-                let resolver = server.accept().await.unwrap().unwrap();
-                let quic = server_quic.clone();
-                let tunnel = tokio::spawn(async move {
-                    let (_, mut stream) = resolver.resolve_request().await.unwrap();
-                    stream.send_response(Response::new(())).await.unwrap();
-                    if end != End::PeerCloses {
-                        assert!(stream.recv_data().await.unwrap().is_none(), "client FIN");
-                    }
-                    let qsid: u8 = stream_id.await.unwrap();
-                    for i in 0..4 {
-                        quic.send_datagram(Bytes::from(vec![qsid, i])).unwrap();
-                    }
-                    // The marker follows the Datagrams; FIN waits until the client read it.
-                    stream.send_data(Bytes::from_static(b"m")).await.unwrap();
-                    finish.await.unwrap();
-                    stream.finish().await.unwrap();
-                    stream
-                });
-                if end == End::Clean {
-                    // With active=1 this request can start only after the tunnel task ends.
-                    let (_, mut stream) = server
-                        .accept()
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .resolve_request()
-                        .await
-                        .unwrap();
-                    tunnel.await.unwrap();
-                    stream.send_response(Response::new(())).await.unwrap();
-                    stream.finish().await.unwrap();
-                } else {
-                    let _stream = tunnel.await.unwrap();
-                    if end == End::PeerCloses {
-                        close.await.unwrap();
-                        server_quic.close(0x100u32.into(), b"");
-                    }
-                }
-                let _ = server.accept().await;
-            });
-
-            let mut response = tx.try_send_request(datagram_request()).await.unwrap();
-            let (mut control, sender, mut receiver) =
-                datagram::on(&mut response).unwrap().into_parts();
-            let id = sender.stream_id().into_inner();
-            assert!(id / 4 < 64);
-            if end != End::PeerCloses {
-                control.shutdown().await.unwrap();
-            }
-            qsid.send((id / 4) as u8).unwrap();
-            let mut marker = [0; 1];
-            control.read_exact(&mut marker).await.unwrap();
-            finish_peer.send(()).unwrap();
-            let mut rest = Vec::new();
-            control.read_to_end(&mut rest).await.unwrap();
-            match end {
-                End::Clean => {
-                    tx.try_send_request(
-                        Request::get("https://localhost/after")
-                            .body(Full::new(Bytes::new()))
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                    read_queued(&mut receiver, &format!("{end:?}")).await;
-                    drop(tx);
-                    client_driver.as_mut().graceful_shutdown();
-                    client_driver.await.unwrap();
-                }
-                End::Draining => {
-                    drop(tx);
-                    client_driver.await.unwrap();
-                    read_queued(&mut receiver, &format!("{end:?}")).await;
-                }
-                End::PeerCloses => {
-                    // The FIN arrived, so the failed send half takes no Datagrams with it.
-                    close_peer.send(()).unwrap();
-                    let _ = client_driver.await;
-                    read_queued(&mut receiver, &format!("{end:?}")).await;
-                    assert_eq!(
-                        sender.try_send(Bytes::new()).unwrap_err().kind(),
-                        SendErrorKind::Closed
-                    );
-                    drop(tx);
-                }
-            }
-            drop(control);
-            server_task.await.unwrap();
-        })
-        .await;
-    }
-}
-
-#[tokio::test]
 async fn shutdown_stops_a_busy_sender() {
     bounded(async {
         let Pair {
@@ -408,54 +272,9 @@ async fn shutdown_stops_a_busy_sender() {
 }
 
 #[tokio::test]
-async fn dropped_tunnel_task_closes_the_session() {
-    bounded(async {
-        // The connection task runs; the tunnel task is dropped unpolled.
-        let Pair {
-            mut tx,
-            driver,
-            mut server,
-            _endpoints,
-            ..
-        } = pair_config(
-            Http3Options::default(),
-            Discard(Arc::new(AtomicBool::new(false))),
-            true,
-            true,
-            true,
-            None,
-        )
-        .await;
-        let mut client_driver = Box::pin(driver);
-        let server_task = tokio::spawn(async move {
-            let resolver = server.accept().await.unwrap().unwrap();
-            let (_, mut stream) = resolver.resolve_request().await.unwrap();
-            stream.send_response(Response::new(())).await.unwrap();
-            let _ = stream.recv_data().await;
-            let _ = server.accept().await;
-        });
-
-        let mut response = tx.try_send_request(datagram_request()).await.unwrap();
-        let (control, sender, mut receiver) = datagram::on(&mut response).unwrap().into_parts();
-        // The session ends with its task, though the tunnel is still held.
-        assert_eq!(
-            sender.try_send(Bytes::new()).unwrap_err().kind(),
-            SendErrorKind::Closed
-        );
-        assert!(receiver.recv().await.is_none());
-        drop(control);
-        drop(tx);
-        client_driver.as_mut().graceful_shutdown();
-        client_driver.await.unwrap();
-        server_task.await.unwrap();
-    })
-    .await;
-}
-
-#[tokio::test]
 async fn abort_malformed_resets_with_its_code() {
-    // Before anything arrived, after the proxy's Datagrams and FIN, and for a malformed message.
-    for (after_fin, message) in [(false, false), (true, false), (false, true)] {
+    // After the proxy's Datagrams and FIN, and for a malformed message before anything arrived.
+    for (after_fin, message) in [(true, false), (false, true)] {
         let code = if message {
             h3::error::Code::H3_MESSAGE_ERROR
         } else {
@@ -519,7 +338,7 @@ async fn abort_malformed_resets_with_its_code() {
                 let error = control.read(&mut [0; 1]).await.unwrap_err();
                 assert!(format!("{error:?}").contains("malformed"), "{error:?}");
             }
-            // Both Datagram directions end at once, queued packets included.
+            // Both Datagram directions end at once.
             assert_eq!(
                 sender.try_send(Bytes::new()).unwrap_err().kind(),
                 SendErrorKind::Closed

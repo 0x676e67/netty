@@ -232,3 +232,61 @@ async fn empty_request_fails_when_its_fin_reports_a_stream_error() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn peer_stop_during_tunnel_fin_keeps_receiving() {
+    bounded(async {
+        let (_, server_config, client_config) = tls::config();
+        let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
+        let pause = pause::Pause::default();
+        pause.stop_finish();
+        let ((mut tx, driver), mut server) = tokio::join!(
+            async {
+                Builder::new(Exec)
+                    .handshake(pause.wrap(native::Connection::new(client)))
+                    .await
+                    .unwrap()
+            },
+            async {
+                h3::server::Connection::<_, Bytes>::new(h3_quinn::Connection::new(server))
+                    .await
+                    .unwrap()
+            },
+        );
+        let mut client_driver = Box::pin(driver);
+        let (stop, wait_stop) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let resolver = server.accept().await.unwrap().unwrap();
+            let (_, mut stream) = resolver.resolve_request().await.unwrap();
+            stream.send_response(Response::new(())).await.unwrap();
+            wait_stop.await.unwrap();
+            stream.stop_sending(h3::error::Code::H3_NO_ERROR);
+            stream
+                .send_data(Bytes::from_static(b"after"))
+                .await
+                .unwrap();
+            stream.finish().await.unwrap();
+            let _ = server.accept().await;
+        });
+        let request = Request::connect("localhost:443")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let mut response = tx.try_send_request(request).await.unwrap();
+        let tunnel = netty::upgrade::on(&mut response).await.unwrap();
+        let (mut read, mut write) = tokio::io::split(tunnel);
+        let shutdown = tokio::spawn(async move { write.shutdown().await });
+        pause.finishing().await;
+        stop.send(()).unwrap();
+        // A stop that arrives while the FIN waits ends only the send direction.
+        let mut incoming = Vec::new();
+        read.read_to_end(&mut incoming).await.unwrap();
+        assert_eq!(incoming, b"after");
+        assert!(shutdown.await.unwrap().is_err(), "the FIN never went out");
+        drop(read);
+        drop(tx);
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
+        peer.await.unwrap();
+    })
+    .await;
+}

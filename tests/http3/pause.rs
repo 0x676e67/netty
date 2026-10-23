@@ -28,6 +28,8 @@ struct State {
     waiting_for_ack: Notify,
     ack_released: AtomicBool,
     ack_waker: AtomicWaker,
+    stop_finish: AtomicBool,
+    finishing: Notify,
 }
 
 #[derive(Clone)]
@@ -76,6 +78,17 @@ impl Pause {
 
     pub async fn waiting_for_finish_ack(&self) {
         self.0.waiting_for_ack.notified().await;
+    }
+
+    /// Holds the first request's FIN until the peer stops the stream, which then fails it, as
+    /// QUIC does for a FIN still waiting for flow-control credit.
+    pub fn stop_finish(&self) {
+        self.resume();
+        self.0.stop_finish.store(true, Ordering::Release);
+    }
+
+    pub async fn finishing(&self) {
+        self.0.finishing.notified().await;
     }
 
     pub fn release_finish_ack(&self) {
@@ -194,6 +207,14 @@ impl<T: SendStream<Bytes>> SendStream<Bytes> for Transport<T> {
     }
 
     fn poll_finish(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), quic::StreamError>> {
+        if self.inner.send_id().into_inner() == 0
+            && self.pause.0.stop_finish.load(Ordering::Acquire)
+        {
+            self.pause.0.finishing.notify_one();
+            if let Some(error_code) = ready!(self.inner.poll_stopped(cx))? {
+                return Poll::Ready(Err(quic::StreamError::StreamTerminated { error_code }));
+            }
+        }
         self.inner.poll_finish(cx)
     }
 

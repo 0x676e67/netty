@@ -175,15 +175,8 @@ mod tests {
         assert_eq!(values[0].len(), 65528);
         assert_eq!(values[1].len(), 65535);
 
-        // A Context ID 0 capsule too large for a UDP payload aborts.
-        // https://www.rfc-editor.org/rfc/rfc9298.html#section-5
-        let mut buf = BytesMut::from(&[0, 0x80, 1, 0, 0, 0][..]);
-        assert!(matches!(
-            Decoder::default().decode(&mut buf),
-            Err(MasqueError::Malformed)
-        ));
-
         // An oversized capsule is decided once its Context ID arrives: 0 aborts, others skip.
+        // https://www.rfc-editor.org/rfc/rfc9298.html#section-5
         let mut decoder = Decoder::default();
         let mut buf = BytesMut::new();
         for byte in [0, 0x80, 1, 0, 0] {

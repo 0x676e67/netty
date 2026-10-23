@@ -29,8 +29,7 @@ pub struct DatagramRequest;
 
 /// A successful CONNECT and its request-associated Datagram handles.
 /// Dropping the control stream invalidates both handles, even if they outlive it.
-/// Shutting it down closes the send half and sends the FIN once QUIC has taken the
-/// Datagrams admitted before.
+/// Shutting it down closes the send half, discarding Datagrams still queued, and sends the FIN.
 pub struct Session {
     control: Upgraded,
     sender: Sender,
@@ -174,7 +173,7 @@ impl Sender {
 
     /// Returns the latest payload limit, excluding Quarter Stream ID overhead; at 0 even an
     /// empty payload may not fit, which [`Self::poll_ready`] reports as `TooLarge`. `None`
-    /// means sending is closed or shutting down, or native Datagrams are unavailable.
+    /// means sending is closed or native Datagrams are unavailable.
     pub fn max_datagram_size(&self) -> Option<usize> {
         self.state.max_size()
     }
