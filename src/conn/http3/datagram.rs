@@ -2,7 +2,8 @@
 //!
 //! Insert [`DatagramRequest`] alongside [`Protocol`](crate::http3::Protocol). After a successful
 //! response, [`on`] takes the session, including its reliable Capsule byte stream.
-//! Capsule and CONNECT-UDP Context ID encoding belong to the caller.
+//! Capsule and CONNECT-UDP Context ID encoding belong to the caller; with the `masque`
+//! feature, `proxy::masque` implements them for CONNECT-UDP.
 use std::{
     future::{Future, poll_fn},
     pin::Pin,
@@ -171,8 +172,9 @@ impl Sender {
         self.state.id()
     }
 
-    /// Returns the latest payload limit, excluding Quarter Stream ID overhead.
-    /// `None` means the send half is closed or native Datagrams are unavailable.
+    /// Returns the latest payload limit, excluding Quarter Stream ID overhead; at 0 even an
+    /// empty payload may not fit, which [`Self::poll_ready`] reports as `TooLarge`. `None`
+    /// means sending is closed or shutting down, or native Datagrams are unavailable.
     pub fn max_datagram_size(&self) -> Option<usize> {
         self.state.max_size()
     }
