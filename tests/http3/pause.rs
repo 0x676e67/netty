@@ -30,6 +30,8 @@ struct State {
     ack_waker: AtomicWaker,
     stop_finish: AtomicBool,
     finishing: Notify,
+    hide_stop: AtomicBool,
+    stop_hidden: Notify,
 }
 
 #[derive(Clone)]
@@ -89,6 +91,17 @@ impl Pause {
 
     pub async fn finishing(&self) {
         self.0.finishing.notified().await;
+    }
+
+    /// Hides the peer's stop of the first request from `poll_stopped`, so only a write reports
+    /// it, as when the stop lands between the two.
+    pub fn hide_stop(&self) {
+        self.resume();
+        self.0.hide_stop.store(true, Ordering::Release);
+    }
+
+    pub async fn stop_hidden(&self) {
+        self.0.stop_hidden.notified().await;
     }
 
     pub fn release_finish_ack(&self) {
@@ -183,6 +196,15 @@ impl<T: SendStream<Bytes>> SendStream<Bytes> for Transport<T> {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<u64>, quic::StreamError>> {
+        if self.inner.send_id().into_inner() == 0 && self.pause.0.hide_stop.load(Ordering::Acquire)
+        {
+            let result = ready!(self.inner.poll_stopped(cx));
+            if !matches!(result, Ok(Some(_))) {
+                return Poll::Ready(result);
+            }
+            self.pause.0.stop_hidden.notify_one();
+            return Poll::Pending;
+        }
         if self.pause.0.fail_finish_ack.load(Ordering::Acquire) {
             return Poll::Ready(Err(quic::StreamError::Unknown(Box::new(
                 std::io::Error::other("FIN acknowledgment failed"),

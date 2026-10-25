@@ -303,6 +303,15 @@ where
             finish: None,
         }
     }
+
+    /// Stops HTTP Datagram sending with the send direction.
+    /// https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1
+    fn close_datagrams(&self) {
+        #[cfg(feature = "http3-datagram")]
+        if let Some(datagrams) = &self.send.datagrams {
+            datagrams.close_send();
+        }
+    }
 }
 
 impl<S> Future for SendStream<S>
@@ -346,15 +355,20 @@ where
                     .map(|result| result.map(|_| ()).map_err(Error::new_h3));
             }
             if let Poll::Ready(result) = this.send.stream.poll_stopped(cx) {
-                #[cfg(feature = "http3-datagram")]
-                if let Some(datagrams) = &this.send.datagrams {
-                    datagrams.close_send();
-                }
+                this.close_datagrams();
                 return Poll::Ready(result.map(|_| ()).map_err(Error::new_h3));
             }
             // Flush accepted DATA before waiting for another command, even when
-            // the application never calls flush or sends any more bytes.
-            ready!(this.send.stream.poll_ready(cx)).map_err(Error::new_h3)?;
+            // the application never calls flush or sends any more bytes. A stop
+            // that lands after the check above fails this flush instead.
+            match ready!(this.send.stream.poll_ready(cx)) {
+                Ok(()) => {}
+                Err(StreamError::RemoteTerminate { .. }) => {
+                    this.close_datagrams();
+                    return Poll::Ready(Ok(()));
+                }
+                Err(error) => return Poll::Ready(Err(Error::new_h3(error))),
+            }
             match ready!(this.rx.poll_recv(cx)) {
                 Some(Write::Data(data)) => this
                     .send
@@ -365,10 +379,7 @@ where
                     let _ = ack.send(Ok(()));
                 }
                 Some(Write::Finish(ack)) => {
-                    #[cfg(feature = "http3-datagram")]
-                    if let Some(datagrams) = &this.send.datagrams {
-                        datagrams.close_send();
-                    }
+                    this.close_datagrams();
                     this.finish = Some(ack);
                 }
                 None => return Poll::Ready(Err(Error::new_canceled())),
