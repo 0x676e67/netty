@@ -381,8 +381,17 @@ where
             let code = self.code;
             #[cfg(feature = "http3-datagram")]
             let code = match &self.datagrams {
-                Some(datagrams) if datagrams.invalid.is_cancelled() => datagrams.invalid_code(),
-                _ => code,
+                Some(datagrams) => {
+                    // No Datagram may follow the reset, so the queue goes first.
+                    // https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1
+                    datagrams.close_send();
+                    if datagrams.invalid.is_cancelled() {
+                        datagrams.invalid_code()
+                    } else {
+                        code
+                    }
+                }
+                None => code,
             };
             self.stream.stop_stream(code);
         }

@@ -471,10 +471,11 @@ impl RequestState {
     pub(crate) fn abort(&self, abort: Abort) {
         // Published before the cancel, which the stream guards and the transfer task observe first.
         let _ = self.abort.set(abort);
-        self.invalidate();
-        // Both directions end now, also after the peer's FIN.
+        // Both directions end before the cancel lets the transfer task reset the stream, also
+        // after the peer's FIN.
         self.close_recv();
         self.close_send();
+        self.invalidate();
     }
 
     /// Why the application aborted the session, if it did.
@@ -1105,6 +1106,12 @@ mod tests {
             Poll::Ready(Err(SendError::TooLarge))
         );
         assert_eq!(tunnel.try_send(b""), Err(SendError::TooLarge));
+        // One more byte also fits Context ID 0, so an empty payload fits.
+        registry.lock().max_size = Some(request.0.prefix_size() + 1);
+        assert_eq!(tunnel.max_payload_size(), 0);
+        assert_eq!(tunnel.poll_send_ready(&mut cx), Poll::Ready(Ok(())));
+        assert_eq!(tunnel.try_send(b""), Ok(()));
+        assert_eq!(tunnel.try_send(b"x"), Err(SendError::TooLarge));
 
         // Capsules still arrive once the HTTP Datagrams have ended.
         request.0.close_recv();

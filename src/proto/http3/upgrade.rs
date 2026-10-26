@@ -354,8 +354,8 @@ where
                     .poll_stopped(cx)
                     .map(|result| result.map(|_| ()).map_err(Error::new_h3));
             }
+            // A peer stop ends this direction; SendGuard closes its Datagrams with the reset.
             if let Poll::Ready(result) = this.send.stream.poll_stopped(cx) {
-                this.close_datagrams();
                 return Poll::Ready(result.map(|_| ()).map_err(Error::new_h3));
             }
             // Flush accepted DATA before waiting for another command, even when
@@ -363,10 +363,7 @@ where
             // that lands after the check above fails this flush instead.
             match ready!(this.send.stream.poll_ready(cx)) {
                 Ok(()) => {}
-                Err(StreamError::RemoteTerminate { .. }) => {
-                    this.close_datagrams();
-                    return Poll::Ready(Ok(()));
-                }
+                Err(StreamError::RemoteTerminate { .. }) => return Poll::Ready(Ok(())),
                 Err(error) => return Poll::Ready(Err(Error::new_h3(error))),
             }
             match ready!(this.rx.poll_recv(cx)) {

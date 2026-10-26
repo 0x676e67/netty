@@ -256,8 +256,9 @@ impl UdpSender {
     }
 
     /// Writes buffered capsules, then closes the request stream for sending. HTTP Datagrams
-    /// still queued are discarded, as no Datagram may follow the FIN
-    /// ([RFC 9297 §2.1](https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1)).
+    /// still queued are discarded, as none may follow the FIN
+    /// ([RFC 9297 §2.1](https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1)); one the
+    /// connection is already passing to QUIC may still leave alongside it.
     ///
     /// Sends are refused from the first call on. Returns the first write error once, and `Ok`
     /// at once after that or after a close.
