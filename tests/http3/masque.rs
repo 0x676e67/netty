@@ -35,7 +35,7 @@ async fn recv(tunnel: &mut UdpTunnel) -> Result<Option<Bytes>, MasqueError> {
     poll_fn(|cx| tunnel.poll_recv(cx)).await
 }
 
-/// Reads `len` bytes of the request stream.
+/// Reads at least `len` bytes of the request stream.
 async fn read_stream(
     stream: &mut h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     len: usize,

@@ -62,7 +62,8 @@ pub(super) struct Decoder {
 impl Decoder {
     /// Takes the next DATAGRAM capsule value from `buf`; `None` means more bytes are needed.
     ///
-    /// A Context ID 0 capsule too large to carry a UDP payload is malformed ([RFC 9298 §5]).
+    /// A Context ID 0 capsule longer than any Context ID plus UDP payload is malformed
+    /// ([RFC 9298 §5]); the tunnel checks the payload length of the ones returned.
     ///
     /// [RFC 9298 §5]: https://www.rfc-editor.org/rfc/rfc9298.html#section-5
     pub(super) fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Bytes>, MasqueError> {

@@ -750,8 +750,8 @@ pub(super) async fn invalid_datagram(invalid: Option<CancellationToken>) -> Erro
     invalid_datagram_error()
 }
 
-/// A Datagram on a request without Datagram semantics is a stream error.
-/// https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1
+/// A Datagram on a request without Datagram semantics is a stream error
+/// ([RFC 9297 §2](https://www.rfc-editor.org/rfc/rfc9297.html#section-2)).
 pub(super) fn invalid_datagram_error() -> Error {
     Error::new_h3("HTTP Datagram on a request without Datagram semantics")
 }
@@ -796,8 +796,8 @@ where
 }
 
 /// Whether the connection closed without an error: with H3_NO_ERROR, or by the peer with a code
-/// this endpoint does not know, which counts the same.
-/// https://www.rfc-editor.org/rfc/rfc9114.html#section-8
+/// this endpoint does not know, which counts the same
+/// ([RFC 9114 §8](https://www.rfc-editor.org/rfc/rfc9114.html#section-8)).
 fn closed_normally(error: &http3::error::ConnectionError) -> bool {
     use http3::{error::ConnectionError, quic::ConnectionErrorIncoming};
 

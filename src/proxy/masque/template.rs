@@ -12,11 +12,12 @@ use super::MasqueError;
 /// A validated CONNECT-UDP URI template, such as
 /// `https://proxy.example:443/.well-known/masque/udp/{target_host}/{target_port}/`.
 ///
-/// Templates are checked against the requirements of [RFC 9298 §2] when parsed: absolute,
-/// variables only in the path or query, both `target_host` and `target_port` present, and no
-/// level 4 or reserved expansions. Other RFC 6570 syntax is not checked, and variables other
-/// than those two expand as undefined. Userinfo is rejected, as it would travel in every
-/// request's `:authority`; send credentials with
+/// Templates are checked against the requirements of [RFC 9298 §2] when parsed: absolute with a
+/// path starting with `/`, only ASCII 0x21-0x7E, variables only in the path or query, both
+/// `target_host` and `target_port` present, and no `+`, `#`, `.`, `/` or `;` operators, reserved
+/// operators or level 4 modifiers. The expansion must also parse as a [`Uri`]. Other RFC 6570
+/// syntax is not checked, and variables other than those two expand as undefined. Userinfo is
+/// rejected, as it would travel in every request's `:authority`; send credentials with
 /// [`ConnectUdp::with_auth`](super::ConnectUdp::with_auth).
 ///
 /// [RFC 9298 §2]: https://www.rfc-editor.org/rfc/rfc9298.html#section-2
@@ -102,11 +103,16 @@ impl Template {
             return Err(invalid("missing target_host or target_port"));
         }
 
-        Ok(Template {
+        let parsed = Template {
             raw: template.into(),
             proxy,
             parts,
-        })
+        };
+        // `Uri` refuses some characters a template may hold, such as `<` in the path.
+        if parsed.expand("localhost", 443).is_err() {
+            return Err(invalid("not a valid URI once expanded"));
+        }
+        Ok(parsed)
     }
 
     /// Returns the default template for a proxy ([RFC 9298 §2]):
@@ -390,6 +396,10 @@ mod tests {
             (
                 "characters outside 0x21-0x7E",
                 &["https://p.example/ {target_host}/{target_port}"],
+            ),
+            (
+                "not a valid URI once expanded",
+                &["https://p.example/a<b/{target_host}/{target_port}"],
             ),
         ] {
             for template in templates {
