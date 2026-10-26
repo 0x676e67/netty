@@ -2,7 +2,7 @@
 
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll, ready},
@@ -33,6 +33,7 @@ struct State {
     finishing: Notify,
     hide_stop: AtomicBool,
     stop_hidden: Notify,
+    on_reset: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[derive(Clone)]
@@ -111,6 +112,12 @@ impl Pause {
 
     pub async fn stop_hidden(&self) {
         self.0.stop_hidden.notified().await;
+    }
+
+    /// Runs `check` when the first request's send half is reset, before QUIC gets the reset.
+    #[cfg(feature = "http3-datagram")]
+    pub fn on_reset(&self, check: impl FnOnce() + Send + 'static) {
+        *self.0.on_reset.lock().unwrap() = Some(Box::new(check));
     }
 
     pub fn release_finish_ack(&self) {
@@ -266,6 +273,12 @@ impl<T: SendStream<Bytes>> SendStream<Bytes> for Transport<T> {
     }
 
     fn reset(&mut self, code: u64) {
+        if self.inner.send_id().into_inner() == 0 {
+            let check = self.pause.0.on_reset.lock().unwrap().take();
+            if let Some(check) = check {
+                check();
+            }
+        }
         self.inner.reset(code);
     }
 

@@ -501,6 +501,13 @@ async fn peer_stop_closes_datagram_sending() {
             });
             let mut response = tx.try_send_request(datagram_request()).await.unwrap();
             let (control, sender, _receiver) = datagram::on(&mut response).unwrap().into_parts();
+            let at_reset = Arc::new(std::sync::OnceLock::new());
+            pause.on_reset({
+                let (sender, at_reset) = (sender.clone(), at_reset.clone());
+                move || {
+                    let _ = at_reset.set(sender.try_send(Bytes::new()).map_err(|e| e.kind()));
+                }
+            });
             let (mut read, mut write) = tokio::io::split(control);
             stop.send(()).unwrap();
             if hide_stop {
@@ -514,6 +521,11 @@ async fn peer_stop_closes_datagram_sending() {
                 tokio::task::yield_now().await;
             }
             assert!(write.shutdown().await.is_err(), "hide_stop {hide_stop}");
+            assert_eq!(
+                at_reset.get(),
+                Some(&Err(SendErrorKind::Closed)),
+                "sending was open at the reset"
+            );
             respond.send(()).unwrap();
             let mut incoming = Vec::new();
             read.read_to_end(&mut incoming).await.unwrap();

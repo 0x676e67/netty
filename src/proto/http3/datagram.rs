@@ -471,11 +471,10 @@ impl RequestState {
     pub(crate) fn abort(&self, abort: Abort) {
         // Published before the cancel, which the stream guards and the transfer task observe first.
         let _ = self.abort.set(abort);
-        // Both directions end before the cancel lets the transfer task reset the stream, also
-        // after the peer's FIN.
+        self.invalidate();
+        // Both directions end now, also after the peer's FIN.
         self.close_recv();
         self.close_send();
-        self.invalidate();
     }
 
     /// Why the application aborted the session, if it did.
