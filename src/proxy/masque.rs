@@ -89,9 +89,9 @@ fn validate<B>(response: &Response<B>) -> Result<(), MasqueError> {
 ///
 /// Each open tunnel holds a request stream and one
 /// [`max_concurrent_requests`](crate::http3::Http3Options::max_concurrent_requests)
-/// slot until dropped, so further calls on a full connection wait for a free slot. The
-/// handshake has no timeout of its own, so bound the returned future, e.g. with a connect
-/// timeout around the whole connector.
+/// slot until both directions end or it is dropped, so further calls on a full connection
+/// wait for a free slot. The handshake has no timeout of its own, so bound the returned
+/// future, e.g. with a connect timeout around the whole connector.
 ///
 /// A refusal yields only its status; to read its headers, such as `Proxy-Authenticate`, send
 /// [`http3_request`] and open the tunnel with [`UdpTunnel::from_http3`].
@@ -106,12 +106,12 @@ pub struct ConnectUdp<S> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum MasqueError {
-    /// The URI template breaks [RFC 9298 §2], for the given reason.
+    /// The URI template is invalid ([RFC 9298 §2]), for the given reason.
     ///
     /// [RFC 9298 §2]: https://www.rfc-editor.org/rfc/rfc9298.html#section-2
     InvalidTemplate(&'static str),
     /// The target host is neither an IPv6 literal nor a reg-name ([RFC 9298 §3]): it is empty,
-    /// a bracketed literal other than IPv6, has an IPv6 zone ID or holds other characters than
+    /// a bracketed literal other than IPv6, has an IPv6 zone ID or holds characters other than
     /// unreserved and sub-delims; or the port is missing, 0 or not a valid `u16`.
     ///
     /// [RFC 9298 §3]: https://www.rfc-editor.org/rfc/rfc9298.html#section-3
@@ -137,9 +137,9 @@ pub enum MasqueError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SendError {
-    /// The send queue is full; wait with [`UdpTunnel::poll_send_ready`].
+    /// The send queue is full; wait with [`UdpSender::poll_send_ready`].
     Full,
-    /// The payload exceeds [`UdpTunnel::max_payload_size`], or the limit fits no payload.
+    /// The payload exceeds [`UdpSender::max_payload_size`], or the limit fits no payload.
     TooLarge,
     /// The tunnel can no longer send.
     Closed,

@@ -96,7 +96,7 @@ pub struct SendRequest<B> {
 ///
 /// A peer that closes with `H3_NO_ERROR` or an unknown error code ends it with `Ok`
 /// ([RFC 9114 §8](https://www.rfc-editor.org/rfc/rfc9114.html#section-8)); a HEADERS frame
-/// after a CONNECT response closes it with `H3_FRAME_UNEXPECTED`
+/// on the tunnel of a successful CONNECT closes it with `H3_FRAME_UNEXPECTED`
 /// ([RFC 9114 §4.4](https://www.rfc-editor.org/rfc/rfc9114.html#section-4.4)).
 #[must_use = "dropping the connection handle closes the connection"]
 pub struct Connection<Q, B, E>
@@ -216,8 +216,9 @@ where
     ///
     /// If there was an error before trying to open the request stream, the message
     /// will be returned as part of this error. This includes a URI authority with
-    /// userinfo, which HTTP/3 forbids
-    /// ([RFC 9114 §4.3.1](https://www.rfc-editor.org/rfc/rfc9114.html#section-4.3.1)).
+    /// userinfo, which HTTP/3 forbids for `http` and `https`
+    /// ([RFC 9114 §4.3.1](https://www.rfc-editor.org/rfc/rfc9114.html#section-4.3.1)) and this
+    /// client never sends.
     ///
     /// # Cancel safety
     ///

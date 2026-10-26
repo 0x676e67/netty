@@ -155,9 +155,9 @@ impl UdpSender {
     ///
     /// With HTTP Datagrams this is the QUIC datagram limit less the Quarter Stream ID and
     /// Context ID; larger payloads are rejected rather than moved to capsules, so the path MTU
-    /// stays visible ([RFC 9298 §6.1]). A limit too small for any payload also reads as 0, which
-    /// [`poll_send_ready`](Self::poll_send_ready) reports as [`TooLarge`](SendError::TooLarge).
-    /// Inner QUIC needs at least 1200 bytes ([RFC 9000 §14]).
+    /// stays visible ([RFC 9298 §6.1]). A limit of 0 fits at most an empty payload;
+    /// [`poll_send_ready`](Self::poll_send_ready) reports [`TooLarge`](SendError::TooLarge) when
+    /// not even that fits. Inner QUIC needs at least 1200 bytes ([RFC 9000 §14]).
     ///
     /// [RFC 9298 §6.1]: https://www.rfc-editor.org/rfc/rfc9298.html#section-6.1
     /// [RFC 9000 §14]: https://www.rfc-editor.org/rfc/rfc9000.html#section-14
@@ -334,7 +334,7 @@ impl UdpReceiver {
         }
         let result = ready!(self.poll_payload(cx));
         // Ending inside a capsule breaks the Capsule Protocol, which makes the whole message
-        // malformed; the other errors are malformed payloads.
+        // malformed; any other `Malformed` is an oversized payload.
         let truncated = matches!(result, Ok(None)) && self.decoder.is_partial(&self.read_buf);
         let result = if truncated {
             Err(MasqueError::Malformed)

@@ -171,9 +171,9 @@ impl Sender {
         self.state.id()
     }
 
-    /// Returns the latest payload limit, excluding Quarter Stream ID overhead; at 0 even an
-    /// empty payload may not fit, which [`Self::poll_ready`] reports as `TooLarge`. `None`
-    /// means sending is closed or native Datagrams are unavailable.
+    /// Returns the latest payload limit, excluding Quarter Stream ID overhead. A limit of 0 fits
+    /// at most an empty payload; [`Self::poll_ready`] reports `TooLarge` when not even that
+    /// fits. `None` means sending is closed or native Datagrams are unavailable.
     pub fn max_datagram_size(&self) -> Option<usize> {
         self.state.max_size()
     }
@@ -219,7 +219,8 @@ impl Receiver {
     }
 
     /// Resets the request stream with `H3_DATAGRAM_ERROR`, for a peer whose payloads break the
-    /// protocol's format ([RFC 9297](https://www.rfc-editor.org/rfc/rfc9297.html)).
+    /// protocol's format
+    /// ([RFC 9297 §5.2](https://www.rfc-editor.org/rfc/rfc9297.html#section-5.2)).
     pub fn abort_malformed(&self) {
         self.0.abort(Abort::Datagram);
     }

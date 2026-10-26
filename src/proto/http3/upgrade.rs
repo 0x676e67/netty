@@ -304,8 +304,8 @@ where
         }
     }
 
-    /// Stops HTTP Datagram sending with the send direction.
-    /// https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1
+    /// Stops HTTP Datagram sending with the send direction
+    /// ([RFC 9297 §2.1](https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1)).
     fn close_datagrams(&self) {
         #[cfg(feature = "http3-datagram")]
         if let Some(datagrams) = &self.send.datagrams {

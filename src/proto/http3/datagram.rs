@@ -332,9 +332,8 @@ impl RequestState {
         }
     }
 
-    /// Checks that a payload of the current maximum size would be admitted, so a
-    /// ready sender's next `try_send` does not fail with `Full`; `TooLarge` when the
-    /// limit fits no payload.
+    /// Checks that a payload of the current maximum size would be admitted now; another
+    /// sender may still take the room first. `TooLarge` when the limit fits no payload.
     pub(crate) fn ready(&self) -> std::result::Result<(), SendErrorKind> {
         let state = self.registry.lock();
         let Some(entry) = state.streams.get(&self.id.into_inner()) else {
