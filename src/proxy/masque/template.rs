@@ -79,17 +79,29 @@ impl Template {
         let proxy: Uri = format!("{scheme}://{authority}/")
             .parse()
             .map_err(|_| invalid("invalid scheme or authority"))?;
-        if crate::proxy::dst_host(&proxy).is_none() {
+        let Some(host) = crate::proxy::dst_host(&proxy) else {
             return Err(invalid("empty host"));
+        };
+        // `Uri` takes brackets anywhere in an authority, which would dial one host and send
+        // another as `:authority`.
+        if parse_host(host).is_none() {
+            return Err(invalid("invalid host"));
         }
-        // `Uri` keeps a port it cannot read, and `u16` parsing takes a leading "+"; the proxy's
-        // must be nonzero digits.
+        // `Uri` reads a port after the last colon and keeps one it cannot read, and `u16`
+        // parsing takes a leading "+"; the proxy's must follow the host as nonzero digits.
         // https://www.rfc-editor.org/rfc/rfc3986.html#section-3.2.3
-        let has_port = proxy.authority().is_some_and(|a| a.as_str() != a.host());
-        let valid_port = proxy.port().is_some_and(|port| {
-            port.as_u16() != 0 && port.as_str().bytes().all(|b| b.is_ascii_digit())
-        });
-        if has_port && !valid_port {
+        let valid_port = match proxy
+            .authority()
+            .and_then(|a| a.as_str().strip_prefix(host))
+        {
+            Some("") => true,
+            Some(port) => port.strip_prefix(':').is_some_and(|port| {
+                port.bytes().all(|b| b.is_ascii_digit())
+                    && port.parse::<u16>().is_ok_and(|port| port != 0)
+            }),
+            None => false,
+        };
+        if !valid_port {
             return Err(invalid("invalid port"));
         }
 
@@ -235,13 +247,14 @@ fn parse_parts(mut rest: &str) -> Result<Vec<Part>, MasqueError> {
     Ok(parts)
 }
 
-/// Strips IPv6 brackets from a target host, rejecting anything but an IPv6 literal or a
-/// non-empty reg-name, which covers DNS names and IPv4 literals.
+/// Strips IPv6 brackets from a proxy or target host, rejecting anything but an IPv6 literal or
+/// a non-empty reg-name, which covers DNS names and IPv4 literals.
 fn parse_host(host: &str) -> Option<&str> {
     let is_ipv6 = |host: &str| host.parse::<Ipv6Addr>().is_ok();
     // IPv6address / IPv4address / reg-name, without IPv6 zone identifiers. Brackets hold only
     // IPv6.
     // https://www.rfc-editor.org/rfc/rfc9298.html#section-3
+    // https://www.rfc-editor.org/rfc/rfc3986.html#section-3.2.2
     match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
         Some(ip) => is_ipv6(ip).then_some(ip),
         None => (!host.is_empty() && (is_ipv6(host) || is_reg_name(host))).then_some(host),
@@ -368,6 +381,17 @@ mod tests {
                     "https://p.example:/{target_host}/{target_port}",
                     "https://p.example:0/{target_host}/{target_port}",
                     "https://p.example:+443/{target_host}/{target_port}",
+                    "https://[::1]x:443/{target_host}/{target_port}",
+                ],
+            ),
+            (
+                "invalid host",
+                &[
+                    "https://[p.example]/{target_host}/{target_port}",
+                    "https://[192.0.2.1]/{target_host}/{target_port}",
+                    "https://[fe80::1%25eth0]:443/{target_host}/{target_port}",
+                    "https://a[b]/{target_host}/{target_port}",
+                    "https://x[::1]:443/{target_host}/{target_port}",
                 ],
             ),
             (
