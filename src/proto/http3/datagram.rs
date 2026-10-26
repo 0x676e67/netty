@@ -1105,6 +1105,12 @@ mod tests {
             Poll::Ready(Err(SendError::TooLarge))
         );
         assert_eq!(tunnel.try_send(b""), Err(SendError::TooLarge));
+        // One more byte also fits Context ID 0, so an empty payload fits.
+        registry.lock().max_size = Some(request.0.prefix_size() + 1);
+        assert_eq!(tunnel.max_payload_size(), 0);
+        assert_eq!(tunnel.poll_send_ready(&mut cx), Poll::Ready(Ok(())));
+        assert_eq!(tunnel.try_send(b""), Ok(()));
+        assert_eq!(tunnel.try_send(b"x"), Err(SendError::TooLarge));
 
         // Capsules still arrive once the HTTP Datagrams have ended.
         request.0.close_recv();

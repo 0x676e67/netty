@@ -235,16 +235,26 @@ async fn empty_request_fails_when_its_fin_reports_a_stream_error() {
 
 #[tokio::test]
 async fn peer_stop_ends_only_the_tunnel_send_direction() {
-    // The stop arrives while the FIN waits, or between the pump's stop check and a write.
-    for during_finish in [true, false] {
+    /// Where the pump learns of the peer's stop.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Stop {
+        /// A failed FIN.
+        FailedFinish,
+        /// Its stop check before a FIN QUIC would take.
+        TakenFinish,
+        /// A write, as when the stop lands between the stop check and the write.
+        Write,
+    }
+
+    for stop_at in [Stop::FailedFinish, Stop::TakenFinish, Stop::Write] {
         bounded(async {
             let (_, server_config, client_config) = tls::config();
             let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
             let pause = pause::Pause::default();
-            if during_finish {
-                pause.stop_finish();
-            } else {
-                pause.hide_stop();
+            match stop_at {
+                Stop::FailedFinish => pause.stop_finish(),
+                Stop::TakenFinish => pause.take_stopped_finish(),
+                Stop::Write => pause.hide_stop(),
             }
             let ((mut tx, driver), mut server) = tokio::join!(
                 async {
@@ -282,11 +292,14 @@ async fn peer_stop_ends_only_the_tunnel_send_direction() {
             let mut response = tx.try_send_request(request).await.unwrap();
             let tunnel = netty::upgrade::on(&mut response).await.unwrap();
             let (mut read, mut write) = tokio::io::split(tunnel);
-            if during_finish {
+            if stop_at != Stop::Write {
                 let shutdown = tokio::spawn(async move { write.shutdown().await });
                 pause.finishing().await;
                 stop.send(()).unwrap();
-                assert!(shutdown.await.unwrap().is_err(), "the FIN never went out");
+                assert!(
+                    shutdown.await.unwrap().is_err(),
+                    "{stop_at:?}: the FIN went out"
+                );
             } else {
                 stop.send(()).unwrap();
                 pause.stop_hidden().await;

@@ -448,3 +448,93 @@ async fn control_reset_wakes_datagrams_and_releases_request() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn peer_stop_closes_datagram_sending() {
+    // The stop is seen while idle, or only by a write; either way the control stream keeps
+    // reading, and no HTTP Datagram may follow the reset.
+    // https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1
+    for hide_stop in [false, true] {
+        bounded(async {
+            let (_, server_config, client_config) = tls::config();
+            let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
+            let pause = pause::Pause::default();
+            if hide_stop {
+                pause.hide_stop();
+            } else {
+                pause.resume();
+            }
+            let ((mut tx, driver), mut server) = tokio::join!(
+                async {
+                    Builder::new(Exec)
+                        .handshake_with_datagrams::<_, ClientBody>(
+                            pause.wrap(native::Connection::new(client)),
+                        )
+                        .await
+                        .unwrap()
+                },
+                async {
+                    h3::server::builder()
+                        .enable_datagram(true)
+                        .enable_extended_connect(true)
+                        .build::<_, Bytes>(h3_quinn::Connection::new(server))
+                        .await
+                        .unwrap()
+                },
+            );
+            let mut client_driver = Box::pin(driver);
+            let (stop, wait_stop) = oneshot::channel();
+            let (respond, wait_respond) = oneshot::channel();
+            let peer = tokio::spawn(async move {
+                let resolver = server.accept().await.unwrap().unwrap();
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                stream.send_response(Response::new(())).await.unwrap();
+                wait_stop.await.unwrap();
+                stream.stop_sending(h3::error::Code::H3_NO_ERROR);
+                wait_respond.await.unwrap();
+                stream
+                    .send_data(Bytes::from_static(b"after"))
+                    .await
+                    .unwrap();
+                stream.finish().await.unwrap();
+                let _ = server.accept().await;
+            });
+            let mut response = tx.try_send_request(datagram_request()).await.unwrap();
+            let (control, sender, _receiver) = datagram::on(&mut response).unwrap().into_parts();
+            let at_reset = Arc::new(std::sync::OnceLock::new());
+            pause.on_reset({
+                let (sender, at_reset) = (sender.clone(), at_reset.clone());
+                move || {
+                    let _ = at_reset.set(sender.try_send(Bytes::new()).map_err(|e| e.kind()));
+                }
+            });
+            let (mut read, mut write) = tokio::io::split(control);
+            stop.send(()).unwrap();
+            if hide_stop {
+                pause.stop_hidden().await;
+                let _ = write.write_all(b"x").await;
+            }
+            while !matches!(
+                sender.try_send(Bytes::new()),
+                Err(error) if error.kind() == SendErrorKind::Closed
+            ) {
+                tokio::task::yield_now().await;
+            }
+            assert!(write.shutdown().await.is_err(), "hide_stop {hide_stop}");
+            assert_eq!(
+                at_reset.get(),
+                Some(&Err(SendErrorKind::Closed)),
+                "sending was open at the reset"
+            );
+            respond.send(()).unwrap();
+            let mut incoming = Vec::new();
+            read.read_to_end(&mut incoming).await.unwrap();
+            assert_eq!(incoming, b"after");
+            drop((read, write, tx));
+            client_driver.as_mut().graceful_shutdown();
+            client_driver.await.unwrap();
+            peer.await.unwrap();
+        })
+        .await;
+    }
+}

@@ -2,7 +2,7 @@
 
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll, ready},
@@ -29,9 +29,11 @@ struct State {
     ack_released: AtomicBool,
     ack_waker: AtomicWaker,
     stop_finish: AtomicBool,
+    take_stopped_finish: AtomicBool,
     finishing: Notify,
     hide_stop: AtomicBool,
     stop_hidden: Notify,
+    on_reset: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[derive(Clone)]
@@ -83,10 +85,18 @@ impl Pause {
     }
 
     /// Holds the first request's FIN until the peer stops the stream, which then fails it, as
-    /// QUIC does for a FIN still waiting for flow-control credit.
+    /// QUIC does for a FIN still waiting for flow-control credit. `poll_stopped` hides the stop,
+    /// so only the FIN reports it.
     pub fn stop_finish(&self) {
         self.resume();
         self.0.stop_finish.store(true, Ordering::Release);
+    }
+
+    /// Holds the first request's FIN until the peer stops the stream, then lets QUIC take it, as
+    /// QUIC does for the FIN of a stopped stream.
+    pub fn take_stopped_finish(&self) {
+        self.resume();
+        self.0.take_stopped_finish.store(true, Ordering::Release);
     }
 
     pub async fn finishing(&self) {
@@ -102,6 +112,12 @@ impl Pause {
 
     pub async fn stop_hidden(&self) {
         self.0.stop_hidden.notified().await;
+    }
+
+    /// Runs `check` when the first request's send half is reset, before QUIC gets the reset.
+    #[cfg(feature = "http3-datagram")]
+    pub fn on_reset(&self, check: impl FnOnce() + Send + 'static) {
+        *self.0.on_reset.lock().unwrap() = Some(Box::new(check));
     }
 
     pub fn release_finish_ack(&self) {
@@ -135,6 +151,17 @@ impl<T: Connection<Bytes>> Connection<Bytes> for Transport<T> {
 
     fn opener(&self) -> Self::OpenStreams {
         self.pause.wrap(self.inner.opener())
+    }
+}
+
+#[cfg(feature = "http3-datagram")]
+impl<T: quic::DatagramConnection> quic::DatagramConnection for Transport<T> {
+    type Sender = T::Sender;
+
+    type Receiver = T::Receiver;
+
+    fn take_datagrams(&mut self) -> Option<(Self::Sender, Self::Receiver)> {
+        self.inner.take_datagrams()
     }
 }
 
@@ -196,7 +223,9 @@ impl<T: SendStream<Bytes>> SendStream<Bytes> for Transport<T> {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<u64>, quic::StreamError>> {
-        if self.inner.send_id().into_inner() == 0 && self.pause.0.hide_stop.load(Ordering::Acquire)
+        if self.inner.send_id().into_inner() == 0
+            && (self.pause.0.hide_stop.load(Ordering::Acquire)
+                || self.pause.0.stop_finish.load(Ordering::Acquire))
         {
             let result = ready!(self.inner.poll_stopped(cx));
             if !matches!(result, Ok(Some(_))) {
@@ -229,11 +258,14 @@ impl<T: SendStream<Bytes>> SendStream<Bytes> for Transport<T> {
     }
 
     fn poll_finish(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), quic::StreamError>> {
+        let fail = self.pause.0.stop_finish.load(Ordering::Acquire);
         if self.inner.send_id().into_inner() == 0
-            && self.pause.0.stop_finish.load(Ordering::Acquire)
+            && (fail || self.pause.0.take_stopped_finish.load(Ordering::Acquire))
         {
             self.pause.0.finishing.notify_one();
-            if let Some(error_code) = ready!(self.inner.poll_stopped(cx))? {
+            if let Some(error_code) = ready!(self.inner.poll_stopped(cx))?
+                && fail
+            {
                 return Poll::Ready(Err(quic::StreamError::StreamTerminated { error_code }));
             }
         }
@@ -241,6 +273,12 @@ impl<T: SendStream<Bytes>> SendStream<Bytes> for Transport<T> {
     }
 
     fn reset(&mut self, code: u64) {
+        if self.inner.send_id().into_inner() == 0 {
+            let check = self.pause.0.on_reset.lock().unwrap().take();
+            if let Some(check) = check {
+                check();
+            }
+        }
         self.inner.reset(code);
     }
 
