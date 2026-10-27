@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793104064911,
+  "lastUpdate": 1793138850565,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -15443,6 +15443,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 3453974,
             "range": "± 143942.64",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4da422fe6470c95432b85bef5d1d5a691a8beff9",
+          "message": "Merge pull request #164 from 0x676e67/demo/proxy-masque-h2\n\nfeat(proxy): add MASQUE CONNECT-UDP over HTTP/2",
+          "timestamp": "2026-10-28T06:03:51+08:00",
+          "tree_id": "9cd00ad5650d5f20e1789c4541bd0e3b08739704",
+          "url": "https://github.com/0x676e67/netty/commit/4da422fe6470c95432b85bef5d1d5a691a8beff9"
+        },
+        "date": 1793138849133,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 41145,
+            "range": "± 2285.15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 2657448,
+            "range": "± 189250.42",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 15355,
+            "range": "± 1128.71",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 16359,
+            "range": "± 1141.49",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 18147,
+            "range": "± 1272.90",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 56936,
+            "range": "± 4000.35",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 41000018,
+            "range": "± 26600.18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 48898,
+            "range": "± 2858.30",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 21799860,
+            "range": "± 8284393.31",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 13715853,
+            "range": "± 24671852.94",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 4820572,
+            "range": "± 367511.80",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 32457678,
+            "range": "± 1731194.60",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 40782240,
+            "range": "± 9734972.54",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 3449236,
+            "range": "± 343251.91",
             "unit": "ns/iter"
           }
         ]
