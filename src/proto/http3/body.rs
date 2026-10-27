@@ -64,6 +64,9 @@ struct State<S: quic::RecvStream> {
     registration: Option<Registration>,
     /// Body sending or FIN acknowledgment still runs on the executor.
     pipe_pending: bool,
+    /// Unfinished send half of a refused CONNECT-UDP; dropping it on release aborts the stream
+    /// with `H3_REQUEST_CANCELLED`, as a pending upload is when the response body fails.
+    refused: Option<Box<dyn Send>>,
     error: Option<Error>,
     /// The body's waker, for a failure reported by the send task or a Datagram.
     waker: Option<Waker>,
@@ -74,13 +77,15 @@ struct State<S: quic::RecvStream> {
 impl<S: quic::RecvStream> RecvBody<S> {
     /// Wraps the receive half once the head is delivered; `remaining` is the
     /// declared length still expected, `pipe_pending` whether sending or FIN
-    /// acknowledgment still needs the executor.
+    /// acknowledgment still needs the executor, `refused` a send half to reset
+    /// on release.
     pub(super) fn new(
         recv: RecvGuard<S>,
         remaining: Option<u64>,
         active: Active,
         #[cfg(feature = "http3-datagram")] registration: Option<Registration>,
         pipe_pending: bool,
+        refused: Option<Box<dyn Send>>,
     ) -> Self {
         Self {
             link: Arc::new(Link {
@@ -90,6 +95,7 @@ impl<S: quic::RecvStream> RecvBody<S> {
                     #[cfg(feature = "http3-datagram")]
                     registration,
                     pipe_pending,
+                    refused,
                     error: None,
                     waker: None,
                 }),
@@ -260,7 +266,7 @@ impl<S: quic::RecvStream> State<S> {
                 recv.finished = true;
                 #[cfg(feature = "http3-datagram")]
                 if let Some(datagrams) = &recv.datagrams {
-                    datagrams.finish_recv();
+                    datagrams.close_recv();
                 }
                 self.recv = None;
                 self.release();
@@ -302,6 +308,7 @@ impl<S: quic::RecvStream> State<S> {
     /// Returns the permit once the response is done and sending is complete.
     fn release(&mut self) {
         if self.recv.is_none() && !self.pipe_pending {
+            self.refused = None;
             #[cfg(feature = "http3-datagram")]
             {
                 self.registration = None;

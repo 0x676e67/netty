@@ -1,15 +1,14 @@
 //! HTTP/3 configuration for externally established QUIC connections.
 //!
-//! Extended CONNECT and pseudo-header ordering use request extensions:
+//! Configure pseudo-header ordering before the handshake:
 //! ```
-//! use netty::http3::{Protocol, PseudoId, PseudoOrder};
+//! use netty::http3::{Http3Options, PseudoId, PseudoOrder};
 //!
-//! let request = http::Request::connect("https://example.com/tunnel")
-//!     .extension(Protocol::WEBSOCKET)
-//!     .extension(PseudoOrder::builder().push(PseudoId::Method).build())
-//!     .body(())?;
-//! # Ok::<(), http::Error>(())
+//! let options = Http3Options::builder()
+//!     .headers_pseudo_order(PseudoOrder::builder().push(PseudoId::Method).build())
+//!     .build();
 //! ```
+//! Extended CONNECT still uses [`Protocol`] in request extensions.
 
 pub use http3::{PseudoId, PseudoOrder, PseudoOrderBuilder, SettingId, ext::Protocol};
 
@@ -30,7 +29,7 @@ pub struct Http3OptionsBuilder {
 
 /// Options for tuning HTTP/3 connections.
 ///
-/// Controls request admission, header limits, QPACK compression and SETTINGS.
+/// Controls request admission, header encoding, QPACK compression and SETTINGS.
 /// Pass these options to [`crate::conn::http3::Builder`] before the handshake;
 /// the caller configures QUIC transport parameters and TLS separately.
 #[non_exhaustive]
@@ -70,6 +69,11 @@ pub struct Http3Options {
     /// Sending Extended CONNECT requests still requires the peer to enable the protocol.
     pub enable_extended_connect: bool,
 
+    /// Pseudo-header order for every request on the connection.
+    /// Defaults to `None`, using the HTTP/3 library's order.
+    /// Request extensions do not override this setting.
+    pub headers_pseudo_order: Option<PseudoOrder>,
+
     /// Exact order of settings in the initial SETTINGS frame; defaults to the library order.
     /// `Some` omits unlisted or unconfigured entries; GREASE, if enabled, is appended.
     /// Datagram handshakes require `H3_DATAGRAM` in an explicit order.
@@ -90,6 +94,7 @@ impl Default for Http3Options {
             qpack_blocked_streams: None,
             send_grease: true,
             enable_extended_connect: false,
+            headers_pseudo_order: None,
             settings_order: None,
         }
     }
@@ -165,6 +170,17 @@ impl Http3OptionsBuilder {
     #[inline]
     pub fn enable_extended_connect(mut self, value: bool) -> Self {
         self.opts.enable_extended_connect = value;
+        self
+    }
+
+    /// Sets the pseudo-header order for requests on the connection.
+    /// `None` uses the HTTP/3 library's default order.
+    #[inline]
+    pub fn headers_pseudo_order<T>(mut self, headers_pseudo_order: T) -> Self
+    where
+        T: Into<Option<PseudoOrder>>,
+    {
+        self.opts.headers_pseudo_order = headers_pseudo_order.into();
         self
     }
 

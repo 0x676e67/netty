@@ -45,7 +45,7 @@ use crate::{
 #[cfg(feature = "http3-datagram")]
 use crate::{
     conn::http3::datagram::DatagramRequest,
-    proto::http3::datagram::{Drive, RequestState},
+    proto::http3::datagram::{Drive, DriveError, RequestState},
 };
 
 /// Protocol adapter for the send half of a bidirectional QUIC stream.
@@ -231,6 +231,38 @@ where
         }
     }
 
+    /// Closes the connection with a stream's violation if one was published, else gracefully.
+    fn close(&mut self) -> Poll<()> {
+        let Some(&(code, reason)) = self.shared.violation.get() else {
+            rt::quic::OpenStreams::close(&mut self.opener, Code::H3_NO_ERROR.value(), b"");
+            self.shared.terminate(Error::new_closed());
+            return self.finish(Ok(()));
+        };
+        self.fail(code, Error::new_h3(reason), reason)
+    }
+
+    /// Closes the connection with `code`, failing it with `error` unless an earlier one was
+    /// published.
+    fn fail(&mut self, code: Code, error: Error, reason: &str) -> Poll<()> {
+        // Publish the cause before the transport close wakes exchanges.
+        self.shared.terminate(error);
+        rt::quic::OpenStreams::close(&mut self.opener, code.value(), reason.as_bytes());
+        let error = self.shared.error();
+        self.finish(Err(error))
+    }
+
+    /// Reports the QUIC connection's close; a peer's normal close ends with `Ok`.
+    fn closed(&mut self, error: http3::error::ConnectionError) -> Poll<()> {
+        let normal = closed_normally(&error);
+        self.shared.terminate(Error::new_h3(error));
+        let result = if normal {
+            Ok(())
+        } else {
+            Err(self.shared.error())
+        };
+        self.finish(result)
+    }
+
     /// Reports the outcome; the handle may already be gone.
     fn finish(&mut self, result: Result<()>) -> Poll<()> {
         if let Some(done) = self.done.take() {
@@ -253,15 +285,11 @@ where
         }
 
         this.shared.register(cx);
+        if this.shared.violation.get().is_some() {
+            return this.close();
+        }
         if let Poll::Ready(error) = this.driver.poll_close(cx) {
-            let normal = error.is_h3_no_error();
-            this.shared.terminate(Error::new_h3(error));
-            let result = if normal {
-                Ok(())
-            } else {
-                Err(this.shared.error())
-            };
-            return this.finish(result);
+            return this.closed(error);
         }
 
         if this.shared.peer_extended_connect.get().is_none() {
@@ -285,19 +313,31 @@ where
             && let Poll::Ready(result) = datagrams.as_mut().poll(cx)
         {
             this.datagrams = None;
-            if let Err((code, error)) = result {
-                // Publish the cause before transport close wakes exchanges.
-                this.shared.terminate(error);
-                rt::quic::OpenStreams::close(
-                    &mut this.opener,
-                    code.value(),
-                    b"HTTP Datagram driver failed",
-                );
-                let error = this.shared.error();
-                return this.finish(Err(error));
-            }
-            if let Some(registry) = &this.shared.datagrams {
-                registry.close();
+            match result {
+                Ok(()) => {
+                    if let Some(registry) = &this.shared.datagrams {
+                        registry.close();
+                    }
+                }
+                // The Datagram reader can see the close first, so classify it as http3 does for
+                // its own reader.
+                Err(DriveError::Connection(error)) => {
+                    use http3::error::ConnectionError;
+                    return match error {
+                        rt::quic::ConnectionError::Timeout => this.closed(ConnectionError::Timeout),
+                        // The backend failed while the connection is still open.
+                        rt::quic::ConnectionError::InternalError(reason) => {
+                            let error = ConnectionError::Remote(
+                                rt::quic::ConnectionError::InternalError(reason.clone()),
+                            );
+                            this.fail(Code::H3_INTERNAL_ERROR, Error::new_h3(error), &reason)
+                        }
+                        error => this.closed(ConnectionError::Remote(error)),
+                    };
+                }
+                Err(DriveError::Malformed(error)) => {
+                    return this.fail(Code::H3_DATAGRAM_ERROR, error, "malformed HTTP Datagram");
+                }
             }
         }
 
@@ -306,11 +346,9 @@ where
         }
 
         // The waker is registered above, so a completion racing this check
-        // still wakes the task.
+        // still wakes the task. A violation published meanwhile picks the close code.
         if this.shared.is_draining() && this.shared.is_idle() {
-            rt::quic::OpenStreams::close(&mut this.opener, Code::H3_NO_ERROR.value(), b"");
-            this.shared.terminate(Error::new_closed());
-            return this.finish(Ok(()));
+            return this.close();
         }
         Poll::Pending
     }
@@ -324,11 +362,8 @@ where
         if self.done.is_some() {
             self.shared
                 .terminate(Error::new_canceled().with("HTTP/3 connection task dropped"));
-            rt::quic::OpenStreams::close(
-                &mut self.opener,
-                Code::H3_NO_ERROR.value(),
-                b"connection task dropped",
-            );
+            let (code, reason) = self.shared.close_reason("connection task dropped");
+            rt::quic::OpenStreams::close(&mut self.opener, code.value(), reason.as_bytes());
             let error = self.shared.error();
             let _ = self.finish(Err(error));
         }
@@ -346,8 +381,17 @@ where
             let code = self.code;
             #[cfg(feature = "http3-datagram")]
             let code = match &self.datagrams {
-                Some(datagrams) if datagrams.invalid.is_cancelled() => datagrams.invalid_code(),
-                _ => code,
+                Some(datagrams) => {
+                    // No Datagram may follow the reset, so the queue goes first.
+                    // https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1
+                    datagrams.close_send();
+                    if datagrams.invalid.is_cancelled() {
+                        datagrams.invalid_code()
+                    } else {
+                        code
+                    }
+                }
+                None => code,
             };
             self.stream.stop_stream(code);
         }
@@ -410,6 +454,8 @@ where
 
         let connect = request.method() == Method::CONNECT;
         let head = request.method() == Method::HEAD;
+        let connect_udp =
+            connect && request.extensions().get::<Protocol>() == Some(&Protocol::CONNECT_UDP);
 
         #[cfg(feature = "http3-datagram")]
         let datagram_request = request.extensions().get::<DatagramRequest>().is_some();
@@ -545,6 +591,18 @@ where
                 lost(shared.error_or(error))
             })?;
             if headers.status().is_success() {
+                // A CONNECT-UDP success that breaks the Capsule Protocol is malformed.
+                // https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
+                // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1.2
+                if connect_udp
+                    && headers::breaks_capsule_protocol(headers.status(), headers.headers())
+                {
+                    recv.code = Code::H3_MESSAGE_ERROR;
+                    send.code = Code::H3_MESSAGE_ERROR;
+                    return Err(lost(shared.error_or(Error::new_h3(
+                        "CONNECT-UDP response breaks the Capsule Protocol",
+                    ))));
+                }
                 #[cfg(feature = "http3-datagram")]
                 let datagrams = match registration {
                     None => upgrade::TunnelDatagrams::Disabled,
@@ -571,15 +629,22 @@ where
         // An empty body finishes inline; its FIN acknowledgment is checked once
         // the head is in, so a drain cannot discard an unacknowledged FIN.
         let mut finished = None;
-        let mut pipe = if body.is_end_stream() {
+        // A refused CONNECT-UDP is aborted rather than closed: its send half resets once the
+        // refusal is read or dropped, which keeps the refusal body readable.
+        // https://www.rfc-editor.org/rfc/rfc9298.html#section-3.1
+        // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1.1
+        let mut refused = None;
+        let mut pipe = if connect_udp {
+            refused = Some(send);
+            None
+        } else if body.is_end_stream() {
             Finish { send: &mut send }
                 .await
                 .map_err(|error| lost(shared.error_or(error)))?;
             finished = Some(send);
             None
         } else {
-            Some(Box::pin(PipeToSendStream::new(send, body, length))
-                as BoxFuture<'static, Result<()>>)
+            Some(Box::pin(PipeToSendStream::new(send, body, length)))
         };
 
         let mut headers = match initial_response {
@@ -600,14 +665,27 @@ where
                     response.as_mut().poll(cx)
                 })
                 .await
-                .map_err(|error| lost(shared.error_or(error)))?
             }
+            .map_err(|error| {
+                // A malformed head is a stream error in both directions.
+                if let Some(pipe) = pipe.as_mut() {
+                    pipe.as_mut().reset_with(recv.code);
+                }
+                lost(shared.error_or(error))
+            })?,
         };
 
         let mut remaining = content_length(headers.headers()).map_err(|error| {
-            // A malformed response is a stream error, not a local cancellation.
+            // A malformed response is a stream error in both directions, not a local
+            // cancellation.
             // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1.2
             recv.code = Code::H3_MESSAGE_ERROR;
+            if let Some(send) = refused.as_mut() {
+                send.code = Code::H3_MESSAGE_ERROR;
+            }
+            if let Some(pipe) = pipe.as_mut() {
+                pipe.as_mut().reset_with(Code::H3_MESSAGE_ERROR);
+            }
             lost(error)
         })?;
         if head
@@ -620,6 +698,7 @@ where
         }
         *headers.version_mut() = http::Version::HTTP_3;
 
+        let mut pipe = pipe.map(|pipe| pipe as BoxFuture<'static, Result<()>>);
         // The peer's response packet normally carries the acknowledgment of the
         // packet that held HEADERS and FIN; only a late one needs a task.
         if let Some(mut send) = finished.take()
@@ -653,6 +732,7 @@ where
             #[cfg(feature = "http3-datagram")]
             registration,
             pipe.is_some(),
+            refused.map(|send| Box::new(send) as Box<dyn Send>),
         );
 
         #[cfg(feature = "http3-datagram")]
@@ -679,8 +759,8 @@ pub(super) async fn invalid_datagram(invalid: Option<CancellationToken>) -> Erro
     invalid_datagram_error()
 }
 
-/// A Datagram on a request without Datagram semantics is a stream error.
-/// https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1
+/// A Datagram on a request without Datagram semantics is a stream error
+/// ([RFC 9297 §2](https://www.rfc-editor.org/rfc/rfc9297.html#section-2)).
 pub(super) fn invalid_datagram_error() -> Error {
     Error::new_h3("HTTP Datagram on a request without Datagram semantics")
 }
@@ -722,6 +802,25 @@ where
         }
         Poll::Ready(Ok(()))
     }
+}
+
+/// Whether the connection closed without an error: with H3_NO_ERROR, or by the peer with a code
+/// this endpoint does not know, which counts the same
+/// ([RFC 9114 §8](https://www.rfc-editor.org/rfc/rfc9114.html#section-8)).
+fn closed_normally(error: &http3::error::ConnectionError) -> bool {
+    use http3::{error::ConnectionError, quic::ConnectionErrorIncoming};
+
+    // HTTP/3, QPACK and HTTP Datagram codes.
+    // https://www.rfc-editor.org/rfc/rfc9114.html#section-8.1
+    // https://www.rfc-editor.org/rfc/rfc9204.html#section-6
+    // https://www.rfc-editor.org/rfc/rfc9297.html#section-5.2
+    let known = |code: u64| matches!(code, 0x33 | 0x100..=0x110 | 0x200..=0x202);
+    error.is_h3_no_error()
+        || matches!(
+            error,
+            ConnectionError::Remote(ConnectionErrorIncoming::ApplicationClose { error_code })
+                if !known(*error_code)
+        )
 }
 
 /// Failure before the request left the caller; the request is returned.
@@ -774,6 +873,11 @@ where
             trailers_sent: false,
             finishing: false,
         }
+    }
+
+    /// Resets an unfinished send direction with `code` once dropped.
+    fn reset_with(self: Pin<&mut Self>, code: Code) {
+        self.project().send.code = code;
     }
 }
 
@@ -935,6 +1039,17 @@ fn validate_request<B>(request: &Request<B>) -> Result<Option<u64>> {
         return Err(Error::new_h3(
             "HTTP/3 request requires scheme and authority",
         ));
+    }
+    // Userinfo is deprecated in http and https authorities and has no place in the CONNECT
+    // authority-form, so it is never sent.
+    // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.3.1
+    // https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
+    if request
+        .uri()
+        .authority()
+        .is_some_and(|authority| authority.as_str().contains('@'))
+    {
+        return Err(Error::new_h3("HTTP/3 authority includes userinfo"));
     }
     // Reject this before the lower layer consumes the request and turns a local
     // header construction error into a connection failure.

@@ -143,6 +143,9 @@ codegen-units = 1
 incremental = false
 
 [patch.crates-io]
+# Remove once an http3 release includes the connection-wide pseudo-header order and the
+# SETTINGS value checks.
+http3 = { git = "https://github.com/0x676e67/http3", rev = "f81d797e86a00b1f979a0d817ddc00c197ede6a5" }
 # Remove once an http2 release includes `Connection::extended_connect_protocol` and ignores
 # content-length on 1xx responses and on 2xx responses to CONNECT.
 http2 = { git = "https://github.com/0x676e67/http2", rev = "fb5bf8bdbf3e9d9aad7073759a6f06f47373342e" }

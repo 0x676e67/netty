@@ -129,7 +129,9 @@ async fn last_sender_drop_preserves_connect_waiting_for_settings() {
                 .await
                 .unwrap();
             stream.finish().await.unwrap();
-            assert!(stream.recv_data().await.unwrap().is_none());
+            // A refused CONNECT-UDP aborts once its body is read (RFC 9298 §3.1); closing the
+            // drained connection may supersede that reset.
+            assert!(stream.recv_data().await.is_err(), "no FIN");
             assert!(server.accept().await.err().unwrap().is_h3_no_error());
         });
         let response = waiting.await.unwrap();

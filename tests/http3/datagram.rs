@@ -227,177 +227,41 @@ async fn control_fin_closes_only_its_datagram_direction() {
 }
 
 #[tokio::test]
-async fn datagrams_queued_before_fin_outlive_the_tunnel_task() {
-    /// How the exchange ends after the proxy's FIN.
-    #[derive(Clone, Copy, Debug, PartialEq)]
-    enum End {
-        /// The client closed first; a later request shows the tunnel task finished.
-        Clean,
-        /// The client closed first on a draining connection, which then closes.
-        Draining,
-        /// The client still sends when the proxy closes the connection.
-        PeerCloses,
-    }
-
-    async fn read_queued(receiver: &mut datagram::Receiver, end: &str) {
-        for i in 0..4 {
-            let packet = receiver.recv().await;
-            assert_eq!(packet.as_deref(), Some(&[i][..]), "{end}: packet {i}");
-        }
-        assert!(receiver.recv().await.is_none(), "{end}");
-    }
-
-    for end in [End::Clean, End::Draining, End::PeerCloses] {
-        bounded(async {
-            let Pair {
-                mut tx,
-                driver,
-                mut server,
-                server_quic,
-                _endpoints,
-            } = pair_config(
-                Http3Options::builder().max_concurrent_requests(1).build(),
-                Exec,
-                true,
-                true,
-                true,
-                None,
-            )
-            .await;
-            let mut client_driver = Box::pin(driver);
-            let (qsid, stream_id) = oneshot::channel();
-            let (finish_peer, finish) = oneshot::channel();
-            let (close_peer, close) = oneshot::channel::<()>();
-            let server_task = tokio::spawn(async move {
-                let resolver = server.accept().await.unwrap().unwrap();
-                let quic = server_quic.clone();
-                let tunnel = tokio::spawn(async move {
-                    let (_, mut stream) = resolver.resolve_request().await.unwrap();
-                    stream.send_response(Response::new(())).await.unwrap();
-                    if end != End::PeerCloses {
-                        assert!(stream.recv_data().await.unwrap().is_none(), "client FIN");
-                    }
-                    let qsid: u8 = stream_id.await.unwrap();
-                    for i in 0..4 {
-                        quic.send_datagram(Bytes::from(vec![qsid, i])).unwrap();
-                    }
-                    // The marker follows the Datagrams; FIN waits until the client read it.
-                    stream.send_data(Bytes::from_static(b"m")).await.unwrap();
-                    finish.await.unwrap();
-                    stream.finish().await.unwrap();
-                    stream
-                });
-                if end == End::Clean {
-                    // With active=1 this request can start only after the tunnel task ends.
-                    let (_, mut stream) = server
-                        .accept()
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .resolve_request()
-                        .await
-                        .unwrap();
-                    tunnel.await.unwrap();
-                    stream.send_response(Response::new(())).await.unwrap();
-                    stream.finish().await.unwrap();
-                } else {
-                    let _stream = tunnel.await.unwrap();
-                    if end == End::PeerCloses {
-                        close.await.unwrap();
-                        server_quic.close(0x100u32.into(), b"");
-                    }
-                }
-                let _ = server.accept().await;
-            });
-
-            let mut response = tx.try_send_request(datagram_request()).await.unwrap();
-            let (mut control, sender, mut receiver) =
-                datagram::on(&mut response).unwrap().into_parts();
-            let id = sender.stream_id().into_inner();
-            assert!(id / 4 < 64);
-            if end != End::PeerCloses {
-                control.shutdown().await.unwrap();
-            }
-            qsid.send((id / 4) as u8).unwrap();
-            let mut marker = [0; 1];
-            control.read_exact(&mut marker).await.unwrap();
-            finish_peer.send(()).unwrap();
-            let mut rest = Vec::new();
-            control.read_to_end(&mut rest).await.unwrap();
-            match end {
-                End::Clean => {
-                    tx.try_send_request(
-                        Request::get("https://localhost/after")
-                            .body(Full::new(Bytes::new()))
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                    read_queued(&mut receiver, &format!("{end:?}")).await;
-                    drop(tx);
-                    client_driver.as_mut().graceful_shutdown();
-                    client_driver.await.unwrap();
-                }
-                End::Draining => {
-                    drop(tx);
-                    client_driver.await.unwrap();
-                    read_queued(&mut receiver, &format!("{end:?}")).await;
-                }
-                End::PeerCloses => {
-                    // The FIN arrived, so the failed send half takes no Datagrams with it.
-                    close_peer.send(()).unwrap();
-                    let _ = client_driver.await;
-                    read_queued(&mut receiver, &format!("{end:?}")).await;
-                    assert_eq!(
-                        sender.try_send(Bytes::new()).unwrap_err().kind(),
-                        SendErrorKind::Closed
-                    );
-                    drop(tx);
-                }
-            }
-            drop(control);
-            server_task.await.unwrap();
-        })
-        .await;
-    }
-}
-
-#[tokio::test]
-async fn dropped_tunnel_task_closes_the_session() {
+async fn shutdown_stops_a_busy_sender() {
     bounded(async {
-        // The connection task runs; the tunnel task is dropped unpolled.
         let Pair {
             mut tx,
             driver,
             mut server,
             _endpoints,
             ..
-        } = pair_config(
-            Http3Options::default(),
-            Discard(Arc::new(AtomicBool::new(false))),
-            true,
-            true,
-            true,
-            None,
-        )
-        .await;
+        } = pair_config(Http3Options::default(), Exec, true, true, true, None).await;
         let mut client_driver = Box::pin(driver);
         let server_task = tokio::spawn(async move {
             let resolver = server.accept().await.unwrap().unwrap();
             let (_, mut stream) = resolver.resolve_request().await.unwrap();
             stream.send_response(Response::new(())).await.unwrap();
-            let _ = stream.recv_data().await;
+            stream.finish().await.unwrap();
+            assert!(stream.recv_data().await.unwrap().is_none(), "client FIN");
             let _ = server.accept().await;
         });
 
         let mut response = tx.try_send_request(datagram_request()).await.unwrap();
-        let (control, sender, mut receiver) = datagram::on(&mut response).unwrap().into_parts();
-        // The session ends with its task, though the tunnel is still held.
-        assert_eq!(
-            sender.try_send(Bytes::new()).unwrap_err().kind(),
-            SendErrorKind::Closed
-        );
-        assert!(receiver.recv().await.is_none());
+        let (mut control, mut sender, _receiver) =
+            datagram::on(&mut response).unwrap().into_parts();
+        // Without the shutdown stopping it, the sender would keep the queue from draining.
+        let busy = tokio::spawn(async move {
+            loop {
+                if let Err(error) = sender.send(Bytes::from_static(b"x")).await {
+                    return (error.kind(), sender.max_datagram_size());
+                }
+            }
+        });
+        tokio::task::yield_now().await;
+        control.shutdown().await.unwrap();
+        assert_eq!(busy.await.unwrap(), (SendErrorKind::Closed, None));
+        let mut rest = Vec::new();
+        control.read_to_end(&mut rest).await.unwrap();
         drop(control);
         drop(tx);
         client_driver.as_mut().graceful_shutdown();
@@ -408,9 +272,14 @@ async fn dropped_tunnel_task_closes_the_session() {
 }
 
 #[tokio::test]
-async fn abort_malformed_resets_with_a_datagram_error() {
-    // Before anything arrived, and after the proxy's Datagrams and FIN.
-    for after_fin in [false, true] {
+async fn abort_malformed_resets_with_its_code() {
+    // After the proxy's Datagrams and FIN, and for a malformed message before anything arrived.
+    for (after_fin, message) in [(true, false), (false, true)] {
+        let code = if message {
+            h3::error::Code::H3_MESSAGE_ERROR
+        } else {
+            h3::error::Code::H3_DATAGRAM_ERROR
+        };
         bounded(async {
             let Pair {
                 mut tx,
@@ -441,8 +310,8 @@ async fn abort_malformed_resets_with_a_datagram_error() {
                     panic!("the request stream was not reset");
                 };
                 assert!(
-                    matches!(error, h3::error::StreamError::RemoteTerminate { code, .. }
-                        if code == h3::error::Code::H3_DATAGRAM_ERROR),
+                    matches!(error, h3::error::StreamError::RemoteTerminate { code: reset, .. }
+                        if reset == code),
                     "{error}"
                 );
             });
@@ -459,13 +328,17 @@ async fn abort_malformed_resets_with_a_datagram_error() {
                 let mut rest = Vec::new();
                 control.read_to_end(&mut rest).await.unwrap();
             }
-            receiver.abort_malformed();
+            if message {
+                receiver.abort_malformed_message();
+            } else {
+                receiver.abort_malformed();
+            }
             if !after_fin {
                 // The control stream names the cause.
                 let error = control.read(&mut [0; 1]).await.unwrap_err();
                 assert!(format!("{error:?}").contains("malformed"), "{error:?}");
             }
-            // Both Datagram directions end at once, queued packets included.
+            // Both Datagram directions end at once.
             assert_eq!(
                 sender.try_send(Bytes::new()).unwrap_err().kind(),
                 SendErrorKind::Closed
@@ -574,4 +447,94 @@ async fn control_reset_wakes_datagrams_and_releases_request() {
         server_task.await.unwrap();
     })
     .await;
+}
+
+#[tokio::test]
+async fn peer_stop_closes_datagram_sending() {
+    // The stop is seen while idle, or only by a write; either way the control stream keeps
+    // reading, and no HTTP Datagram may follow the reset.
+    // https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1
+    for hide_stop in [false, true] {
+        bounded(async {
+            let (_, server_config, client_config) = tls::config();
+            let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
+            let pause = pause::Pause::default();
+            if hide_stop {
+                pause.hide_stop();
+            } else {
+                pause.resume();
+            }
+            let ((mut tx, driver), mut server) = tokio::join!(
+                async {
+                    Builder::new(Exec)
+                        .handshake_with_datagrams::<_, ClientBody>(
+                            pause.wrap(native::Connection::new(client)),
+                        )
+                        .await
+                        .unwrap()
+                },
+                async {
+                    h3::server::builder()
+                        .enable_datagram(true)
+                        .enable_extended_connect(true)
+                        .build::<_, Bytes>(h3_quinn::Connection::new(server))
+                        .await
+                        .unwrap()
+                },
+            );
+            let mut client_driver = Box::pin(driver);
+            let (stop, wait_stop) = oneshot::channel();
+            let (respond, wait_respond) = oneshot::channel();
+            let peer = tokio::spawn(async move {
+                let resolver = server.accept().await.unwrap().unwrap();
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                stream.send_response(Response::new(())).await.unwrap();
+                wait_stop.await.unwrap();
+                stream.stop_sending(h3::error::Code::H3_NO_ERROR);
+                wait_respond.await.unwrap();
+                stream
+                    .send_data(Bytes::from_static(b"after"))
+                    .await
+                    .unwrap();
+                stream.finish().await.unwrap();
+                let _ = server.accept().await;
+            });
+            let mut response = tx.try_send_request(datagram_request()).await.unwrap();
+            let (control, sender, _receiver) = datagram::on(&mut response).unwrap().into_parts();
+            let at_reset = Arc::new(std::sync::OnceLock::new());
+            pause.on_reset({
+                let (sender, at_reset) = (sender.clone(), at_reset.clone());
+                move || {
+                    let _ = at_reset.set(sender.try_send(Bytes::new()).map_err(|e| e.kind()));
+                }
+            });
+            let (mut read, mut write) = tokio::io::split(control);
+            stop.send(()).unwrap();
+            if hide_stop {
+                pause.stop_hidden().await;
+                let _ = write.write_all(b"x").await;
+            }
+            while !matches!(
+                sender.try_send(Bytes::new()),
+                Err(error) if error.kind() == SendErrorKind::Closed
+            ) {
+                tokio::task::yield_now().await;
+            }
+            assert!(write.shutdown().await.is_err(), "hide_stop {hide_stop}");
+            assert_eq!(
+                at_reset.get(),
+                Some(&Err(SendErrorKind::Closed)),
+                "sending was open at the reset"
+            );
+            respond.send(()).unwrap();
+            let mut incoming = Vec::new();
+            read.read_to_end(&mut incoming).await.unwrap();
+            assert_eq!(incoming, b"after");
+            drop((read, write, tx));
+            client_driver.as_mut().graceful_shutdown();
+            client_driver.await.unwrap();
+            peer.await.unwrap();
+        })
+        .await;
+    }
 }

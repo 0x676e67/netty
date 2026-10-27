@@ -93,6 +93,11 @@ pub struct SendRequest<B> {
 /// connection. It resolves once the task finishes; dropping it closes the
 /// QUIC connection and every outstanding exchange. The body and executor
 /// types are fixed by the handshake.
+///
+/// A peer that closes with `H3_NO_ERROR` or an unknown error code ends it with `Ok`
+/// ([RFC 9114 §8](https://www.rfc-editor.org/rfc/rfc9114.html#section-8)); a HEADERS frame
+/// on the tunnel of a successful CONNECT closes it with `H3_FRAME_UNEXPECTED`
+/// ([RFC 9114 §4.4](https://www.rfc-editor.org/rfc/rfc9114.html#section-4.4)).
 #[must_use = "dropping the connection handle closes the connection"]
 pub struct Connection<Q, B, E>
 where
@@ -210,7 +215,10 @@ where
     /// # Errors
     ///
     /// If there was an error before trying to open the request stream, the message
-    /// will be returned as part of this error.
+    /// will be returned as part of this error. This includes a URI authority with
+    /// userinfo, which HTTP/3 forbids for `http` and `https`
+    /// ([RFC 9114 §4.3.1](https://www.rfc-editor.org/rfc/rfc9114.html#section-4.3.1)) and this
+    /// client never sends.
     ///
     /// # Cancel safety
     ///
@@ -222,7 +230,10 @@ where
     /// Keep the executor and QUIC transport running so cancellation can reach the peer.
     ///
     /// After the response is delivered, dropping its body only cancels receiving;
-    /// unfinished request body sending can continue independently.
+    /// unfinished request body sending can continue independently. A refused
+    /// `connect-udp` request is aborted instead: its send direction resets with
+    /// `H3_REQUEST_CANCELLED` once the body ends or is dropped
+    /// ([RFC 9298 §3.1](https://www.rfc-editor.org/rfc/rfc9298.html#section-3.1)).
     #[allow(clippy::result_large_err)]
     pub fn try_send_request(
         &mut self,
@@ -297,8 +308,10 @@ impl<E> Builder<E> {
 
     /// Initializes HTTP/3 with a single raw Datagram reader and bounded routing.
     /// Advertises H3_DATAGRAM; native sends still require peer negotiation.
-    /// The supplied QUIC transport must advertise support for receiving Datagram
-    /// frames in its transport parameters, as required by RFC 9297 Section 2.1.1.
+    /// The supplied QUIC transport must advertise support for receiving QUIC DATAGRAM frames
+    /// ([RFC 9221 §3](https://www.rfc-editor.org/rfc/rfc9221.html#section-3)). Native sends are
+    /// unavailable without the peer's max_datagram_frame_size, and fail with `TooLarge` while its
+    /// limit fits no payload.
     #[cfg(feature = "http3-datagram")]
     pub async fn handshake_with_datagrams<Q, B>(
         self,
@@ -372,6 +385,9 @@ impl<E> Builder<E> {
             .enable_extended_connect(opts.enable_extended_connect);
         if let Some(order) = opts.settings_order {
             builder.settings_order(order);
+        }
+        if let Some(order) = opts.headers_pseudo_order {
+            builder.pseudo_order(order);
         }
         #[cfg(feature = "http3-datagram")]
         builder.enable_datagram(datagrams.is_some());
@@ -484,11 +500,8 @@ where
         if !self.completed {
             self.shared
                 .terminate(Error::new_canceled().with("HTTP/3 connection dropped"));
-            quic::OpenStreams::close(
-                &mut self.opener,
-                Code::H3_NO_ERROR.value(),
-                b"client connection dropped",
-            );
+            let (code, reason) = self.shared.close_reason("client connection dropped");
+            quic::OpenStreams::close(&mut self.opener, code.value(), reason.as_bytes());
         }
     }
 }

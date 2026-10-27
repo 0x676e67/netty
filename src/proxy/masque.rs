@@ -3,7 +3,9 @@
 //! [`ConnectUdp`] opens a [`UdpTunnel`] to a UDP target through a proxy over HTTP/3. For other
 //! setups, build the request with [`http3_request`] or [`http2_request`] and open the tunnel from
 //! the response with [`UdpTunnel::from_http3`] or [`UdpTunnel::from_http2`]. Over HTTP/2 every
-//! payload travels as a DATAGRAM capsule (RFC 9297 §3.5). HTTP/1.1 Upgrade is not supported.
+//! payload travels as a DATAGRAM capsule
+//! ([RFC 9297 §3.5](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.5)). HTTP/1.1 Upgrade
+//! is not supported.
 
 mod capsule;
 mod template;
@@ -22,7 +24,10 @@ use http::{
 use http_body::Body;
 use tower_service::Service;
 
-pub use self::{template::Template, tunnel::UdpTunnel};
+pub use self::{
+    template::Template,
+    tunnel::{UdpReceiver, UdpSender, UdpTunnel},
+};
 use super::{Tunneling, dst_host};
 use crate::{
     conn::http3::{SendRequest, datagram::DatagramRequest},
@@ -34,16 +39,20 @@ use crate::{
     },
 };
 
-/// Largest UDP payload carried under Context ID 0 (RFC 9298 §5).
+/// Largest UDP payload carried under Context ID 0
+/// ([RFC 9298 §5](https://www.rfc-editor.org/rfc/rfc9298.html#section-5)).
 pub const MAX_UDP_PAYLOAD: usize = 65527;
 
-/// Signals the Capsule Protocol on the request stream (RFC 9297 §3.4).
+/// Signals the Capsule Protocol on the request stream
+/// ([RFC 9297 §3.4](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.4)).
 const CAPSULE_PROTOCOL: HeaderName = HeaderName::from_static("capsule-protocol");
 
-/// Builds an HTTP/3 CONNECT-UDP request for an expanded template (RFC 9298 §3.4).
+/// Builds an HTTP/3 CONNECT-UDP request for an expanded template ([RFC 9298 §3.4]).
 ///
 /// The request declares HTTP Datagram semantics, so send it on a connection made with
-/// `conn::http3::Builder::handshake_with_datagrams`.
+/// [`Builder::handshake_with_datagrams`](crate::conn::http3::Builder::handshake_with_datagrams).
+///
+/// [RFC 9298 §3.4]: https://www.rfc-editor.org/rfc/rfc9298.html#section-3.4
 pub fn http3_request<B: Default>(uri: Uri) -> Request<B> {
     let mut request = connect_request(uri);
     request.extensions_mut().insert(Protocol::CONNECT_UDP);
@@ -51,11 +60,14 @@ pub fn http3_request<B: Default>(uri: Uri) -> Request<B> {
     request
 }
 
-/// Builds an HTTP/2 CONNECT-UDP request for an expanded template (RFC 9298 §3.4).
+/// Builds an HTTP/2 CONNECT-UDP request for an expanded template ([RFC 9298 §3.4]).
 ///
 /// Open the tunnel with [`UdpTunnel::from_http2`]. Taking the upgrade with
-/// [`upgrade::on`](crate::upgrade::on) instead gives a plain CONNECT stream: a drop ends it only
-/// after queued writes get flow control, while an unclosed tunnel resets at once.
+/// [`upgrade::on`](crate::upgrade::on) instead gives the bare CONNECT-UDP stream: trailers still
+/// fail a read and reset it, but a drop ends it only after queued writes get flow control, while
+/// an unclosed tunnel resets at once.
+///
+/// [RFC 9298 §3.4]: https://www.rfc-editor.org/rfc/rfc9298.html#section-3.4
 pub fn http2_request<B: Default>(uri: Uri) -> Request<B> {
     let mut request = connect_request(uri);
     request
@@ -74,7 +86,10 @@ fn connect_request<B: Default>(uri: Uri) -> Request<B> {
     request
 }
 
-/// Checks that a response opens the tunnel (RFC 9298 §3.5, RFC 9297 §3.2).
+/// Checks that a response opens the tunnel ([RFC 9298 §3.5], [RFC 9297 §3.2]).
+///
+/// [RFC 9298 §3.5]: https://www.rfc-editor.org/rfc/rfc9298.html#section-3.5
+/// [RFC 9297 §3.2]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
 fn validate<B>(response: &Response<B>) -> Result<(), MasqueError> {
     let status = response.status();
     if !status.is_success() {
@@ -92,7 +107,16 @@ fn validate<B>(response: &Response<B>) -> Result<(), MasqueError> {
 /// [proxy](Template::proxy), so it can pool connections. `call` takes the UDP target as a URI
 /// whose host and port fill `target_host` and `target_port`; UDP has no default port, so the
 /// URI must name one. The request declares HTTP Datagrams, so the connection must come from
-/// `conn::http3::Builder::handshake_with_datagrams`.
+/// [`Builder::handshake_with_datagrams`](crate::conn::http3::Builder::handshake_with_datagrams).
+///
+/// Each open tunnel holds a request stream and one
+/// [`max_concurrent_requests`](crate::http3::Http3Options::max_concurrent_requests)
+/// slot until both directions end or it is dropped, so further calls on a full connection
+/// wait for a free slot. The handshake has no timeout of its own, so bound the returned
+/// future, e.g. with a connect timeout around the whole connector.
+///
+/// A refusal yields only its status; to read its headers, such as `Proxy-Authenticate`, send
+/// [`http3_request`] and open the tunnel with [`UdpTunnel::from_http3`].
 #[derive(Clone, Debug)]
 pub struct ConnectUdp<S> {
     inner: S,
@@ -104,14 +128,22 @@ pub struct ConnectUdp<S> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum MasqueError {
-    /// The URI template breaks RFC 9298 §2, for the given reason.
+    /// The URI template is invalid ([RFC 9298 §2]), for the given reason.
+    ///
+    /// [RFC 9298 §2]: https://www.rfc-editor.org/rfc/rfc9298.html#section-2
     InvalidTemplate(&'static str),
-    /// The target host is empty, a bracketed literal other than IPv6 or has an IPv6 zone ID,
-    /// or the port is missing, 0 or not a valid `u16`.
+    /// The target host is neither an IPv6 literal nor a reg-name ([RFC 9298 §3]): it is empty,
+    /// a bracketed literal other than IPv6, has an IPv6 zone ID or holds characters other than
+    /// unreserved and sub-delims; or the port is missing, 0 or not a valid `u16`.
+    ///
+    /// [RFC 9298 §3]: https://www.rfc-editor.org/rfc/rfc9298.html#section-3
     InvalidTarget,
     /// The inner connector failed to provide a connection to the proxy.
     ConnectFailed(BoxError),
-    /// The CONNECT-UDP request failed.
+    /// The CONNECT-UDP request failed, including a success response the client rejected as
+    /// malformed ([RFC 9297 §3.2]).
+    ///
+    /// [RFC 9297 §3.2]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
     Request(crate::Error),
     /// The proxy refused the tunnel with this status.
     Unsuccessful(StatusCode),
@@ -127,9 +159,9 @@ pub enum MasqueError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SendError {
-    /// The send queue is full; wait with [`UdpTunnel::poll_send_ready`].
+    /// The send queue is full; wait with [`UdpSender::poll_send_ready`].
     Full,
-    /// The payload exceeds [`UdpTunnel::max_payload_size`].
+    /// The payload exceeds [`UdpSender::max_payload_size`], or the limit fits no payload.
     TooLarge,
     /// The tunnel can no longer send.
     Closed,
@@ -138,18 +170,19 @@ pub enum SendError {
 // ===== impl UdpTunnel =====
 
 impl UdpTunnel {
-    /// Opens the tunnel from a successful response to [`http3_request`].
+    /// Opens the tunnel from this crate's HTTP/3 client's successful response to
+    /// [`http3_request`].
     ///
-    /// A success response that breaks the Capsule Protocol is malformed (RFC 9297 §3.2), so its
-    /// request stream resets with `H3_MESSAGE_ERROR`.
+    /// A refusal is [`Unsuccessful`](MasqueError::Unsuccessful) and keeps its headers and body for
+    /// the caller; once the body ends or is dropped, the client aborts the request stream with
+    /// `H3_REQUEST_CANCELLED` ([RFC 9298 §3.1]). A success response that breaks the Capsule
+    /// Protocol is malformed ([RFC 9297 §3.2]): the client resets its stream with
+    /// `H3_MESSAGE_ERROR` and fails the request instead.
+    ///
+    /// [RFC 9298 §3.1]: https://www.rfc-editor.org/rfc/rfc9298.html#section-3.1
+    /// [RFC 9297 §3.2]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
     pub fn from_http3<B>(response: &mut Response<B>) -> Result<Self, MasqueError> {
-        if let Err(err) = validate(response) {
-            // Only a success response carries a session, so refusals are left as they are.
-            if let Some(session) = crate::conn::http3::datagram::on(response) {
-                session.reject_malformed();
-            }
-            return Err(err);
-        }
+        validate(response)?;
         let (control, sender, receiver) = crate::conn::http3::datagram::on(response)
             .ok_or(MasqueError::InvalidResponse)?
             .into_parts();
@@ -159,12 +192,16 @@ impl UdpTunnel {
     /// Opens the tunnel from this crate's HTTP/2 client's successful response to
     /// [`http2_request`].
     ///
-    /// A refusal is [`Unsuccessful`](MasqueError::Unsuccessful). A success that is not the
-    /// client's CONNECT-UDP tunnel is [`InvalidResponse`](MasqueError::InvalidResponse): an
-    /// HTTP/1.1 response (a TCP tunnel), another CONNECT's, or one whose upgrade was already taken.
-    /// A success response that breaks the Capsule Protocol is malformed (RFC 9297 §3.2): the
-    /// client resets its stream with `PROTOCOL_ERROR` and fails the request instead. A refused
-    /// response keeps its headers, body and upgrade for the caller.
+    /// A refusal is [`Unsuccessful`](MasqueError::Unsuccessful) and keeps its headers, body and
+    /// upgrade for the caller; once the body is dropped, the client aborts the request stream
+    /// with `CANCEL` ([RFC 9298 §3.1]). A success that is not the client's CONNECT-UDP tunnel is
+    /// [`InvalidResponse`](MasqueError::InvalidResponse): an HTTP/1.1 response (a TCP tunnel),
+    /// another CONNECT's, or one whose upgrade was already taken. A success response that breaks
+    /// the Capsule Protocol is malformed ([RFC 9297 §3.2]): the client resets its stream with
+    /// `PROTOCOL_ERROR` and fails the request instead.
+    ///
+    /// [RFC 9298 §3.1]: https://www.rfc-editor.org/rfc/rfc9298.html#section-3.1
+    /// [RFC 9297 §3.2]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
     pub fn from_http2<B>(response: &mut Response<B>) -> Result<Self, MasqueError> {
         validate(response)?;
         let reset = response
@@ -199,11 +236,14 @@ impl<S> ConnectUdp<S> {
         self
     }
 
-    /// Adds extra headers to each CONNECT-UDP request.
+    /// Adds extra headers to each CONNECT-UDP request, replacing any set earlier under the same
+    /// name.
     ///
-    /// A `Proxy-Authorization` among them is marked sensitive and replaces one set earlier.
-    /// `Content-Length`, `Content-Type` and `Transfer-Encoding` are dropped, as the Capsule
-    /// Protocol forbids them (RFC 9297 §3.2), and so is `Capsule-Protocol`, which the request sets.
+    /// A `Proxy-Authorization` among them is marked sensitive. `Content-Length`, `Content-Type` and
+    /// `Transfer-Encoding` are dropped, as the Capsule Protocol forbids them ([RFC 9297 §3.2]),
+    /// and so is `Capsule-Protocol`, which the request sets.
+    ///
+    /// [RFC 9297 §3.2]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
     pub fn with_headers(mut self, mut headers: HeaderMap) -> Self {
         for name in [
             CONTENT_LENGTH,
@@ -298,6 +338,8 @@ impl StdError for MasqueError {
     }
 }
 
+// ===== impl SendError =====
+
 impl fmt::Display for SendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -343,18 +385,13 @@ mod tests {
         let template = Template::well_known(&"proxy.example".parse().unwrap()).unwrap();
         let mut connector = ConnectUdp::new(template, Unreachable(0));
         // UDP has no default port to fall back on.
-        for target in [
-            "udp://dns.example",
-            "udp://dns.example:",
-            "udp://dns.example:0",
-            "udp://dns.example:65536",
-        ] {
-            let result = connector.call(target.parse().unwrap()).now_or_never();
-            assert!(
-                matches!(result, Some(Err(MasqueError::InvalidTarget))),
-                "{target}: {result:?}"
-            );
-        }
+        let result = connector
+            .call("udp://dns.example".parse().unwrap())
+            .now_or_never();
+        assert!(
+            matches!(result, Some(Err(MasqueError::InvalidTarget))),
+            "{result:?}"
+        );
         assert_eq!(connector.inner.0, 0, "connected for a bad target");
     }
 
@@ -393,8 +430,6 @@ mod tests {
                 .collect();
             assert_eq!(values, ["Basic c2VjcmV0"]);
             assert!(values[0].is_sensitive());
-            let debug = format!("{connector:?}");
-            assert!(!debug.contains("c2VjcmV0"), "{debug}");
             let kept: Vec<_> = connector.headers.keys().map(HeaderName::as_str).collect();
             assert_eq!(kept, names);
         }

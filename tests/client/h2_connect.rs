@@ -989,6 +989,37 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
     assert_eq!(proxy_reset(&mut driver, &mut server), h2::Reason::CANCEL);
     assert_eq!(driver.tasks.len(), idle, "a send task outlived its tunnel");
 
+    // Split, the stream outlives whichever unclosed half drops first and resets once the other
+    // drops too, even while a capsule waits on the proxy's flow control.
+    for receiver_first in [false, true] {
+        let (response, server) = connect(&mut driver, Response::new(Bytes::new()));
+        let mut server = server.unwrap();
+        let tunnel = UdpTunnel::from_http2(&mut response.unwrap()).unwrap();
+        let (mut sender, mut receiver) = tunnel.split();
+        for _ in 0..2 {
+            sender.try_send(&[7; 64]).unwrap();
+            driver.run();
+        }
+        if receiver_first {
+            drop(receiver);
+            driver.run();
+            assert!(
+                driver.tasks.len() > idle,
+                "the stream ended with the receiver"
+            );
+            drop(sender);
+        } else {
+            drop(sender);
+            driver.finish(server.write_all(&[0, 2, 0, b'p'])).unwrap();
+            let payload = driver.finish(poll_fn(|cx| receiver.poll_recv(cx))).unwrap();
+            assert_eq!(payload.as_deref(), Some(&b"p"[..]));
+            drop(receiver);
+        }
+        let reason = proxy_reset(&mut driver, &mut server);
+        assert_eq!(reason, h2::Reason::CANCEL, "{receiver_first}");
+        assert_eq!(driver.tasks.len(), idle, "a send task outlived its tunnel");
+    }
+
     // Hyper ends its side before it abandons the request and resets with NO_ERROR. The client
     // reads the END_STREAM, so the capsule it cuts short is malformed, and sees the reset on its
     // send side.
@@ -1115,4 +1146,20 @@ fn h2_connect_udp_treats_raw_proxy_framing_as_malformed() {
             "{reason:?}: {result:?}"
         );
     }
+
+    // Only DATA may follow the response, so trailers are a stream error (RFC 9113 §8.5).
+    let (response, mut send) = connect(&mut driver, Response::new(()));
+    let mut tunnel = UdpTunnel::from_http2(&mut response.unwrap()).unwrap();
+    send.send_data(Bytes::from_static(&[0, 2, 0, b'p']), false)
+        .unwrap();
+    send.send_trailers(http::HeaderMap::new()).unwrap();
+    let payload = driver.finish(poll_fn(|cx| tunnel.poll_recv(cx))).unwrap();
+    assert_eq!(payload.as_deref(), Some(&b"p"[..]));
+    let result = driver.finish(poll_fn(|cx| tunnel.poll_recv(cx)));
+    assert!(
+        matches!(&result, Err(MasqueError::Io(err)) if err.kind() == io::ErrorKind::InvalidData),
+        "{result:?}"
+    );
+    let reason = driver.finish(poll_fn(|cx| send.poll_reset(cx))).unwrap();
+    assert_eq!(reason, h2::Reason::PROTOCOL_ERROR);
 }

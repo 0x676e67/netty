@@ -183,6 +183,31 @@ async fn bounded<F: Future>(future: F) -> F::Output {
         .expect("HTTP/3 test timed out")
 }
 
+type ProxyStream = h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+
+/// Reads the request stream until the client resets it, returning the code.
+async fn reset_code(stream: &mut ProxyStream) -> h3::error::Code {
+    loop {
+        match stream.recv_data().await {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the request stream ended without a reset"),
+            Err(h3::error::StreamError::RemoteTerminate { code, .. }) => return code,
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
+/// Writes to the request stream until the client stops it, returning the code.
+async fn stop_code(stream: &mut ProxyStream) -> h3::error::Code {
+    loop {
+        match stream.send_data(Bytes::from_static(b"x")).await {
+            Ok(()) => tokio::task::yield_now().await,
+            Err(h3::error::StreamError::RemoteTerminate { code, .. }) => return code,
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn canceling_partially_written_headers_resets_stream_and_releases_slot() {
     bounded(async {
@@ -424,7 +449,7 @@ async fn streaming_post_trailers_and_last_sender_drop() {
 }
 
 #[tokio::test]
-async fn conflicting_host_returns_request_without_closing_connection() {
+async fn invalid_authority_returns_request_without_closing_connection() {
     bounded(async {
         let Pair {
             mut tx,
@@ -455,6 +480,13 @@ async fn conflicting_host_returns_request_without_closing_connection() {
             stream.finish().await.unwrap();
             let _ = server.accept().await;
         });
+        // :authority must not carry userinfo (RFC 9114 §4.3.1).
+        let request = Request::post("https://user:secret@localhost/unchanged")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let error = tx.try_send_request(request).await.unwrap_err();
+        assert!(error.error().is_user(), "{error:?}");
+
         let request = Request::post("https://localhost/unchanged")
             .header("host", "other.local")
             .extension(42_usize)
@@ -482,6 +514,34 @@ async fn conflicting_host_returns_request_without_closing_connection() {
         peer.await.unwrap();
     })
     .await;
+}
+
+#[tokio::test]
+async fn unknown_close_codes_end_the_connection_cleanly() {
+    // An unknown code counts as H3_NO_ERROR (RFC 9114 §8); a known one stays an error.
+    for (code, clean) in [
+        (0x21_u32, true),
+        (0xfa, true),
+        (0x1234, true),
+        (0x102, false),
+        (0x33, false),
+        (0x200, false),
+    ] {
+        bounded(async {
+            let Pair {
+                tx,
+                driver,
+                server,
+                server_quic,
+                _endpoints,
+            } = pair(Http3Options::default()).await;
+            server_quic.close(code.into(), b"");
+            let result = driver.await;
+            assert_eq!(result.is_ok(), clean, "{code:#x}: {result:?}");
+            drop((tx, server));
+        })
+        .await;
+    }
 }
 
 #[tokio::test]
@@ -760,6 +820,149 @@ async fn connect_flush_and_half_close_preserve_incoming_bytes() {
 }
 
 #[tokio::test]
+async fn headers_after_a_connect_response_close_the_connection() {
+    use tokio::io::AsyncReadExt;
+
+    // Only DATA follows a CONNECT response, so HEADERS is H3_FRAME_UNEXPECTED (RFC 9114 §4.4),
+    // with or without a FIN after it, and even when it is no valid trailer section or exceeds
+    // the field section limit, left unadvertised so the server still sends it.
+    let large = "x".repeat(256);
+    for (name, value, finish) in [
+        ("x-late", "trailers", false),
+        ("x-late", "trailers", true),
+        ("te", "trailers", true),
+        ("x-large", large.as_str(), true),
+    ] {
+        let options = if value.len() > 128 {
+            Http3Options::builder()
+                .max_field_section_size(128)
+                .settings_order(Vec::new())
+                .build()
+        } else {
+            Http3Options::default()
+        };
+        let value = http::HeaderValue::from_str(value).unwrap();
+        bounded(async {
+            let Pair {
+                mut tx,
+                driver,
+                mut server,
+                server_quic,
+                _endpoints,
+            } = pair(options).await;
+            let server_task = tokio::spawn(async move {
+                let resolver = server.accept().await.unwrap().unwrap();
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                stream.send_response(Response::new(())).await.unwrap();
+                stream.send_data(Bytes::from_static(b"x")).await.unwrap();
+                let mut trailers = http::HeaderMap::new();
+                trailers.insert(name, value);
+                stream.send_trailers(trailers).await.unwrap();
+                if finish {
+                    let _ = stream.finish().await;
+                }
+                let error = server_quic.closed().await;
+                let unexpected = h3::error::Code::H3_FRAME_UNEXPECTED.value();
+                assert!(
+                    matches!(error, quinn::ConnectionError::ApplicationClosed(ref close)
+                        if close.error_code.into_inner() == unexpected),
+                    "{error}"
+                );
+                drop(server);
+            });
+            let mut response = tx
+                .try_send_request(
+                    Request::connect("localhost:443")
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let mut tunnel = netty::upgrade::on(&mut response).await.unwrap();
+            let mut bytes = Vec::new();
+            let error = tunnel.read_to_end(&mut bytes).await.unwrap_err();
+            assert_eq!(bytes, b"x", "{name} {finish}: {error}");
+            assert!(driver.await.is_err(), "{name} {finish}");
+            server_task.await.unwrap();
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn stream_violation_closes_from_every_connection_exit() {
+    use tokio::io::AsyncReadExt;
+
+    // A stream's violation closes the connection with its code whether the task polls next, the
+    // task is dropped first, or the handle is.
+    // https://www.rfc-editor.org/rfc/rfc9114.html#section-8
+    for exit in ["task", "drop task", "drop handle"] {
+        bounded(async {
+            let hold = Hold::default();
+            let Pair {
+                mut tx,
+                driver,
+                mut server,
+                server_quic,
+                _endpoints,
+            }: Pair<_, Hold> = pair_with(Http3Options::default(), hold.clone()).await;
+            let (go, wait_go) = oneshot::channel();
+            let server_task = tokio::spawn(async move {
+                // The first tunnel stays open, so only the violation can end the connection.
+                let mut streams = Vec::new();
+                for _ in 0..2 {
+                    let resolver = server.accept().await.unwrap().unwrap();
+                    let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                    stream.send_response(Response::new(())).await.unwrap();
+                    streams.push(stream);
+                }
+                wait_go.await.unwrap();
+                streams[1]
+                    .send_data(Bytes::from_static(b"x"))
+                    .await
+                    .unwrap();
+                let mut trailers = HeaderMap::new();
+                trailers.insert("x-late", "trailers".parse().unwrap());
+                streams[1].send_trailers(trailers).await.unwrap();
+                let error = server_quic.closed().await;
+                let unexpected = h3::error::Code::H3_FRAME_UNEXPECTED.value();
+                assert!(
+                    matches!(error, quinn::ConnectionError::ApplicationClosed(ref close)
+                        if close.error_code.into_inner() == unexpected),
+                    "{exit}: {error}"
+                );
+                drop((server, streams));
+            });
+            let mut tunnels = Vec::new();
+            for _ in 0..2 {
+                let request = Request::connect("localhost:443")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap();
+                let mut response = tx.try_send_request(request).await.unwrap();
+                tunnels.push(netty::upgrade::on(&mut response).await.unwrap());
+            }
+            // Nothing polls a taken task, so its drop or the handle's must close the connection.
+            let task = (exit != "task").then(|| hold.take());
+            go.send(()).unwrap();
+            let mut bytes = Vec::new();
+            assert!(tunnels[1].read_to_end(&mut bytes).await.is_err(), "{exit}");
+            assert_eq!(bytes, b"x");
+            if exit == "drop handle" {
+                // The task outlives the close, so only the handle can have sent it.
+                drop(driver);
+                server_task.await.unwrap();
+                drop(task);
+            } else {
+                drop(task);
+                assert!(driver.await.is_err(), "{exit}");
+                server_task.await.unwrap();
+            }
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn extended_connect_requires_peer_permission() {
     bounded(async {
         let Pair {
@@ -806,6 +1009,44 @@ impl<F: Future<Output = ()> + Send + 'static> Executor<F> for Discard {
         } else {
             tokio::spawn(future);
         }
+    }
+}
+
+type BoxTask = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Polls the connection task, submitted by handshake first, until the test takes it.
+#[derive(Clone, Default)]
+struct Hold {
+    submitted: Arc<AtomicBool>,
+    connection: Arc<std::sync::Mutex<Option<BoxTask>>>,
+}
+
+impl Hold {
+    fn take(&self) -> BoxTask {
+        self.connection.lock().unwrap().take().unwrap()
+    }
+}
+
+impl<F: Future<Output = ()> + Send + 'static> Executor<F> for Hold {
+    fn execute(&self, future: F) {
+        if self.submitted.swap(true, Ordering::Relaxed) {
+            tokio::spawn(future);
+            return;
+        }
+        *self.connection.lock().unwrap() = Some(Box::pin(future));
+        let connection = self.connection.clone();
+        tokio::spawn(std::future::poll_fn(move |cx| {
+            let mut slot = connection.lock().unwrap();
+            let Some(task) = slot.as_mut() else {
+                return std::task::Poll::Ready(());
+            };
+            let poll = task.as_mut().poll(cx);
+            if poll.is_ready() {
+                // Drop the finished task at once, as a real executor would.
+                *slot = None;
+            }
+            poll
+        }));
     }
 }
 
@@ -1941,6 +2182,45 @@ async fn invalid_response_heads_signal_message_error_and_preserve_connection() {
         let response = tx.try_send_request(Request::get("https://localhost/survivor")
             .body(Full::new(Bytes::new())).unwrap()).await.unwrap();
         response.into_body().collect().await.unwrap();
+        drop(tx);
+        client_driver.as_mut().graceful_shutdown();
+        client_driver.await.unwrap();
+        server_task.await.unwrap();
+    }).await;
+}
+
+#[tokio::test]
+async fn invalid_response_heads_reset_an_unfinished_request_body() {
+    // The malformed head is a stream error in both directions (RFC 9114 §4.1.2), so the request
+    // body still waiting on flow control resets with the same code as STOP_SENDING.
+    bounded(async {
+        let Pair { mut tx, driver, mut server, _endpoints, .. } = pair(Http3Options::default()).await;
+        let mut client_driver = Box::pin(driver);
+        let (observed, mut confirmed) = tokio::sync::mpsc::channel(1);
+        let server_task = tokio::spawn(async move {
+            for (status, length) in [(200, "invalid"), (101, "0")] {
+                let resolver = server.accept().await.unwrap().unwrap();
+                let (_, mut stream) = resolver.resolve_request().await.unwrap();
+                stream.send_response(Response::builder().status(status).header("content-length", length).body(()).unwrap()).await.unwrap();
+                let error = loop {
+                    match stream.recv_data().await {
+                        Ok(Some(_)) => {}
+                        Ok(None) => panic!("{status}: request body finished"),
+                        Err(error) => break error,
+                    }
+                };
+                assert!(matches!(error, h3::error::StreamError::RemoteTerminate { code, .. } if code == h3::error::Code::H3_MESSAGE_ERROR), "{status}: {error}");
+                observed.send(()).await.unwrap();
+            }
+            let _ = server.accept().await;
+        });
+        for _ in 0..2 {
+            let body = Full::new(Bytes::from(vec![0; 4 << 20]));
+            let request = Request::post("https://localhost/upload").body(body).unwrap();
+            let error = tx.try_send_request(request).await.unwrap_err();
+            assert!(!error.error().is_user());
+            confirmed.recv().await.unwrap();
+        }
         drop(tx);
         client_driver.as_mut().graceful_shutdown();
         client_driver.await.unwrap();

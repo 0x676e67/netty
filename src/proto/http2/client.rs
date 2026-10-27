@@ -105,7 +105,7 @@ where
     let peer = Arc::new(PeerSettings::new());
 
     exec.execute_h2_future(H2ClientFuture::Task {
-        task: ConnTask::new(conn, conn_drop_rx, cancel_tx, peer.clone()),
+        task: Box::pin(ConnTask::new(conn, conn_drop_rx, cancel_tx, peer.clone())),
     });
 
     Ok(ClientTask {
@@ -479,8 +479,7 @@ pin_project! {
             send_when: SendWhen<B, E>,
         },
         Task {
-            #[pin]
-            task: ConnTask<T, B>,
+            task: Pin<Box<ConnTask<T, B>>>,
         },
     }
 }
@@ -500,7 +499,7 @@ where
         match this {
             H2ClientFutureProject::Pipe { pipe } => pipe.poll(cx),
             H2ClientFutureProject::Send { send_when } => send_when.poll(cx),
-            H2ClientFutureProject::Task { task } => task.poll(cx),
+            H2ClientFutureProject::Task { task } => task.as_mut().poll(cx),
         }
     }
 }
@@ -611,7 +610,7 @@ where
 
         // A one-shot channel so that send_task can tell pipe_task to
         // reset the stream when the client cancels the request.
-        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+        let mut pipe_cancel_tx = None;
 
         let send_stream = if !f.is_connect {
             if !f.eos {
@@ -622,6 +621,8 @@ where
                 match Pin::new(&mut pipe).poll(cx) {
                     Poll::Ready(_) => (),
                     Poll::Pending => {
+                        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+                        pipe_cancel_tx = Some(cancel_tx);
                         let conn_drop_ref = self.conn_drop_ref.clone();
                         // keep the ping recorder's knowledge of an
                         // "open stream" alive while this body is
@@ -652,7 +653,7 @@ where
                     fut: f.fut,
                     ping: Some(ping),
                     send_stream: Some(send_stream),
-                    cancel_tx: Some(cancel_tx),
+                    cancel_tx: pipe_cancel_tx,
                     connect_udp: f.connect_udp,
                     exec: self.executor.clone(),
                 },

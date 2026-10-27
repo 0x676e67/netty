@@ -2,7 +2,8 @@
 //!
 //! Insert [`DatagramRequest`] alongside [`Protocol`](crate::http3::Protocol). After a successful
 //! response, [`on`] takes the session, including its reliable Capsule byte stream.
-//! Capsule and CONNECT-UDP Context ID encoding belong to the caller.
+//! Capsule and CONNECT-UDP Context ID encoding belong to the caller; with the `masque`
+//! feature, `proxy::masque` implements them for CONNECT-UDP.
 use std::{
     future::{Future, poll_fn},
     pin::Pin,
@@ -29,8 +30,7 @@ pub struct DatagramRequest;
 
 /// A successful CONNECT and its request-associated Datagram handles.
 /// Dropping the control stream invalidates both handles, even if they outlive it.
-/// Shutting it down closes the send half and sends the FIN once QUIC has taken the
-/// Datagrams admitted before.
+/// Shutting it down closes the send half, discarding Datagrams still queued, and sends the FIN.
 pub struct Session {
     control: Upgraded,
     sender: Sender,
@@ -79,14 +79,6 @@ impl Session {
     pub fn into_parts(self) -> (Upgraded, Sender, Receiver) {
         (self.control, self.sender, self.receiver)
     }
-
-    /// Resets the request stream with `H3_MESSAGE_ERROR`, for a success response the protocol
-    /// treats as malformed, such as one that breaks the Capsule Protocol
-    /// ([RFC 9297 §3.2](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2)). Dropping the
-    /// session instead cancels the request.
-    pub fn reject_malformed(self) {
-        self.receiver.abort_malformed_message();
-    }
 }
 
 // ===== impl Pending =====
@@ -130,8 +122,9 @@ impl Sender {
         self.poll_admit(cx, |state| state.try_send(payload))
     }
 
-    /// Waits until a payload of the current maximum size would be admitted.
-    /// Readiness is a hint, not a reservation: a cloned sender may take the room first.
+    /// Waits until a payload of the current maximum size would be admitted, failing with
+    /// `TooLarge` when the limit fits no payload. Readiness is a hint, not a reservation:
+    /// a cloned sender may take the room first.
     pub fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), SendErrorKind>> {
         self.poll_admit(cx, RequestState::ready)
     }
@@ -179,8 +172,9 @@ impl Sender {
         self.state.id()
     }
 
-    /// Returns the latest payload limit, excluding Quarter Stream ID overhead.
-    /// `None` means the send half is closed or native Datagrams are unavailable.
+    /// Returns the latest payload limit, excluding Quarter Stream ID overhead. A limit of 0 fits
+    /// at most an empty payload; [`Self::poll_ready`] reports `TooLarge` when not even that
+    /// fits. `None` means sending is closed or native Datagrams are unavailable.
     pub fn max_datagram_size(&self) -> Option<usize> {
         self.state.max_size()
     }
@@ -192,6 +186,22 @@ impl Sender {
         self.state
             .try_send(&payload)
             .map_err(|kind| SendError { kind, payload })
+    }
+
+    /// Whether sends fail with `Closed`.
+    #[cfg(feature = "masque")]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.state.ready() == Err(SendErrorKind::Closed)
+    }
+
+    /// Like [`Self::try_send`] for `prefix` followed by `payload`, framed in one copy.
+    #[cfg(feature = "masque")]
+    pub(crate) fn try_send_prefixed(
+        &self,
+        prefix: &[u8],
+        payload: &[u8],
+    ) -> Result<(), SendErrorKind> {
+        self.state.try_send_buf(bytes::Buf::chain(prefix, payload))
     }
 }
 
@@ -210,7 +220,8 @@ impl Receiver {
     }
 
     /// Resets the request stream with `H3_DATAGRAM_ERROR`, for a peer whose payloads break the
-    /// protocol's format ([RFC 9297](https://www.rfc-editor.org/rfc/rfc9297.html)).
+    /// protocol's format
+    /// ([RFC 9297 §5.2](https://www.rfc-editor.org/rfc/rfc9297.html#section-5.2)).
     pub fn abort_malformed(&self) {
         self.0.abort(Abort::Datagram);
     }

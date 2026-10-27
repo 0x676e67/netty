@@ -374,3 +374,151 @@ where
     })
     .await
 }
+
+/// Lets a test make the Datagram reader see the peer's close before the streams do.
+struct CloseFirst<T> {
+    inner: T,
+    close: Option<oneshot::Receiver<rt::ConnectionError>>,
+}
+
+/// Reports the close the test sends, then reads from the transport.
+struct CloseFirstReceiver<R> {
+    inner: R,
+    close: Option<oneshot::Receiver<rt::ConnectionError>>,
+}
+
+// ===== impl CloseFirst =====
+
+impl<T: rt::Connection<Bytes>> rt::Connection<Bytes> for CloseFirst<T> {
+    type RecvStream = T::RecvStream;
+
+    type OpenStreams = T::OpenStreams;
+
+    fn poll_accept_recv(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<Self::RecvStream>, rt::ConnectionError>> {
+        self.inner.poll_accept_recv(cx)
+    }
+
+    fn poll_accept_bidi(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<Self::BidiStream>, rt::ConnectionError>> {
+        self.inner.poll_accept_bidi(cx)
+    }
+
+    fn opener(&self) -> Self::OpenStreams {
+        self.inner.opener()
+    }
+}
+
+impl<T: OpenStreams<Bytes>> OpenStreams<Bytes> for CloseFirst<T> {
+    type SendStream = T::SendStream;
+
+    type BidiStream = T::BidiStream;
+
+    fn poll_open_bidi(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::BidiStream, rt::StreamError>> {
+        self.inner.poll_open_bidi(cx)
+    }
+
+    fn poll_open_send(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::SendStream, rt::StreamError>> {
+        self.inner.poll_open_send(cx)
+    }
+
+    fn close(&mut self, code: u64, reason: &[u8]) {
+        self.inner.close(code, reason);
+    }
+}
+
+impl<T: DatagramConnection> DatagramConnection for CloseFirst<T> {
+    type Sender = T::Sender;
+
+    type Receiver = CloseFirstReceiver<T::Receiver>;
+
+    fn take_datagrams(&mut self) -> Option<(Self::Sender, Self::Receiver)> {
+        let (sender, inner) = self.inner.take_datagrams()?;
+        let close = self.close.take();
+        Some((sender, CloseFirstReceiver { inner, close }))
+    }
+}
+
+// ===== impl CloseFirstReceiver =====
+
+impl<R: rt::RecvDatagram> rt::RecvDatagram for CloseFirstReceiver<R> {
+    fn poll_recv(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<Bytes>, rt::ConnectionError>> {
+        if let Some(close) = &mut self.close
+            && let Poll::Ready(error) = Pin::new(close).poll(cx)
+        {
+            self.close = None;
+            if let Ok(error) = error {
+                return Poll::Ready(Err(error));
+            }
+        }
+        self.inner.poll_recv(cx)
+    }
+}
+
+#[tokio::test]
+async fn peer_close_seen_first_by_the_datagram_reader_is_classified() {
+    use rt::ConnectionError::{ApplicationClose, InternalError};
+
+    // H3_NO_ERROR and unknown codes close normally, whichever reader sees the close first.
+    // https://www.rfc-editor.org/rfc/rfc9114.html#section-8
+    // A backend's own failure leaves the connection open, so the client closes it.
+    let internal = h3::error::Code::H3_INTERNAL_ERROR.value();
+    for (error, normal, peer_code) in [
+        (ApplicationClose { error_code: 0x100 }, true, None),
+        (ApplicationClose { error_code: 0x21 }, true, None),
+        (ApplicationClose { error_code: 0x101 }, false, None),
+        (InternalError("queue failed".into()), false, Some(internal)),
+    ] {
+        bounded(async {
+            let (_, server_config, client_config) = tls::config();
+            let (client, server, _endpoints) = quic_pair(server_config, client_config).await;
+            let peer = server.clone();
+            let (close, closing) = oneshot::channel();
+            let ((tx, driver), server) = tokio::join!(
+                async {
+                    Builder::new(Exec)
+                        .handshake_with_datagrams::<_, ClientBody>(CloseFirst {
+                            inner: native::Connection::new(client),
+                            close: Some(closing),
+                        })
+                        .await
+                        .unwrap()
+                },
+                async {
+                    h3::server::builder()
+                        .enable_datagram(true)
+                        .build::<_, Bytes>(h3_quinn::Connection::new(server))
+                        .await
+                        .unwrap()
+                }
+            );
+            let name = format!("{error:?}");
+            close.send(error).unwrap();
+            let result = driver.await;
+            assert_eq!(result.is_ok(), normal, "{name}: {result:?}");
+            if let Some(code) = peer_code {
+                match peer.closed().await {
+                    quinn::ConnectionError::ApplicationClosed(close) => {
+                        assert_eq!(close.error_code.into_inner(), code, "{name}");
+                    }
+                    error => panic!("{name}: unexpected peer close: {error:?}"),
+                }
+            }
+            drop((tx, server));
+        })
+        .await;
+    }
+}

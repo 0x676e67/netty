@@ -488,6 +488,9 @@ impl Client {
                         Method::GET | Method::HEAD | Method::CONNECT => Some(Encoder::length(0)),
                         _ => {
                             te.insert(HeaderValue::from_static("chunked"));
+                            // A valid Content-Length would have taken precedence above.
+                            // Remove any invalid values now that we're using chunked.
+                            should_remove_con_len = true;
                             Some(Encoder::chunked())
                         }
                     }
@@ -521,7 +524,7 @@ impl Client {
         // This is because we need a second mutable borrow to remove
         // content-length header.
         if let Some(encoder) = encoder {
-            if should_remove_con_len && existing_con_len.is_some() {
+            if should_remove_con_len {
                 headers.remove(header::CONTENT_LENGTH);
             }
             return encoder;
@@ -696,6 +699,110 @@ fn extend(dst: &mut Vec<u8>, data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_client_request_encode_explicit_transfer_encoding_removes_content_length() {
+        use http::header::HeaderValue;
+
+        use crate::proto::BodyLength;
+
+        for values in [
+            vec!["10"],
+            vec![""],
+            vec!["abc"],
+            vec!["+10"],
+            vec!["18446744073709551616"],
+            vec!["10", "11"],
+            vec!["10, 11"],
+            vec!["10", "abc"],
+        ] {
+            for transfer_encoding in ["chunked", "gzip"] {
+                for body in [BodyLength::Known(10), BodyLength::Unknown] {
+                    let mut head = MessageHead::default();
+                    for value in &values {
+                        head.headers
+                            .append("content-length", HeaderValue::from_static(value));
+                    }
+                    head.headers.insert(
+                        "transfer-encoding",
+                        HeaderValue::from_static(transfer_encoding),
+                    );
+
+                    let mut vec = Vec::new();
+                    let encoder = Client::encode(
+                        Encode {
+                            head: &mut head,
+                            body: Some(body),
+                            req_method: &mut None,
+                        },
+                        &mut vec,
+                    )
+                    .unwrap();
+
+                    assert!(encoder.is_chunked());
+                    let expected_te = if transfer_encoding == "chunked" {
+                        "chunked"
+                    } else {
+                        "gzip, chunked"
+                    };
+                    assert_eq!(
+                        vec,
+                        format!("GET / HTTP/1.1\r\ntransfer-encoding: {expected_te}\r\n\r\n")
+                            .as_bytes(),
+                        "content-length: {values:?}, transfer-encoding: {transfer_encoding}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_client_request_encode_automatic_transfer_encoding_removes_content_length() {
+        use http::header::HeaderValue;
+
+        use crate::proto::BodyLength;
+
+        for values in [
+            vec![],
+            vec![""],
+            vec!["abc"],
+            vec!["+10"],
+            vec!["18446744073709551616"],
+            vec!["10", "11"],
+            vec!["10, 11"],
+            vec!["10", "abc"],
+            vec!["10"],
+        ] {
+            let mut head = RequestHead::default();
+            head.subject.0 = Method::POST;
+            for value in &values {
+                head.headers
+                    .append("content-length", HeaderValue::from_static(value));
+            }
+
+            let mut vec = Vec::new();
+            let encoder = Client::encode(
+                Encode {
+                    head: &mut head,
+                    body: Some(BodyLength::Unknown),
+                    req_method: &mut None,
+                },
+                &mut vec,
+            )
+            .unwrap();
+
+            if values == ["10"] {
+                assert_eq!(encoder, Encoder::length(10));
+                assert_eq!(vec, b"POST / HTTP/1.1\r\ncontent-length: 10\r\n\r\n");
+            } else {
+                assert!(encoder.is_chunked());
+                assert_eq!(
+                    vec, b"POST / HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n",
+                    "content-length: {values:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_parse_response_multiple_connection_headers() {
