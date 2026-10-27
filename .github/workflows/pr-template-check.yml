@@ -1,0 +1,26 @@
+name: PR Template Verification
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  verify-template:
+    name: Verify template
+    if: ${{ !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure PR template was preserved
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request.body || "";
+            const canary = "- [x] The description, docs, and comments (words meant for humans) are written by a human, not by an LLM.";
+
+            if (!body.includes(canary)) {
+              core.setFailed(
+                "PR description is missing the template's human-authorship statement. Please restore it."
+              );
+            }
