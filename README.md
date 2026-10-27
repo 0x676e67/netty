@@ -13,7 +13,7 @@ Async network clients, down to the wire.
 - HTTP Upgrade and CONNECT tunnels, including [HTTP/2 Extended CONNECT](https://www.rfc-editor.org/rfc/rfc8441.html).
 - [HTTP/3](https://www.rfc-editor.org/rfc/rfc9114.html) over a [QUIC](https://www.rfc-editor.org/rfc/rfc9000.html) connection established by the caller.
 - HTTP/3 Extended CONNECT and [HTTP Datagrams](https://www.rfc-editor.org/rfc/rfc9297.html).
-- [HTTP CONNECT](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6), SOCKS4, [SOCKS5](https://www.rfc-editor.org/rfc/rfc1928.html) and [MASQUE CONNECT-UDP](https://www.rfc-editor.org/rfc/rfc9298.html) proxy connectors.
+- [HTTP CONNECT](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6), SOCKS4, [SOCKS5](https://www.rfc-editor.org/rfc/rfc1928.html) and [MASQUE CONNECT-UDP](https://www.rfc-editor.org/rfc/rfc9298.html) proxy.
 - Streaming bodies and trailers with backpressure.
 - Pluggable executor, timer and transport interfaces implemented by the caller.
 - Carries forward [Hyper]'s client-side implementation.
