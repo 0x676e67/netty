@@ -1,17 +1,19 @@
 //! CONNECT tunnels over HTTP/3 request streams.
 
-#[cfg(feature = "http3-datagram")]
-use std::sync::Arc;
 use std::{
     future::Future,
     io,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll, ready},
 };
 
 use bytes::{Buf, Bytes};
 use http::Response;
-use http3::quic;
+use http3::{
+    error::{Code, StreamError},
+    quic,
+};
 use pin_project_lite::pin_project;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -19,9 +21,11 @@ use tokio::{
 };
 use tokio_util::sync::{CancellationToken, PollSender, WaitForCancellationFutureOwned};
 
+#[cfg(feature = "http3-datagram")]
+use super::client::malformed_datagram_error;
 use super::{
     client::{CHUNK, H3ClientFuture, RecvGuard, SendGuard, invalid_datagram_error},
-    shared::Active,
+    shared::{Active, Shared},
 };
 use crate::{
     Error, Result,
@@ -94,6 +98,13 @@ where
         let (result, body) = ready!(transfer.poll(cx));
         this.transfer.set(None);
         if let (Err(error), Some(mut body), Some(active)) = (result, body, this.active.as_ref()) {
+            #[cfg(feature = "http3-datagram")]
+            let error = match this.registration {
+                Some(registration) if registration.0.aborted().is_some() => {
+                    malformed_datagram_error()
+                }
+                _ => error,
+            };
             body.send_error(active.shared().error_or(error));
         }
         this.registration.take();
@@ -185,6 +196,7 @@ where
                     body: Some(body),
                     data: None,
                     data_done: false,
+                    shared: active.shared().clone(),
                 }),
                 invalid: invalid.map(CancellationToken::cancelled_owned),
             }),
@@ -276,9 +288,9 @@ where
     finish: Option<oneshot::Sender<Result<()>>>,
 }
 
-impl<S> Unpin for SendStream<S> where S: quic::SendStream<Bytes> {}
-
 // ===== impl SendStream =====
+
+impl<S> Unpin for SendStream<S> where S: quic::SendStream<Bytes> {}
 
 impl<S> SendStream<S>
 where
@@ -289,6 +301,15 @@ where
             send,
             rx,
             finish: None,
+        }
+    }
+
+    /// Stops HTTP Datagram sending with the send direction
+    /// ([RFC 9297 §2.1](https://www.rfc-editor.org/rfc/rfc9297.html#section-2.1)).
+    fn close_datagrams(&self) {
+        #[cfg(feature = "http3-datagram")]
+        if let Some(datagrams) = &self.send.datagrams {
+            datagrams.close_send();
         }
     }
 }
@@ -310,7 +331,18 @@ where
         }
         for _ in 0..32 {
             if this.finish.is_some() {
-                ready!(this.send.stream.poll_finish(cx)).map_err(Error::new_h3)?;
+                // A peer's STOP_SENDING ends only this direction, as it does before the FIN, and
+                // SendGuard answers it with a reset; QUIC may otherwise accept the FIN of a
+                // stopped stream.
+                // https://www.rfc-editor.org/rfc/rfc9000.html#section-3.5
+                if let Poll::Ready(result) = this.send.stream.poll_stopped(cx) {
+                    return Poll::Ready(result.map(|_| ()).map_err(Error::new_h3));
+                }
+                match ready!(this.send.stream.poll_finish(cx)) {
+                    Ok(()) => {}
+                    Err(StreamError::RemoteTerminate { .. }) => return Poll::Ready(Ok(())),
+                    Err(error) => return Poll::Ready(Err(Error::new_h3(error))),
+                }
                 this.send.finished = true;
                 if let Some(ack) = this.finish.take() {
                     let _ = ack.send(Ok(()));
@@ -322,16 +354,18 @@ where
                     .poll_stopped(cx)
                     .map(|result| result.map(|_| ()).map_err(Error::new_h3));
             }
+            // A peer stop ends this direction; SendGuard closes its Datagrams with the reset.
             if let Poll::Ready(result) = this.send.stream.poll_stopped(cx) {
-                #[cfg(feature = "http3-datagram")]
-                if let Some(datagrams) = &this.send.datagrams {
-                    datagrams.close_send();
-                }
                 return Poll::Ready(result.map(|_| ()).map_err(Error::new_h3));
             }
             // Flush accepted DATA before waiting for another command, even when
-            // the application never calls flush or sends any more bytes.
-            ready!(this.send.stream.poll_ready(cx)).map_err(Error::new_h3)?;
+            // the application never calls flush or sends any more bytes. A stop
+            // that lands after the check above fails this flush instead.
+            match ready!(this.send.stream.poll_ready(cx)) {
+                Ok(()) => {}
+                Err(StreamError::RemoteTerminate { .. }) => return Poll::Ready(Ok(())),
+                Err(error) => return Poll::Ready(Err(Error::new_h3(error))),
+            }
             match ready!(this.rx.poll_recv(cx)) {
                 Some(Write::Data(data)) => this
                     .send
@@ -342,10 +376,7 @@ where
                     let _ = ack.send(Ok(()));
                 }
                 Some(Write::Finish(ack)) => {
-                    #[cfg(feature = "http3-datagram")]
-                    if let Some(datagrams) = &this.send.datagrams {
-                        datagrams.close_send();
-                    }
+                    this.close_datagrams();
                     this.finish = Some(ack);
                 }
                 None => return Poll::Ready(Err(Error::new_canceled())),
@@ -356,13 +387,14 @@ where
     }
 }
 
-/// Forwards received DATA with channel backpressure and delivers EOF after
-/// trailers. The current QUIC buffer stays here until the reader accepts it.
+/// Forwards received DATA with channel backpressure and delivers EOF at the
+/// end of the stream. The current QUIC buffer stays here until the reader accepts it.
 struct RecvStream<R: quic::RecvStream> {
     recv: RecvGuard<R>,
     body: Option<chan::Sender>,
     data: Option<Bytes>,
     data_done: bool,
+    shared: Arc<Shared>,
 }
 
 // ===== impl RecvStream =====
@@ -401,7 +433,23 @@ impl<R: quic::RecvStream> Future for RecvStream<R> {
                     None => this.data_done = true,
                 }
             }
-            ready!(this.recv.stream.poll_recv_trailers(cx)).map_err(Error::new_h3)?;
+            // Only DATA follows a CONNECT response, so HEADERS is a connection error. Once the
+            // DATA ends, http3 holds a HEADERS frame until FIN, so a pending poll means one came,
+            // as do the errors for one it cannot take as trailers.
+            // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.4
+            match this.recv.stream.poll_recv_trailers(cx) {
+                Poll::Ready(Ok(None)) => {}
+                Poll::Ready(
+                    Ok(Some(_))
+                    | Err(StreamError::StreamError { .. } | StreamError::HeaderTooBig { .. }),
+                )
+                | Poll::Pending => {
+                    let reason = "HEADERS frame after a CONNECT response";
+                    this.shared.violate(Code::H3_FRAME_UNEXPECTED, reason);
+                    return Poll::Ready(Err(this.shared.error()));
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(Error::new_h3(error))),
+            }
             this.recv.finished = true;
             #[cfg(feature = "http3-datagram")]
             if let Some(datagrams) = &this.recv.datagrams {

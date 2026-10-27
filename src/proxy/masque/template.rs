@@ -1,0 +1,472 @@
+//! CONNECT-UDP URI templates.
+//!
+//! See [RFC 9298 §2](https://www.rfc-editor.org/rfc/rfc9298#section-2) for the template rules
+//! and [RFC 6570](https://www.rfc-editor.org/rfc/rfc6570) (level 3) for expansion.
+
+use std::{fmt, net::Ipv6Addr, str::FromStr};
+
+use http::{Uri, uri::Authority};
+
+use super::MasqueError;
+
+/// A validated CONNECT-UDP URI template, such as
+/// `https://proxy.example:443/.well-known/masque/udp/{target_host}/{target_port}/`.
+///
+/// Templates are checked against the requirements of [RFC 9298 §2] when parsed: absolute with a
+/// path starting with `/`, only ASCII 0x21-0x7E, variables only in the path or query, both
+/// `target_host` and `target_port` present, and no `+`, `#`, `.`, `/` or `;` operators, reserved
+/// operators or level 4 modifiers. The expansion must also parse as a [`Uri`]. Other RFC 6570
+/// syntax is not checked, and variables other than those two expand as undefined. Userinfo is
+/// rejected, as it would travel in every request's `:authority`; send credentials with
+/// [`ConnectUdp::with_auth`](super::ConnectUdp::with_auth).
+///
+/// [RFC 9298 §2]: https://www.rfc-editor.org/rfc/rfc9298.html#section-2
+#[derive(Clone)]
+pub struct Template {
+    raw: Box<str>,
+    proxy: Uri,
+    parts: Vec<Part>,
+}
+
+#[derive(Clone, Debug)]
+enum Part {
+    Literal(Box<str>),
+    Expr(Op, Vec<Var>),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Op {
+    /// `{a,b}`
+    Simple,
+    /// `{?a,b}`
+    Query,
+    /// `{&a,b}`
+    QueryContinuation,
+}
+
+#[derive(Clone, Debug)]
+enum Var {
+    Host,
+    Port,
+    /// Defined by the template but not by this client; expands as undefined.
+    Other,
+}
+
+impl Template {
+    /// Parses and validates a template.
+    pub fn new(template: &str) -> Result<Self, MasqueError> {
+        let invalid = MasqueError::InvalidTemplate;
+        if !template.bytes().all(|b| (0x21..=0x7E).contains(&b)) {
+            return Err(invalid("characters outside 0x21-0x7E"));
+        }
+        let (scheme, rest) = template
+            .split_once("://")
+            .ok_or(invalid("not in absolute form"))?;
+        let path_start = rest
+            .find('/')
+            .ok_or(invalid("path must start with a slash"))?;
+        let authority = &rest[..path_start];
+        if scheme.is_empty() || authority.is_empty() {
+            return Err(invalid("empty scheme or authority"));
+        }
+        if scheme.contains(['{', '}']) || authority.contains(['{', '}', '?', '#']) {
+            return Err(invalid("variables outside the path and query"));
+        }
+        if authority.contains('@') {
+            return Err(invalid("userinfo in the authority"));
+        }
+        // Parsing, unlike `Uri::builder`, reads `HTTPS` as the https scheme.
+        let proxy: Uri = format!("{scheme}://{authority}/")
+            .parse()
+            .map_err(|_| invalid("invalid scheme or authority"))?;
+        let Some(host) = crate::proxy::dst_host(&proxy) else {
+            return Err(invalid("empty host"));
+        };
+        // `Uri` takes brackets anywhere in an authority, which would dial one host and send
+        // another as `:authority`.
+        if parse_host(host).is_none() {
+            return Err(invalid("invalid host"));
+        }
+        // `Uri` reads a port after the last colon and keeps one it cannot read, and `u16`
+        // parsing takes a leading "+"; the proxy's must follow the host as nonzero digits.
+        // https://www.rfc-editor.org/rfc/rfc3986.html#section-3.2.3
+        let valid_port = match proxy
+            .authority()
+            .and_then(|a| a.as_str().strip_prefix(host))
+        {
+            Some("") => true,
+            Some(port) => port.strip_prefix(':').is_some_and(|port| {
+                port.bytes().all(|b| b.is_ascii_digit())
+                    && port.parse::<u16>().is_ok_and(|port| port != 0)
+            }),
+            None => false,
+        };
+        if !valid_port {
+            return Err(invalid("invalid port"));
+        }
+
+        let parts = parse_parts(&rest[path_start..])?;
+        let has = |want: fn(&Var) -> bool| {
+            parts
+                .iter()
+                .any(|part| matches!(part, Part::Expr(_, vars) if vars.iter().any(want)))
+        };
+        if !has(|v| matches!(v, Var::Host)) || !has(|v| matches!(v, Var::Port)) {
+            return Err(invalid("missing target_host or target_port"));
+        }
+
+        let parsed = Template {
+            raw: template.into(),
+            proxy,
+            parts,
+        };
+        // `Uri` refuses some characters a template may hold, such as `<` in the path.
+        if parsed.expand("localhost", 443).is_err() {
+            return Err(invalid("not a valid URI once expanded"));
+        }
+        Ok(parsed)
+    }
+
+    /// Returns the default template for a proxy ([RFC 9298 §2]):
+    /// `https://{proxy}/.well-known/masque/udp/{target_host}/{target_port}/`.
+    ///
+    /// [RFC 9298 §2]: https://www.rfc-editor.org/rfc/rfc9298.html#section-2
+    pub fn well_known(proxy: &Authority) -> Result<Self, MasqueError> {
+        Template::new(&format!(
+            "https://{proxy}/.well-known/masque/udp/{{target_host}}/{{target_port}}/"
+        ))
+    }
+
+    /// Returns the proxy's scheme and authority as a URI, for connecting to it.
+    pub fn proxy(&self) -> &Uri {
+        &self.proxy
+    }
+
+    /// Expands the template for a target.
+    ///
+    /// `host` is a DNS name, with IDNs as A-labels, or an IP literal; IPv6 may be bracketed. The
+    /// proxy resolves names.
+    pub fn expand(&self, host: &str, port: u16) -> Result<Uri, MasqueError> {
+        let host = parse_host(host).ok_or(MasqueError::InvalidTarget)?;
+        if port == 0 {
+            return Err(MasqueError::InvalidTarget);
+        }
+        let port = port.to_string();
+
+        let mut uri = self.proxy.to_string();
+        uri.pop(); // The trailing "/" from `proxy`; the template supplies the path.
+        for part in &self.parts {
+            match part {
+                Part::Literal(literal) => uri.push_str(literal),
+                Part::Expr(op, vars) => {
+                    let defined = vars.iter().filter_map(|var| match var {
+                        Var::Host => Some(("target_host", host)),
+                        Var::Port => Some(("target_port", port.as_str())),
+                        Var::Other => None,
+                    });
+                    for (i, (name, value)) in defined.enumerate() {
+                        match (op, i) {
+                            (Op::Simple, 0) => {}
+                            (Op::Simple, _) => uri.push(','),
+                            (Op::Query, 0) => uri.push('?'),
+                            (Op::Query | Op::QueryContinuation, _) => uri.push('&'),
+                        }
+                        if !matches!(op, Op::Simple) {
+                            uri.push_str(name);
+                            uri.push('=');
+                        }
+                        percent_encode(value, &mut uri);
+                    }
+                }
+            }
+        }
+        uri.parse().map_err(|_| MasqueError::InvalidTarget)
+    }
+}
+
+impl FromStr for Template {
+    type Err = MasqueError;
+
+    fn from_str(template: &str) -> Result<Self, Self::Err> {
+        Template::new(template)
+    }
+}
+
+impl fmt::Display for Template {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.raw)
+    }
+}
+
+impl fmt::Debug for Template {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Template").field(&self.raw).finish()
+    }
+}
+
+/// Splits the path and query into literals and expressions.
+fn parse_parts(mut rest: &str) -> Result<Vec<Part>, MasqueError> {
+    let invalid = MasqueError::InvalidTemplate;
+    let mut parts = Vec::new();
+    while !rest.is_empty() {
+        let Some(expr) = rest.strip_prefix('{') else {
+            let end = rest.find('{').unwrap_or(rest.len());
+            // A fragment would carry the variables after it, and `Uri` drops it.
+            if rest[..end].contains('#') {
+                return Err(invalid("variables outside the path and query"));
+            }
+            parts.push(Part::Literal(rest[..end].into()));
+            rest = &rest[end..];
+            continue;
+        };
+        let (expr, after) = expr.split_once('}').ok_or(invalid("unclosed expression"))?;
+        let (op, list) = match expr.as_bytes().first() {
+            Some(b'?') => (Op::Query, &expr[1..]),
+            Some(b'&') => (Op::QueryContinuation, &expr[1..]),
+            Some(b'+' | b'#' | b'.' | b'/' | b';') => {
+                return Err(invalid("reserved, fragment, label or path expansion"));
+            }
+            Some(b'=' | b',' | b'!' | b'@' | b'|') => return Err(invalid("reserved operator")),
+            _ => (Op::Simple, expr),
+        };
+        let vars = list
+            .split(',')
+            .map(|name| match name {
+                "target_host" => Ok(Var::Host),
+                "target_port" => Ok(Var::Port),
+                "" => Err(invalid("empty variable name")),
+                name if name.ends_with('*') || name.contains(':') => {
+                    Err(invalid("level 4 modifiers"))
+                }
+                _ => Ok(Var::Other),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        parts.push(Part::Expr(op, vars));
+        rest = after;
+    }
+    Ok(parts)
+}
+
+/// Strips IPv6 brackets from a proxy or target host, rejecting anything but an IPv6 literal or
+/// a non-empty reg-name, which covers DNS names and IPv4 literals.
+fn parse_host(host: &str) -> Option<&str> {
+    let is_ipv6 = |host: &str| host.parse::<Ipv6Addr>().is_ok();
+    // IPv6address / IPv4address / reg-name, without IPv6 zone identifiers. Brackets hold only
+    // IPv6.
+    // https://www.rfc-editor.org/rfc/rfc9298.html#section-3
+    // https://www.rfc-editor.org/rfc/rfc3986.html#section-3.2.2
+    match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        Some(ip) => is_ipv6(ip).then_some(ip),
+        None => (!host.is_empty() && (is_ipv6(host) || is_reg_name(host))).then_some(host),
+    }
+}
+
+/// Whether `host` holds only unreserved and sub-delims characters, a reg-name without
+/// percent-encoding ([RFC 3986 §3.2.2]).
+///
+/// [RFC 3986 §3.2.2]: https://www.rfc-editor.org/rfc/rfc3986.html#section-3.2.2
+fn is_reg_name(host: &str) -> bool {
+    host.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=".contains(&b))
+}
+
+/// Percent-encodes all but unreserved characters ([RFC 6570 §3.2.1]), so IPv6 colons become
+/// `%3A`.
+///
+/// [RFC 6570 §3.2.1]: https://www.rfc-editor.org/rfc/rfc6570.html#section-3.2.1
+fn percent_encode(value: &str, out: &mut String) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push('%');
+            out.push(char::from(HEX[usize::from(b >> 4)]));
+            out.push(char::from(HEX[usize::from(b & 0xF)]));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expansion() {
+        let cases = [
+            (
+                "https://proxy.example/.well-known/masque/udp/{target_host}/{target_port}/",
+                "192.0.2.6",
+                "https://proxy.example/.well-known/masque/udp/192.0.2.6/443/",
+            ),
+            (
+                "https://proxy.example:4443/masque?h={target_host}&p={target_port}",
+                "[2001:db8::42]",
+                "https://proxy.example:4443/masque?h=2001%3Adb8%3A%3A42&p=443",
+            ),
+            // Undefined variables expand to nothing and take no separator.
+            (
+                "https://proxy.example/m/{x,target_host,y,target_port}",
+                "a-b_c~d.example",
+                "https://proxy.example/m/a-b_c~d.example,443",
+            ),
+            (
+                "https://proxy.example/m{?x}{?y,target_host}{&z,target_port}",
+                "example.com",
+                "https://proxy.example/m?target_host=example.com&target_port=443",
+            ),
+        ];
+        for (template, host, expected) in cases {
+            let template = Template::new(template).expect(template);
+            assert_eq!(template.proxy().path(), "/");
+            assert_eq!(template.expand(host, 443).unwrap().to_string(), expected);
+        }
+
+        // Scheme names are case-insensitive, and the proxy URI reads them as such.
+        let upper = Template::new("HTTPS://proxy.example/{target_host}/{target_port}/").unwrap();
+        assert_eq!(upper.proxy().scheme(), Some(&http::uri::Scheme::HTTPS));
+        assert_eq!(
+            upper.expand("192.0.2.6", 53).unwrap(),
+            "https://proxy.example/192.0.2.6/53/"
+        );
+
+        let well_known = Template::well_known(&"proxy.example:443".parse().unwrap()).unwrap();
+        assert_eq!(
+            well_known.expand("::1", 53).unwrap().to_string(),
+            "https://proxy.example:443/.well-known/masque/udp/%3A%3A1/53/"
+        );
+        assert_eq!(
+            well_known.to_string(),
+            "https://proxy.example:443/.well-known/masque/udp/{target_host}/{target_port}/"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_templates_and_targets() {
+        for (reason, templates) in [
+            (
+                "not in absolute form",
+                &["/masque/{target_host}/{target_port}/"][..],
+            ),
+            ("path must start with a slash", &["https://proxy.example"]),
+            (
+                "variables outside the path and query",
+                &[
+                    "https://{target_host}/{target_port}",
+                    "https://p.example/m#{target_host}/{target_port}",
+                ],
+            ),
+            (
+                "empty scheme or authority",
+                &[
+                    "://p.example/{target_host}/{target_port}",
+                    "https:///{target_host}/{target_port}",
+                ],
+            ),
+            (
+                "userinfo in the authority",
+                &["https://u:s@p.example/{target_host}/{target_port}"],
+            ),
+            (
+                "empty host",
+                &[
+                    "https://:443/{target_host}/{target_port}",
+                    "https://[]/{target_host}/{target_port}",
+                ],
+            ),
+            (
+                "invalid port",
+                &[
+                    "https://p.example:99999/{target_host}/{target_port}",
+                    "https://p.example:/{target_host}/{target_port}",
+                    "https://p.example:0/{target_host}/{target_port}",
+                    "https://p.example:+443/{target_host}/{target_port}",
+                    "https://[::1]x:443/{target_host}/{target_port}",
+                ],
+            ),
+            (
+                "invalid host",
+                &[
+                    "https://[p.example]/{target_host}/{target_port}",
+                    "https://[192.0.2.1]/{target_host}/{target_port}",
+                    "https://[fe80::1%25eth0]:443/{target_host}/{target_port}",
+                    "https://a[b]/{target_host}/{target_port}",
+                    "https://x[::1]:443/{target_host}/{target_port}",
+                ],
+            ),
+            (
+                "missing target_host or target_port",
+                &[
+                    "https://p.example/{target_host}",
+                    "https://p.example/{target_port}/",
+                ],
+            ),
+            (
+                "reserved, fragment, label or path expansion",
+                &["https://p.example/{+target_host}/{target_port}"],
+            ),
+            (
+                "level 4 modifiers",
+                &["https://p.example/{target_host*}/{target_port}"],
+            ),
+            (
+                "unclosed expression",
+                &["https://p.example/{target_host}/{target_port}/{x"],
+            ),
+            (
+                "empty variable name",
+                &["https://p.example/{}/{target_host}/{target_port}"],
+            ),
+            (
+                "characters outside 0x21-0x7E",
+                &["https://p.example/ {target_host}/{target_port}"],
+            ),
+            (
+                "not a valid URI once expanded",
+                &["https://p.example/a<b/{target_host}/{target_port}"],
+            ),
+        ] {
+            for template in templates {
+                assert!(
+                    matches!(Template::new(template), Err(MasqueError::InvalidTemplate(r)) if r == reason),
+                    "{template}"
+                );
+            }
+        }
+        assert!(
+            Template::new("https://proxy.example/{a.b%2F_c}/{target_host}/{target_port}").is_ok()
+        );
+        for proxy in [
+            "[2001:DB8::1]:443",
+            "[::1]",
+            "192.0.2.1:4433",
+            "PROXY.example:0443",
+        ] {
+            let template = format!("https://{proxy}/{{target_host}}/{{target_port}}/");
+            assert!(Template::new(&template).is_ok(), "{proxy}");
+        }
+
+        let template = Template::well_known(&"proxy.example".parse().unwrap()).unwrap();
+        for (host, port) in [
+            ("", 443),
+            ("[]", 443),
+            ("fe80::1%eth0", 443),
+            ("1:2:3", 443),
+            ("[2001:db8::1", 443),
+            // Brackets hold only IPv6 literals.
+            ("[example.com]", 443),
+            ("[v1.x]", 443),
+            // Anything else must be a reg-name.
+            ("a/b.example", 443),
+            ("user@a.example", 443),
+            ("a%2Eexample", 443),
+            ("ü.example", 443),
+            ("a.example", 0),
+        ] {
+            assert!(
+                matches!(template.expand(host, port), Err(MasqueError::InvalidTarget)),
+                "{host}:{port}"
+            );
+        }
+    }
+}

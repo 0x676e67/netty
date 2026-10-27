@@ -84,6 +84,18 @@ pub(crate) struct RequestState {
     stop_state: OnceLock<Weak<dyn Any + Send + Sync>>,
     stop: OnceLock<fn(&(dyn Any + Send + Sync))>,
     pub(super) invalid: CancellationToken,
+    /// Why the application aborted the session, if it did.
+    abort: OnceLock<Abort>,
+}
+
+/// Why the application aborted a Datagram session, which picks the stream's reset code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Abort {
+    /// The peer's payloads break the protocol's format: `H3_DATAGRAM_ERROR`.
+    Datagram,
+    /// The response or its Capsules are malformed under the session's protocol:
+    /// `H3_MESSAGE_ERROR`.
+    Message,
 }
 
 /// Keeps a request registered; dropping it removes the session.
@@ -91,7 +103,15 @@ pub(crate) struct Registration(pub(super) Arc<RequestState>);
 
 /// Moves packets between the QUIC Datagram transport and the registry; the
 /// connection task polls it.
-pub(crate) type Drive = BoxFuture<'static, Result<(), (Code, Error)>>;
+pub(crate) type Drive = BoxFuture<'static, Result<(), DriveError>>;
+
+/// Why the Datagram driver stopped before the transport's normal closure.
+pub(crate) enum DriveError {
+    /// A received Datagram breaks the HTTP Datagram format, an `H3_DATAGRAM_ERROR`.
+    Malformed(Error),
+    /// The QUIC connection closed or failed.
+    Connection(quic::ConnectionError),
+}
 
 /// Drives a backend sender and receiver with bounded work per poll.
 struct Driver<S, R> {
@@ -106,7 +126,8 @@ struct Driver<S, R> {
 pub enum SendErrorKind {
     /// HTTP Datagrams or the QUIC Datagram transport are unavailable.
     Unavailable,
-    /// The payload exceeds the current transport or local buffer limit.
+    /// The payload exceeds the current transport or local buffer limit, or the limit fits
+    /// no payload.
     TooLarge,
     /// The bounded session or connection queue has no capacity.
     Full,
@@ -162,6 +183,7 @@ impl Registry {
             received: AtomicWaker::new(),
             stop_state: OnceLock::new(),
             stop: OnceLock::new(),
+            abort: OnceLock::new(),
         });
         let mut state = self.lock();
         if !state.closed {
@@ -230,12 +252,7 @@ impl Registry {
             drop(state);
             // An active request without Datagram semantics is a stream error,
             // unlike an unknown stream (RFC 9297 §2).
-            request.invalid.cancel();
-            if let Some((state, stop)) = request.stop_state.get().zip(request.stop.get())
-                && let Some(state) = state.upgrade()
-            {
-                stop(&*state);
-            }
+            request.invalidate();
             return Ok(());
         }
         let payload = packet.into_payload();
@@ -247,7 +264,9 @@ impl Registry {
             // Unreliable receive queues drop the newest packet.
             return Ok(());
         }
-        entry.incoming.push_back(payload);
+        // The backend's slice can keep a whole receive buffer, such as a GRO batch, alive
+        // while queued; a copy keeps the budgets a bound on memory.
+        entry.incoming.push_back(Bytes::copy_from_slice(&payload));
         entry.incoming_bytes += size;
         state.incoming += size;
         drop(state);
@@ -299,7 +318,8 @@ impl RequestState {
         if !state.negotiated || !entry.send_open {
             return None;
         }
-        state.max_size?.checked_sub(self.prefix_size())
+        // A limit below the prefix cannot carry any payload, which reads as 0.
+        Some(state.max_size?.saturating_sub(self.prefix_size()))
     }
 
     /// Encoded size of the Quarter Stream ID prefix.
@@ -312,9 +332,40 @@ impl RequestState {
         }
     }
 
+    /// Checks that a payload of the current maximum size would be admitted now; another
+    /// sender may still take the room first. `TooLarge` when the limit fits no payload.
+    pub(crate) fn ready(&self) -> std::result::Result<(), SendErrorKind> {
+        let state = self.registry.lock();
+        let Some(entry) = state.streams.get(&self.id.into_inner()) else {
+            return Err(SendErrorKind::Closed);
+        };
+        if !entry.send_open {
+            return Err(SendErrorKind::Closed);
+        }
+        let Some(max) = state.max_size.filter(|_| state.negotiated) else {
+            return Err(SendErrorKind::Unavailable);
+        };
+        if max < self.prefix_size() {
+            return Err(SendErrorKind::TooLarge);
+        }
+        let size = max.min(SESSION_BYTES);
+        if entry.outgoing.len() == PACKETS
+            || size > SESSION_BYTES - entry.outgoing_bytes
+            || size > CONNECTION_BYTES - state.outgoing
+        {
+            return Err(SendErrorKind::Full);
+        }
+        Ok(())
+    }
+
     /// Tries to frame and queue one payload within the session and connection
     /// budgets. Returns `Full` immediately when either queue has no capacity.
     pub(crate) fn try_send(&self, payload: &Bytes) -> std::result::Result<(), SendErrorKind> {
+        self.try_send_buf(&payload[..])
+    }
+
+    /// Like [`Self::try_send`], for a payload that may be split across buffers.
+    pub(crate) fn try_send_buf(&self, payload: impl Buf) -> std::result::Result<(), SendErrorKind> {
         let mut state = self.registry.lock();
         let Some(entry) = state.streams.get(&self.id.into_inner()) else {
             return Err(SendErrorKind::Closed);
@@ -326,7 +377,7 @@ impl RequestState {
             return Err(SendErrorKind::Unavailable);
         };
         let size = payload
-            .len()
+            .remaining()
             .checked_add(self.prefix_size())
             .ok_or(SendErrorKind::TooLarge)?;
         if size > max || size > SESSION_BYTES {
@@ -338,7 +389,7 @@ impl RequestState {
         {
             return Err(SendErrorKind::Full);
         }
-        let mut packet = Datagram::new(self.id, payload.clone()).encode();
+        let mut packet = Datagram::new(self.id, payload).encode();
         // The raw QUIC API takes contiguous Bytes. This is the single framing
         // copy; neither queueing nor routing copies the packet again.
         let packet = packet.copy_to_bytes(packet.remaining());
@@ -405,6 +456,40 @@ impl RequestState {
         self.registry.capacity_notify.notify_waiters();
     }
 
+    /// Marks the request invalid, so its stream resets with [`invalid_code`](Self::invalid_code),
+    /// and stops a response body waiting on it.
+    pub(crate) fn invalidate(&self) {
+        self.invalid.cancel();
+        if let Some((state, stop)) = self.stop_state.get().zip(self.stop.get())
+            && let Some(state) = state.upgrade()
+        {
+            stop(&*state);
+        }
+    }
+
+    /// Resets the request stream with the code for `abort`.
+    pub(crate) fn abort(&self, abort: Abort) {
+        // Published before the cancel, which the stream guards and the transfer task observe first.
+        let _ = self.abort.set(abort);
+        self.invalidate();
+        // Both directions end now, also after the peer's FIN.
+        self.close_recv();
+        self.close_send();
+    }
+
+    /// Why the application aborted the session, if it did.
+    pub(crate) fn aborted(&self) -> Option<Abort> {
+        self.abort.get().copied()
+    }
+
+    /// The code the stream of an invalid request resets with.
+    pub(crate) fn invalid_code(&self) -> Code {
+        match self.aborted() {
+            Some(Abort::Message) => Code::H3_MESSAGE_ERROR,
+            _ => Code::H3_DATAGRAM_ERROR,
+        }
+    }
+
     /// Closes the receive direction and discards its queue.
     pub(crate) fn close_recv(&self) {
         let mut state = self.registry.lock();
@@ -451,25 +536,27 @@ where
     S: quic::SendDatagram,
     R: quic::RecvDatagram,
 {
-    type Output = std::result::Result<(), (Code, Error)>;
+    type Output = std::result::Result<(), DriveError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         this.registry.waker.register(cx.waker());
         let max_size = this.sender.max_datagram_size();
-        this.registry.lock().max_size = max_size;
+        if mem::replace(&mut this.registry.lock().max_size, max_size) != max_size {
+            // Readiness is measured against the limit, so a smaller one can admit a parked sender.
+            this.registry.capacity_notify.notify_waiters();
+        }
         // Independent bounded budgets keep control/QPACK and both Datagram
         // directions moving even under a continuously ready producer.
         for index in 0..32 {
             match this.receiver.poll_recv(cx) {
-                Poll::Ready(Ok(Some(packet))) => this
-                    .registry
-                    .receive(packet)
-                    .map_err(|error| (Code::H3_DATAGRAM_ERROR, error))?,
-                Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
-                Poll::Ready(Err(error)) => {
-                    return Poll::Ready(Err((Code::H3_INTERNAL_ERROR, Error::new_h3(error))));
+                Poll::Ready(Ok(Some(packet))) => {
+                    this.registry
+                        .receive(packet)
+                        .map_err(DriveError::Malformed)?;
                 }
+                Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(DriveError::Connection(error))),
                 Poll::Pending => break,
             }
             if index == 31 {
@@ -499,7 +586,7 @@ where
             match this.sender.poll_send(cx, packet) {
                 Poll::Pending => break,
                 Poll::Ready(Err(quic::DatagramError::Connection(error))) => {
-                    return Poll::Ready(Err((Code::H3_INTERNAL_ERROR, Error::new_h3(error))));
+                    return Poll::Ready(Err(DriveError::Connection(error)));
                 }
                 // MTU/availability can change after local admission. Datagram
                 // delivery is unreliable; never turn TooLarge into Capsules.
@@ -598,6 +685,51 @@ mod tests {
     }
 
     #[test]
+    fn ready_waits_for_room_for_a_max_size_payload() {
+        use crate::conn::http3::datagram::Sender;
+        let registry = registry();
+        let request = registry.register(
+            StreamId::try_from(0).unwrap(),
+            true,
+            CancellationToken::new(),
+        );
+        let mut sender = Sender::new(request.0.clone());
+        let wakes = Arc::new(Wakes::default());
+        let waker = futures_util::task::waker(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        let woken = || wakes.0.load(std::sync::atomic::Ordering::Relaxed);
+
+        // 64 KiB of the 128 KiB session budget leaves room for one more max-size packet.
+        request.0.try_send(&Bytes::from(vec![0; 65535])).unwrap();
+        assert_eq!(sender.poll_ready(&mut cx), Poll::Ready(Ok(())));
+        request.0.try_send(&Bytes::from_static(b"small")).unwrap();
+        assert!(sender.poll_ready(&mut cx).is_pending());
+
+        // While QUIC takes nothing, only a smaller limit can admit the parked sender.
+        let mut driver = Driver {
+            sender: DatagramSender {
+                max: 65536,
+                blocked: true,
+                wake: None,
+                accepted: Vec::new(),
+            },
+            receiver: DatagramReceiver,
+            registry: registry.clone(),
+            pending: None,
+        };
+        let mut driver_cx = Context::from_waker(std::task::Waker::noop());
+        assert!(Pin::new(&mut driver).poll(&mut driver_cx).is_pending());
+        assert_eq!(sender.poll_ready(&mut cx), Poll::Ready(Ok(())));
+        request.0.try_send(&Bytes::from(vec![0; 65535])).unwrap();
+        assert!(sender.poll_ready(&mut cx).is_pending());
+        let before = woken();
+        driver.sender.max = 1200;
+        assert!(Pin::new(&mut driver).poll(&mut driver_cx).is_pending());
+        assert!(woken() > before, "limit change woke no sender");
+        assert_eq!(sender.poll_ready(&mut cx), Poll::Ready(Ok(())));
+    }
+
+    #[test]
     fn empty_packets_are_bounded_and_sessions_are_served_round_robin() {
         let registry = registry();
         let first = registry.register(
@@ -655,7 +787,16 @@ mod tests {
         );
         requests[0].0.close_send();
         requests[8].0.try_send(&payload).unwrap();
+        let wakes = Arc::new(Wakes::default());
+        let parked = futures_util::task::waker(wakes.clone());
+        assert!(
+            requests[8]
+                .0
+                .poll_recv(&mut Context::from_waker(&parked))
+                .is_pending()
+        );
         registry.close();
+        assert!(wakes.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
         assert_eq!(registry.lock().outgoing, 0);
         assert_eq!(
             requests[8].0.try_send(&Bytes::new()),
@@ -734,6 +875,22 @@ mod tests {
         registry.receive(Bytes::from_static(&[0, 9])).unwrap();
         assert!(registry.lock().streams[&0].incoming.is_empty());
         assert!(registry.receive(Bytes::new()).is_err());
+
+        // A queued packet is a copy, so it does not keep the backend's receive buffer alive.
+        let other = registry.register(
+            StreamId::try_from(4).unwrap(),
+            true,
+            CancellationToken::new(),
+        );
+        let packet = Bytes::from(vec![1, 7]);
+        registry.receive(packet.clone()).unwrap();
+        assert_ne!(
+            registry.lock().streams[&4].incoming[0].as_ptr(),
+            packet[1..].as_ptr()
+        );
+        // An abort discards it at once, before the stream's reset closes the session.
+        other.0.abort(Abort::Datagram);
+        assert!(registry.lock().streams[&4].incoming.is_empty());
     }
 
     struct DatagramSender {
@@ -891,5 +1048,76 @@ mod tests {
         assert!(Pin::new(&mut driver).poll(&mut cx).is_pending());
         assert_eq!(driver.sender.accepted[0].len(), 1200);
         assert_eq!(registry.lock().outgoing, 0);
+
+        // A limit below the Quarter Stream ID reads as 0 rather than as unavailable, and
+        // readiness fails rather than promising room; at the prefix an empty payload fits.
+        let prefix = request.0.prefix_size();
+        registry.lock().max_size = Some(prefix - 1);
+        assert_eq!(request.0.max_size(), Some(0));
+        assert_eq!(request.0.ready(), Err(SendErrorKind::TooLarge));
+        registry.lock().max_size = Some(prefix);
+        assert_eq!(request.0.max_size(), Some(0));
+        assert_eq!(request.0.ready(), Ok(()));
+    }
+
+    #[cfg(feature = "masque")]
+    #[tokio::test]
+    async fn masque_tunnel_alternates_sources_and_reports_tiny_limits() {
+        use tokio::io::AsyncWriteExt;
+
+        use crate::{
+            conn::http3::datagram::Pending,
+            proxy::masque::{SendError, UdpTunnel},
+        };
+        let registry = registry();
+        let request = registry.register(
+            StreamId::try_from(0).unwrap(),
+            true,
+            CancellationToken::new(),
+        );
+        let (control, mut proxy) = tokio::io::duplex(64);
+        let mut response = http::Response::new(());
+        response.extensions_mut().insert(Pending::new(
+            crate::upgrade::Upgraded::new(control, Bytes::new()),
+            request.0.clone(),
+        ));
+        let mut tunnel = UdpTunnel::from_http3(&mut response).unwrap();
+        // Neither encoding holds back the other, and a quiet stream leaves the turn to datagrams.
+        for payload in *b"123" {
+            registry.receive(Bytes::from(vec![0, 0, payload])).unwrap();
+        }
+        proxy.write_all(&[0, 2, 0, b'c']).await.unwrap();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let mut received = Vec::new();
+        for _ in 0..4 {
+            let Poll::Ready(Ok(Some(payload))) = tunnel.poll_recv(&mut cx) else {
+                panic!("{received:?} then nothing");
+            };
+            received.push(payload);
+        }
+        assert_eq!(received, ["1", "c", "2", "3"]);
+
+        // A limit that fits the Quarter Stream ID but not the Context ID fits no payload.
+        registry.lock().max_size = Some(request.0.prefix_size());
+        assert_eq!(tunnel.max_payload_size(), 0);
+        assert_eq!(
+            tunnel.poll_send_ready(&mut cx),
+            Poll::Ready(Err(SendError::TooLarge))
+        );
+        assert_eq!(tunnel.try_send(b""), Err(SendError::TooLarge));
+        // One more byte also fits Context ID 0, so an empty payload fits.
+        registry.lock().max_size = Some(request.0.prefix_size() + 1);
+        assert_eq!(tunnel.max_payload_size(), 0);
+        assert_eq!(tunnel.poll_send_ready(&mut cx), Poll::Ready(Ok(())));
+        assert_eq!(tunnel.try_send(b""), Ok(()));
+        assert_eq!(tunnel.try_send(b"x"), Err(SendError::TooLarge));
+
+        // Capsules still arrive once the HTTP Datagrams have ended.
+        request.0.close_recv();
+        proxy.write_all(&[0, 2, 0, b'd']).await.unwrap();
+        let Poll::Ready(Ok(Some(payload))) = tunnel.poll_recv(&mut cx) else {
+            panic!("the end of the Datagrams ended the tunnel");
+        };
+        assert_eq!(payload, "d");
     }
 }
