@@ -360,17 +360,17 @@ impl Client {
                 trace!("ignoring informational response: {}", inc.subject.as_u16());
                 return Ok(None);
             }
+            // Any 2xx to CONNECT switches to tunnel mode, 204 included.
+            // https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
+            200..=299 if *method == Some(Method::CONNECT) => {
+                return Ok(Some((DecodedLength::ZERO, true)));
+            }
             204 | 304 => return Ok(Some((DecodedLength::ZERO, false))),
             _ => (),
         }
         match *method {
             Some(Method::HEAD) => {
                 return Ok(Some((DecodedLength::ZERO, false)));
-            }
-            Some(Method::CONNECT) => {
-                if let 200..=299 = inc.subject.as_u16() {
-                    return Ok(Some((DecodedLength::ZERO, true)));
-                }
             }
             Some(_) => {}
             None => {
@@ -878,6 +878,34 @@ mod tests {
             )
             .keep_alive,
             "HTTP/1.0 close wins over an earlier keep-alive"
+        );
+    }
+
+    #[test]
+    fn test_client_decoder_connect_2xx_is_tunnel() {
+        let decode = |status: StatusCode, method: Method| {
+            let head = MessageHead {
+                subject: status,
+                ..Default::default()
+            };
+            Client::decoder(&head, &mut Some(method)).unwrap().unwrap()
+        };
+
+        // Any 2xx to CONNECT switches to tunnel mode, 204 included (RFC 9110 §9.3.6).
+        for status in [StatusCode::OK, StatusCode::ACCEPTED, StatusCode::NO_CONTENT] {
+            assert_eq!(
+                decode(status, Method::CONNECT),
+                (DecodedLength::ZERO, true),
+                "{status}"
+            );
+        }
+        assert_eq!(
+            decode(StatusCode::NO_CONTENT, Method::GET),
+            (DecodedLength::ZERO, false)
+        );
+        assert_eq!(
+            decode(StatusCode::NOT_MODIFIED, Method::CONNECT),
+            (DecodedLength::ZERO, false)
         );
     }
 

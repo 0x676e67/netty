@@ -22,7 +22,7 @@ use futures_util::{
     stream::{FusedStream, Stream},
     task::AtomicWaker,
 };
-use http::{Method, Request, Response, StatusCode};
+use http::{Method, Request, Response};
 use http_body::Body;
 use http2::{
     SendStream,
@@ -35,6 +35,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use super::{
     PipeToSendStream, SendBuf, ping,
     ping::{Ponger, Recorder},
+    upgrade::CONNECT_UDP,
 };
 use crate::{
     Error, Result,
@@ -508,6 +509,7 @@ where
     B: Body,
 {
     is_connect: bool,
+    connect_udp: bool,
     eos: bool,
     fut: ResponseFuture,
     body_tx: SendStream<SendBuf<B::Data>>,
@@ -652,6 +654,7 @@ where
                     ping: Some(ping),
                     send_stream: Some(send_stream),
                     cancel_tx: pipe_cancel_tx,
+                    connect_udp: f.connect_udp,
                     exec: self.executor.clone(),
                 },
                 call_back: Some(f.cb),
@@ -697,6 +700,7 @@ pin_project! {
         #[pin]
         send_stream: Option<Option<SendStream<SendBuf<<B as Body>::Data>>>>,
         cancel_tx: Option<oneshot::Sender<()>>,
+        connect_udp: bool,
         exec: E,
     }
 }
@@ -730,22 +734,40 @@ where
                 // record that we got the response headers
                 ping.record_non_data();
 
-                let content_length = headers::content_length_parse_all(res.headers());
-                if let (Some(mut send_stream), StatusCode::OK) = (send_stream, res.status()) {
-                    if content_length.is_some_and(|len| len != 0) {
-                        warn!("h2 connect response with non-zero body not supported");
-
-                        send_stream.send_reset(http2::Reason::INTERNAL_ERROR);
-                        return Poll::Ready(Err((
-                            Error::new_h2(http2::Reason::INTERNAL_ERROR.into()),
-                            None::<Request<B>>,
-                        )));
+                // A CONNECT-UDP success that breaks the Capsule Protocol is malformed, a stream
+                // error of type PROTOCOL_ERROR.
+                // https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
+                // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.1.1
+                if *this.connect_udp
+                    && res.status().is_success()
+                    && headers::breaks_capsule_protocol(res.status(), res.headers())
+                {
+                    if let Some(mut send_stream) = send_stream {
+                        send_stream.send_reset(http2::Reason::PROTOCOL_ERROR);
                     }
+                    return Poll::Ready(Err((
+                        Error::new_h2(http2::Reason::PROTOCOL_ERROR.into()),
+                        None::<Request<B>>,
+                    )));
+                }
+
+                // Any 2xx opens the tunnel, and its content-length is ignored: the response has
+                // no content, and what follows is tunneled data.
+                // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.5
+                // https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
+                if let Some(send_stream) = send_stream.filter(|_| res.status().is_success()) {
                     let (parts, recv_stream) = res.into_parts();
                     let mut res = Response::from_parts(parts, Incoming::empty());
 
                     let (pending, on_upgrade) = upgrade::pending();
-                    let (io, task) = super::upgrade::pair(send_stream, recv_stream, ping);
+                    let (io, task) = super::upgrade::pair(
+                        send_stream,
+                        recv_stream,
+                        ping,
+                        // Only MASQUE resets the stream.
+                        (cfg!(feature = "masque") && *this.connect_udp)
+                            .then_some(res.extensions_mut()),
+                    );
                     this.exec.execute_upgrade(task);
                     let upgraded = Upgraded::new(io, Bytes::new());
 
@@ -754,6 +776,7 @@ where
 
                     Poll::Ready(Ok(res))
                 } else {
+                    let content_length = headers::content_length_parse_all(res.headers());
                     let res = res.map(|stream| {
                         let ping = ping.for_stream(&stream);
                         Incoming::h2(stream, content_length.into(), ping)
@@ -841,6 +864,12 @@ where
 
                     let is_connect = req.method() == Method::CONNECT;
                     let eos = body.is_end_stream();
+                    // `send_request` takes the `:protocol` extension.
+                    let connect_udp = is_connect
+                        && req
+                            .extensions()
+                            .get::<Protocol>()
+                            .is_some_and(|protocol| protocol.as_str() == CONNECT_UDP);
 
                     if is_connect
                         && headers::content_length_parse_all(req.headers())
@@ -868,6 +897,7 @@ where
 
                     let f = FutCtx {
                         is_connect,
+                        connect_udp,
                         eos,
                         fut,
                         body_tx,

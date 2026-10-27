@@ -1,9 +1,9 @@
 use bytes::BytesMut;
 use http::{
-    HeaderMap, Method,
+    HeaderMap, Method, StatusCode,
     header::{
-        CONNECTION, CONTENT_LENGTH, HeaderName, HeaderValue, TE, TRANSFER_ENCODING, UPGRADE,
-        ValueIter,
+        CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue, TE, TRANSFER_ENCODING,
+        UPGRADE, ValueIter,
     },
 };
 
@@ -94,10 +94,7 @@ fn connection_has(value: &HeaderValue, needle: &str) -> bool {
 
 /// Whether a success response breaks the Capsule Protocol, which makes it malformed
 /// ([RFC 9297 §3.2](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2)).
-#[cfg(feature = "http3")]
-pub(crate) fn breaks_capsule_protocol(status: http::StatusCode, headers: &HeaderMap) -> bool {
-    use http::header::CONTENT_TYPE;
-
+pub(crate) fn breaks_capsule_protocol(status: StatusCode, headers: &HeaderMap) -> bool {
     matches!(status.as_u16(), 204..=206)
         || [CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING]
             .iter()

@@ -23,6 +23,7 @@ use std::{
     future::Future,
     io::{self, Cursor},
     pin::Pin,
+    sync::{Arc, Mutex, Weak},
     task::{Context, Poll, ready},
 };
 
@@ -34,14 +35,19 @@ use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::{SendBuf, ping::Recorder};
+use crate::lock::LockResultExt;
 
+/// Splits an upgraded CONNECT stream into its IO and send task. `extensions`, if given,
+/// receives a [`StreamReset`] for the stream.
 pub(super) fn pair<B>(
     send_stream: SendStream<SendBuf<B>>,
     recv_stream: RecvStream,
     ping: Recorder,
+    extensions: Option<&mut http::Extensions>,
 ) -> (H2Upgraded, UpgradedSendStreamTask<B>) {
     let (tx, rx) = mpsc::channel(1);
     let (error_tx, error_rx) = oneshot::channel();
+    let (reset, slot) = ResetRx::new(extensions);
 
     (
         H2Upgraded {
@@ -49,12 +55,15 @@ pub(super) fn pair<B>(
             recv_stream,
             ping,
             buf: Bytes::new(),
+            reset: slot,
         },
         UpgradedSendStreamTask {
             h2_tx: send_stream,
             rx,
             buffered: None,
             error_tx: Some(error_tx),
+            reset,
+            ended: false,
         },
     )
 }
@@ -65,6 +74,9 @@ pub(super) struct H2Upgraded {
     send_stream: UpgradedSendStreamBridge,
     recv_stream: RecvStream,
     buf: Bytes,
+    /// What a [`StreamReset`] reaches; dropped with the stream, which ends the send task's wait
+    /// for a reset.
+    reset: Option<Arc<ResetSlot>>,
 }
 
 /// Relays accepted writes and terminal errors while the upgraded stream is alive.
@@ -83,8 +95,33 @@ pin_project! {
         rx: mpsc::Receiver<Cursor<Box<[u8]>>>,
         buffered: Option<Cursor<Box<[u8]>>>,
         error_tx: Option<oneshot::Sender<crate::Error>>,
+        reset: ResetRx,
+        // Whether END_STREAM went out.
+        ended: bool,
     }
 }
+
+/// The `:protocol` of a CONNECT-UDP request
+/// ([RFC 9298 §3.4](https://www.rfc-editor.org/rfc/rfc9298.html#section-3.4)); with MASQUE, its
+/// 2xx response carries a [`StreamReset`].
+pub(crate) const CONNECT_UDP: &str = "connect-udp";
+
+/// Resets an upgraded CONNECT stream with a chosen code. MASQUE resets with `PROTOCOL_ERROR` on
+/// malformed capsules or trailers and with `CANCEL` when a tunnel drops before its close. The
+/// send task outlives END_STREAM to apply it until the upgraded IO drops.
+#[cfg_attr(
+    not(feature = "masque"),
+    expect(dead_code, reason = "only MASQUE resets")
+)]
+#[derive(Clone)]
+pub(crate) struct StreamReset(Weak<ResetSlot>);
+
+/// The sender of a reset request, held by the upgraded IO.
+type ResetSlot = Mutex<Option<oneshot::Sender<Reason>>>;
+
+/// The send task's end of a [`StreamReset`]; `None` once nothing can ask for a reset.
+#[derive(Default)]
+struct ResetRx(Option<oneshot::Receiver<Reason>>);
 
 // ===== impl UpgradedSendStreamTask =====
 
@@ -94,6 +131,14 @@ where
 {
     fn tick(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), crate::Error>> {
         let mut me = self.project();
+
+        // Once per tick: the registration stays, so a later request wakes the task.
+        if let Poll::Ready(reason) = me.reset.poll(cx) {
+            me.h2_tx.send_reset(reason);
+            return Poll::Ready(Err(crate::Error::new_body_write(::http2::Error::from(
+                reason,
+            ))));
+        }
 
         // this is a manual `select()` over 3 "futures", so we always need
         // to be sure they are ready and/or we are waiting notification of
@@ -111,6 +156,15 @@ where
                     return Poll::Ready(Err(crate::Error::new_body_write(err)));
                 }
                 Poll::Pending => (),
+            }
+
+            // After END_STREAM only a reset can follow.
+            if *me.ended {
+                return if me.reset.waiting() {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(()))
+                };
             }
 
             // A write taken from the mpsc receiver waits here for h2 capacity,
@@ -155,7 +209,10 @@ where
                     me.h2_tx
                         .send_data(SendBuf::None, true)
                         .map_err(crate::Error::new_body_write)?;
-                    return Poll::Ready(Ok(()));
+                    // Shutdown completes here; the check above keeps the task only to apply a
+                    // reset.
+                    *me.ended = true;
+                    me.error_tx.take();
                 }
                 Poll::Pending => {
                     return Poll::Pending;
@@ -185,7 +242,81 @@ where
     }
 }
 
+// ===== impl StreamReset =====
+
+#[cfg(feature = "masque")]
+impl StreamReset {
+    /// Resets the stream with `reason` while its upgraded IO lives; only the first call takes
+    /// effect.
+    pub(crate) fn reset(&self, reason: Reason) {
+        if let Some(slot) = self.0.upgrade() {
+            request_reset(&slot, reason);
+        }
+    }
+}
+
+/// Asks the send task to reset the stream with `reason`, unless a reset was already asked for.
+fn request_reset(slot: &ResetSlot, reason: Reason) {
+    let tx = slot.lock().ignore_poison().take();
+    if let Some(tx) = tx {
+        let _ = tx.send(reason);
+    }
+}
+
+// ===== impl ResetRx =====
+
+impl ResetRx {
+    /// Puts a [`StreamReset`] in `extensions`, if given, and returns the slot the upgraded IO
+    /// keeps alive.
+    fn new(extensions: Option<&mut http::Extensions>) -> (Self, Option<Arc<ResetSlot>>) {
+        let Some(extensions) = extensions else {
+            return (Self::default(), None);
+        };
+        let (tx, rx) = oneshot::channel();
+        let slot = Arc::new(Mutex::new(Some(tx)));
+        extensions.insert(StreamReset(Arc::downgrade(&slot)));
+        (Self(Some(rx)), Some(slot))
+    }
+
+    /// Polls for a requested reset; none can come once the upgraded IO dropped.
+    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Reason> {
+        let Some(rx) = self.0.as_mut() else {
+            return Poll::Pending;
+        };
+        match Pin::new(rx).poll(cx) {
+            Poll::Ready(Ok(reason)) => return Poll::Ready(reason),
+            Poll::Ready(Err(_dropped)) => self.0 = None,
+            Poll::Pending => {}
+        }
+        Poll::Pending
+    }
+
+    /// Whether a reset can still come.
+    fn waiting(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
 // ===== impl H2Upgraded =====
+
+impl H2Upgraded {
+    /// Reports the end of the stream. Only DATA may follow a CONNECT-UDP response, so trailers
+    /// there are a stream error: the read fails and, unless both sides have ended the stream, it
+    /// resets with `PROTOCOL_ERROR`
+    /// ([RFC 9113 §8.5](https://www.rfc-editor.org/rfc/rfc9113.html#section-8.5)).
+    fn poll_end(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Some(slot) = &self.reset
+            && let Ok(Some(_)) = ready!(self.recv_stream.poll_trailers(cx))
+        {
+            request_reset(slot, Reason::PROTOCOL_ERROR);
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "HEADERS after a CONNECT-UDP response",
+            )));
+        }
+        Poll::Ready(Ok(()))
+    }
+}
 
 impl AsyncRead for H2Upgraded {
     fn poll_read(
@@ -196,7 +327,7 @@ impl AsyncRead for H2Upgraded {
         if self.buf.is_empty() {
             self.buf = loop {
                 match ready!(self.recv_stream.poll_data(cx)) {
-                    None => return Poll::Ready(Ok(())),
+                    None => return self.poll_end(cx),
                     Some(Ok(buf)) if buf.is_empty() && !self.recv_stream.is_end_stream() => {
                         continue;
                     }

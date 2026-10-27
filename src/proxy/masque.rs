@@ -1,8 +1,11 @@
 //! MASQUE CONNECT-UDP clients ([RFC 9298](https://www.rfc-editor.org/rfc/rfc9298)).
 //!
 //! [`ConnectUdp`] opens a [`UdpTunnel`] to a UDP target through a proxy over HTTP/3. For other
-//! setups, build the request with [`http3_request`] and open the tunnel from the response with
-//! [`UdpTunnel::from_http3`]. HTTP/2 Extended CONNECT and HTTP/1.1 Upgrade are not supported.
+//! setups, build the request with [`http3_request`] or [`http2_request`] and open the tunnel from
+//! the response with [`UdpTunnel::from_http3`] or [`UdpTunnel::from_http2`]. Over HTTP/2 every
+//! payload travels as a DATAGRAM capsule
+//! ([RFC 9297 §3.5](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.5)). HTTP/1.1 Upgrade
+//! is not supported.
 
 mod capsule;
 mod template;
@@ -30,7 +33,10 @@ use crate::{
     conn::http3::{SendRequest, datagram::DatagramRequest},
     error::BoxError,
     http3::Protocol,
-    proto::headers,
+    proto::{
+        headers,
+        http2::upgrade::{CONNECT_UDP, StreamReset},
+    },
 };
 
 /// Largest UDP payload carried under Context ID 0
@@ -51,6 +57,22 @@ pub fn http3_request<B: Default>(uri: Uri) -> Request<B> {
     let mut request = connect_request(uri);
     request.extensions_mut().insert(Protocol::CONNECT_UDP);
     request.extensions_mut().insert(DatagramRequest);
+    request
+}
+
+/// Builds an HTTP/2 CONNECT-UDP request for an expanded template ([RFC 9298 §3.4]).
+///
+/// Open the tunnel with [`UdpTunnel::from_http2`]. Taking the upgrade with
+/// [`upgrade::on`](crate::upgrade::on) instead gives the bare CONNECT-UDP stream: trailers still
+/// fail a read and reset it, but a drop ends it only after queued writes get flow control, while
+/// an unclosed tunnel resets at once.
+///
+/// [RFC 9298 §3.4]: https://www.rfc-editor.org/rfc/rfc9298.html#section-3.4
+pub fn http2_request<B: Default>(uri: Uri) -> Request<B> {
+    let mut request = connect_request(uri);
+    request
+        .extensions_mut()
+        .insert(::http2::ext::Protocol::from_static(CONNECT_UDP));
     request
 }
 
@@ -164,7 +186,34 @@ impl UdpTunnel {
         let (control, sender, receiver) = crate::conn::http3::datagram::on(response)
             .ok_or(MasqueError::InvalidResponse)?
             .into_parts();
-        Ok(UdpTunnel::new(control, Some((sender, receiver))))
+        Ok(UdpTunnel::new(control, Some((sender, receiver)), None))
+    }
+
+    /// Opens the tunnel from this crate's HTTP/2 client's successful response to
+    /// [`http2_request`].
+    ///
+    /// A refusal is [`Unsuccessful`](MasqueError::Unsuccessful) and keeps its headers, body and
+    /// upgrade for the caller; once the body is dropped, the client aborts the request stream
+    /// with `CANCEL` ([RFC 9298 §3.1]). A success that is not the client's CONNECT-UDP tunnel is
+    /// [`InvalidResponse`](MasqueError::InvalidResponse): an HTTP/1.1 response (a TCP tunnel),
+    /// another CONNECT's, or one whose upgrade was already taken. A success response that breaks
+    /// the Capsule Protocol is malformed ([RFC 9297 §3.2]): the client resets its stream with
+    /// `PROTOCOL_ERROR` and fails the request instead.
+    ///
+    /// [RFC 9298 §3.1]: https://www.rfc-editor.org/rfc/rfc9298.html#section-3.1
+    /// [RFC 9297 §3.2]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
+    pub fn from_http2<B>(response: &mut Response<B>) -> Result<Self, MasqueError> {
+        validate(response)?;
+        let reset = response
+            .extensions()
+            .get::<StreamReset>()
+            .cloned()
+            .ok_or(MasqueError::InvalidResponse)?;
+        let control = crate::upgrade::on(&mut *response)
+            .take_fulfilled()
+            .ok_or(MasqueError::InvalidResponse)?;
+        response.extensions_mut().remove::<StreamReset>();
+        Ok(UdpTunnel::new(control, None, Some(reset)))
     }
 }
 

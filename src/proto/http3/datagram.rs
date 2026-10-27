@@ -27,7 +27,7 @@ use http3_datagram::datagram::Datagram;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Error, Result, rt::quic};
+use crate::{Error, Result, lock::LockResultExt, rt::quic};
 
 /// Packets queued per session and direction. The limits are also stated on
 /// `conn::http3::datagram::Sender::try_send`.
@@ -165,7 +165,7 @@ impl Registry {
     fn lock(&self) -> MutexGuard<'_, State> {
         // No user code runs under this lock. Preserve cleanup if another thread
         // unwinds while manipulating an internal queue.
-        self.state.lock().unwrap_or_else(|error| error.into_inner())
+        self.state.lock().ignore_poison()
     }
 
     /// Registers a request stream; `semantics` marks a Datagram request, any other
