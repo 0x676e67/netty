@@ -1,0 +1,1 @@
+- [x] The description, docs, and comments (words meant for humans) are written by a human, not by an LLM.
