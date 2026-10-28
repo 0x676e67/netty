@@ -402,7 +402,9 @@ impl<E> Builder<E> {
             done,
         );
 
-        self.exec.execute_h3_future(H3ClientFuture::Task { task });
+        self.exec.execute_h3_future(H3ClientFuture::Task {
+            task: Box::pin(task),
+        });
 
         let exchange: Box<dyn Exchange<B>> = {
             let shared = shared.clone();
