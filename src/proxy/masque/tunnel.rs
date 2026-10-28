@@ -478,7 +478,7 @@ impl Drop for UdpReceiver {
     fn drop(&mut self) {
         // Nothing reads the HTTP/2 stream from here on, so its data would hold flow control.
         if let Some(http2) = &self.http2 {
-            http2.reset.stop_recv();
+            http2.reset.stop_recv(&mut self.control);
         }
     }
 }

@@ -19,13 +19,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#[cfg(feature = "masque")]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     future::Future,
     io::{self, Cursor},
     pin::Pin,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll, ready},
 };
 
@@ -49,14 +50,15 @@ pub(super) fn pair<B>(
 ) -> (H2Upgraded, UpgradedSendStreamTask<B>) {
     let (tx, rx) = mpsc::channel(1);
     let (error_tx, error_rx) = oneshot::channel();
-    let (reset, recv) = ResetRx::new(recv_stream, extensions);
+    let (reset, slot) = ResetRx::new(extensions);
 
     (
         H2Upgraded {
             send_stream: UpgradedSendStreamBridge { tx, error_rx },
-            recv,
+            recv_stream: Some(recv_stream),
             ping,
             buf: Bytes::new(),
+            reset: slot,
         },
         UpgradedSendStreamTask {
             h2_tx: send_stream,
@@ -73,17 +75,12 @@ pub(super) fn pair<B>(
 pub(super) struct H2Upgraded {
     ping: Recorder,
     send_stream: UpgradedSendStreamBridge,
-    recv: Recv,
+    /// `None` once a [`StreamReset`] stopped receiving.
+    recv_stream: Option<RecvStream>,
     buf: Bytes,
-}
-
-/// The receive side of an upgraded stream.
-enum Recv {
-    Owned(RecvStream),
-    /// With a [`StreamReset`], the stream sits in the slot it reaches, so a tunnel can stop
-    /// receiving while it still sends. Dropped with the IO, which ends the send task's wait for
-    /// a reset.
-    Shared(Arc<ResetSlot>),
+    /// What a [`StreamReset`] reaches; dropped with the stream, which ends the send task's wait
+    /// for a reset.
+    reset: Option<Arc<ResetSlot>>,
 }
 
 /// Relays accepted writes and terminal errors while the upgraded stream is alive.
@@ -131,8 +128,8 @@ struct ResetSlot {
     /// Set by that first request.
     #[cfg(feature = "masque")]
     requested: AtomicBool,
-    /// The receive side, until [`StreamReset::stop_recv`] drops it.
-    recv: Mutex<Option<RecvStream>>,
+    /// Set by [`StreamReset::stop_recv`]; the next read drops the receive side.
+    stop_recv: AtomicBool,
 }
 
 /// The send task's end of a [`StreamReset`]; `None` once nothing can ask for a reset.
@@ -278,19 +275,21 @@ impl StreamReset {
     }
 
     /// Stops receiving while the stream can still send: HTTP/2 then discards the data the peer
-    /// sends, returning its connection flow control, and reads end.
-    pub(crate) fn stop_recv(&self) {
+    /// sends, returning its connection flow control, and reads end. `io` is the stream's read
+    /// side, which nothing else reads from now on; one read through it applies the stop at
+    /// once, so regular reads only check a flag instead of taking a lock. Never panics, so it
+    /// can run in `Drop`.
+    pub(crate) fn stop_recv(&self, io: &mut (impl AsyncRead + Unpin)) {
         let Some(slot) = self.0.upgrade() else {
             return;
         };
-        let recv = slot.recv.lock().ignore_poison().take();
-        if let Some(mut recv) = recv {
-            // A frame taken but not fully read still holds its capacity, which dropping the
-            // stream alone would not return.
-            let flow = recv.flow_control();
-            let used = flow.used_capacity();
-            let _ = flow.release_capacity(used);
-        }
+        slot.stop_recv.store(true, Ordering::Relaxed);
+        // The read may take tokio's split lock, which panics once a panic poisoned it; then the
+        // receive side goes with the IO instead.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            Pin::new(io).poll_read(&mut cx, &mut ReadBuf::new(&mut []))
+        }));
     }
 }
 
@@ -307,21 +306,21 @@ fn request_reset(slot: &ResetSlot, reason: Reason) {
 // ===== impl ResetRx =====
 
 impl ResetRx {
-    /// Puts a [`StreamReset`] in `extensions`, if given, and returns the receive side the
-    /// upgraded IO keeps.
-    fn new(recv_stream: RecvStream, extensions: Option<&mut http::Extensions>) -> (Self, Recv) {
+    /// Puts a [`StreamReset`] in `extensions`, if given, and returns the slot the upgraded IO
+    /// keeps alive.
+    fn new(extensions: Option<&mut http::Extensions>) -> (Self, Option<Arc<ResetSlot>>) {
         let Some(extensions) = extensions else {
-            return (Self::default(), Recv::Owned(recv_stream));
+            return (Self::default(), None);
         };
         let (tx, rx) = oneshot::channel();
         let slot = Arc::new(ResetSlot {
             reset: Mutex::new(Some(tx)),
             #[cfg(feature = "masque")]
             requested: AtomicBool::new(false),
-            recv: Mutex::new(Some(recv_stream)),
+            stop_recv: AtomicBool::new(false),
         });
         extensions.insert(StreamReset(Arc::downgrade(&slot)));
-        (Self(Some(rx)), Recv::Shared(slot))
+        (Self(Some(rx)), Some(slot))
     }
 
     /// Polls for a requested reset; none can come once the upgraded IO dropped.
@@ -373,17 +372,20 @@ impl AsyncRead for H2Upgraded {
         read_buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = &mut *self;
-        let mut shared;
-        let (recv, slot) = match &mut this.recv {
-            Recv::Owned(recv) => (recv, None),
-            Recv::Shared(slot) => {
-                shared = slot.recv.lock().ignore_poison();
-                // A stream that stopped receiving reads as ended.
-                let Some(recv) = shared.as_mut() else {
-                    return Poll::Ready(Ok(()));
-                };
-                (recv, Some(&**slot))
-            }
+        let slot = this.reset.as_deref();
+        if slot.is_some_and(|slot| slot.stop_recv.load(Ordering::Relaxed))
+            && let Some(mut recv) = this.recv_stream.take()
+        {
+            // A frame taken but not fully read still holds its capacity, which dropping the
+            // stream alone would not return.
+            let flow = recv.flow_control();
+            let used = flow.used_capacity();
+            let _ = flow.release_capacity(used);
+            this.buf = Bytes::new();
+        }
+        // A stream that stopped receiving reads as ended.
+        let Some(recv) = this.recv_stream.as_mut() else {
+            return Poll::Ready(Ok(()));
         };
         if this.buf.is_empty() {
             this.buf = loop {
@@ -495,5 +497,75 @@ fn h2_to_io_error(e: http2::Error) -> std::io::Error {
             .expect("[BUG] http2::Error::is_io() is true, but into_io() failed")
     } else {
         io::Error::other(e)
+    }
+}
+
+#[cfg(all(test, feature = "masque"))]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::*;
+
+    /// IO whose reads panic; the first poisons the tokio split lock around it.
+    struct Panics;
+
+    impl AsyncRead for Panics {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            panic!("read failed");
+        }
+    }
+
+    impl AsyncWrite for Panics {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(0))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn stop_recv_survives_a_poisoned_split_lock() {
+        let mut extensions = http::Extensions::new();
+        let (_rx, slot) = ResetRx::new(Some(&mut extensions));
+        let reset = extensions.get::<StreamReset>().unwrap().clone();
+        let (mut read, _write) = tokio::io::split(Panics);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let poisoned = catch_unwind(AssertUnwindSafe(|| {
+            Pin::new(&mut read).poll_read(&mut cx, &mut ReadBuf::new(&mut []))
+        }));
+        assert!(poisoned.is_err());
+
+        // Called directly, the poisoned lock's panic stays inside; the flag shows the read was
+        // tried.
+        reset.stop_recv(&mut read);
+        let slot = slot.unwrap();
+        assert!(slot.stop_recv.load(Ordering::Relaxed));
+
+        // Nor while a panic unwinds through that `Drop`, when a second panic would abort.
+        struct StopOnDrop<'a>(&'a StreamReset, &'a mut tokio::io::ReadHalf<Panics>);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.stop_recv(self.1);
+            }
+        }
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            let _stop = StopOnDrop(&reset, &mut read);
+            panic!("tunnel task failed");
+        }));
+        assert!(unwound.is_err());
     }
 }
