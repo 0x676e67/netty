@@ -946,6 +946,9 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
         let result = assert_ready!(task::spawn(poll_fn(|cx| tunnel.poll_recv(cx))).poll());
         assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
         if !close {
+            // The reset ends sending at once, before the send task applies it.
+            assert_eq!(tunnel.max_payload_size(), 0);
+            assert_eq!(tunnel.try_send(b"x"), Err(masque::SendError::Closed));
             // Dropped before the send task runs, the tunnel still leaves its reset behind.
             drop(tunnel);
         }
@@ -1162,4 +1165,72 @@ fn h2_connect_udp_treats_raw_proxy_framing_as_malformed() {
     );
     let reason = driver.finish(poll_fn(|cx| send.poll_reset(cx))).unwrap();
     assert_eq!(reason, h2::Reason::PROTOCOL_ERROR);
+}
+
+// Plain for the same reason, with a bare h2 server to read its connection capacity.
+#[cfg(feature = "masque")]
+#[test]
+fn h2_connect_udp_receiver_drop_returns_flow_control() {
+    use std::future::poll_fn;
+
+    use netty::proxy::masque::UdpTunnel;
+
+    const WINDOW: usize = 65535;
+
+    let mut driver = Driver::new();
+    // A connection window below the stream window, and frames that can fill it.
+    let (mut client, conn, server_io) = driver.handshake(
+        netty::http2::Http2Options::builder()
+            .initial_window_size(1 << 20)
+            .initial_connection_window_size(WINDOW as u32)
+            .max_frame_size(1 << 16)
+            .build(),
+    );
+    driver.spawn(async move {
+        let _ = conn.await;
+    });
+    let (requests_tx, mut requests) = futures_channel::mpsc::unbounded();
+    driver.spawn(async move {
+        let mut builder = h2::server::Builder::new();
+        builder.enable_connect_protocol();
+        let mut server = builder.handshake::<_, Bytes>(server_io).await.unwrap();
+        while let Some(Ok(request)) = server.accept().await {
+            requests_tx.unbounded_send(request).unwrap();
+        }
+    });
+    driver.run();
+
+    let mut sending = task::spawn(client.try_send_request(connect_udp_request()));
+    assert_pending!(driver.poll(&mut sending));
+    let (request, mut respond) = driver.finish(requests.next()).unwrap();
+    let mut send = respond.send_response(Response::new(()), false).unwrap();
+    let mut response = assert_ready!(driver.poll(&mut sending)).unwrap();
+    let (mut sender, mut receiver) = UdpTunnel::from_http2(&mut response).unwrap().split();
+
+    // The receiver reads part of one frame, then drops: the rest and everything the proxy sends
+    // later return the connection's flow control, and the tunnel still sends.
+    let mut frame = vec![0; 60000];
+    frame[..4].copy_from_slice(&[0, 2, 0, b'p']);
+    send.send_data(Bytes::from(frame), false).unwrap();
+    let payload = driver.finish(poll_fn(|cx| receiver.poll_recv(cx))).unwrap();
+    assert_eq!(payload.as_deref(), Some(&b"p"[..]));
+    drop(receiver);
+    // Reserving past the window shows the connection's capacity, neither short nor over.
+    let mut data = Bytes::from(vec![0; 2 * WINDOW]);
+    send.reserve_capacity(data.len());
+    driver.run();
+    assert_eq!(send.capacity(), WINDOW);
+    while !data.is_empty() {
+        let capacity = driver
+            .finish(poll_fn(|cx| send.poll_capacity(cx)))
+            .unwrap()
+            .unwrap();
+        send.send_data(data.split_to(capacity.min(data.len())), false)
+            .unwrap();
+    }
+    sender.try_send(b"x").unwrap();
+    driver.finish(poll_fn(|cx| sender.poll_flush(cx))).unwrap();
+    let mut body = request.into_body();
+    let chunk = driver.finish(body.data()).unwrap().unwrap();
+    assert_eq!(&chunk[..], &[0, 2, 0, b'x']);
 }
