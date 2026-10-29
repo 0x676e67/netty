@@ -23,7 +23,10 @@ use std::{
     future::Future,
     io::{self, Cursor},
     pin::Pin,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll, ready},
 };
 
@@ -52,7 +55,7 @@ pub(super) fn pair<B>(
     (
         H2Upgraded {
             send_stream: UpgradedSendStreamBridge { tx, error_rx },
-            recv_stream,
+            recv_stream: Some(recv_stream),
             ping,
             buf: Bytes::new(),
             reset: slot,
@@ -72,7 +75,8 @@ pub(super) fn pair<B>(
 pub(super) struct H2Upgraded {
     ping: Recorder,
     send_stream: UpgradedSendStreamBridge,
-    recv_stream: RecvStream,
+    /// `None` once a [`StreamReset`] stopped receiving.
+    recv_stream: Option<RecvStream>,
     buf: Bytes,
     /// What a [`StreamReset`] reaches; dropped with the stream, which ends the send task's wait
     /// for a reset.
@@ -106,9 +110,10 @@ pin_project! {
 /// 2xx response carries a [`StreamReset`].
 pub(crate) const CONNECT_UDP: &str = "connect-udp";
 
-/// Resets an upgraded CONNECT stream with a chosen code. MASQUE resets with `PROTOCOL_ERROR` on
-/// malformed capsules or trailers and with `CANCEL` when a tunnel drops before its close. The
-/// send task outlives END_STREAM to apply it until the upgraded IO drops.
+/// Resets an upgraded CONNECT stream with a chosen code, or stops its receiving. MASQUE resets
+/// with `PROTOCOL_ERROR` on malformed capsules or trailers and with `CANCEL` when a tunnel drops
+/// before its close, and stops receiving once a tunnel's receiving half drops. The send task
+/// outlives END_STREAM to apply a reset until the upgraded IO drops.
 #[cfg_attr(
     not(feature = "masque"),
     expect(dead_code, reason = "only MASQUE resets")
@@ -116,8 +121,16 @@ pub(crate) const CONNECT_UDP: &str = "connect-udp";
 #[derive(Clone)]
 pub(crate) struct StreamReset(Weak<ResetSlot>);
 
-/// The sender of a reset request, held by the upgraded IO.
-type ResetSlot = Mutex<Option<oneshot::Sender<Reason>>>;
+/// What a [`StreamReset`] reaches, held by the upgraded IO.
+struct ResetSlot {
+    /// The sender of a reset request, which the first request takes.
+    reset: Mutex<Option<oneshot::Sender<Reason>>>,
+    /// Set by that first request.
+    #[cfg(feature = "masque")]
+    requested: AtomicBool,
+    /// Set by [`StreamReset::stop_recv`]; the next read drops the receive side.
+    stop_recv: AtomicBool,
+}
 
 /// The send task's end of a [`StreamReset`]; `None` once nothing can ask for a reset.
 #[derive(Default)]
@@ -253,12 +266,39 @@ impl StreamReset {
             request_reset(&slot, reason);
         }
     }
+
+    /// Whether a reset was asked for, so the stream can no longer send.
+    pub(crate) fn is_reset(&self) -> bool {
+        self.0
+            .upgrade()
+            .is_some_and(|slot| slot.requested.load(Ordering::Relaxed))
+    }
+
+    /// Stops receiving while the stream can still send: HTTP/2 then discards the data the peer
+    /// sends, returning its connection flow control, and reads end. `io` is the stream's read
+    /// side, which nothing else reads from now on; one read through it applies the stop at
+    /// once, so regular reads only check a flag instead of taking a lock. Never panics, so it
+    /// can run in `Drop`.
+    pub(crate) fn stop_recv(&self, io: &mut (impl AsyncRead + Unpin)) {
+        let Some(slot) = self.0.upgrade() else {
+            return;
+        };
+        slot.stop_recv.store(true, Ordering::Relaxed);
+        // The read may take tokio's split lock, which panics once a panic poisoned it; then the
+        // receive side goes with the IO instead.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            Pin::new(io).poll_read(&mut cx, &mut ReadBuf::new(&mut []))
+        }));
+    }
 }
 
 /// Asks the send task to reset the stream with `reason`, unless a reset was already asked for.
 fn request_reset(slot: &ResetSlot, reason: Reason) {
-    let tx = slot.lock().ignore_poison().take();
+    let tx = slot.reset.lock().ignore_poison().take();
     if let Some(tx) = tx {
+        #[cfg(feature = "masque")]
+        slot.requested.store(true, Ordering::Relaxed);
         let _ = tx.send(reason);
     }
 }
@@ -273,7 +313,12 @@ impl ResetRx {
             return (Self::default(), None);
         };
         let (tx, rx) = oneshot::channel();
-        let slot = Arc::new(Mutex::new(Some(tx)));
+        let slot = Arc::new(ResetSlot {
+            reset: Mutex::new(Some(tx)),
+            #[cfg(feature = "masque")]
+            requested: AtomicBool::new(false),
+            stop_recv: AtomicBool::new(false),
+        });
         extensions.insert(StreamReset(Arc::downgrade(&slot)));
         (Self(Some(rx)), Some(slot))
     }
@@ -299,23 +344,25 @@ impl ResetRx {
 
 // ===== impl H2Upgraded =====
 
-impl H2Upgraded {
-    /// Reports the end of the stream. Only DATA may follow a CONNECT-UDP response, so trailers
-    /// there are a stream error: the read fails and, unless both sides have ended the stream, it
-    /// resets with `PROTOCOL_ERROR`
-    /// ([RFC 9113 §8.5](https://www.rfc-editor.org/rfc/rfc9113.html#section-8.5)).
-    fn poll_end(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if let Some(slot) = &self.reset
-            && let Ok(Some(_)) = ready!(self.recv_stream.poll_trailers(cx))
-        {
-            request_reset(slot, Reason::PROTOCOL_ERROR);
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "HEADERS after a CONNECT-UDP response",
-            )));
-        }
-        Poll::Ready(Ok(()))
+/// Reports the end of the stream. Only DATA may follow a CONNECT-UDP response, so trailers there
+/// are a stream error: the read fails and, unless both sides have ended the stream, it resets
+/// with `PROTOCOL_ERROR`
+/// ([RFC 9113 §8.5](https://www.rfc-editor.org/rfc/rfc9113.html#section-8.5)).
+fn poll_end(
+    recv: &mut RecvStream,
+    slot: Option<&ResetSlot>,
+    cx: &mut Context<'_>,
+) -> Poll<io::Result<()>> {
+    if let Some(slot) = slot
+        && let Ok(Some(_)) = ready!(recv.poll_trailers(cx))
+    {
+        request_reset(slot, Reason::PROTOCOL_ERROR);
+        return Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "HEADERS after a CONNECT-UDP response",
+        )));
     }
+    Poll::Ready(Ok(()))
 }
 
 impl AsyncRead for H2Upgraded {
@@ -324,15 +371,31 @@ impl AsyncRead for H2Upgraded {
         cx: &mut Context<'_>,
         read_buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if self.buf.is_empty() {
-            self.buf = loop {
-                match ready!(self.recv_stream.poll_data(cx)) {
-                    None => return self.poll_end(cx),
-                    Some(Ok(buf)) if buf.is_empty() && !self.recv_stream.is_end_stream() => {
+        let this = &mut *self;
+        let slot = this.reset.as_deref();
+        if slot.is_some_and(|slot| slot.stop_recv.load(Ordering::Relaxed))
+            && let Some(mut recv) = this.recv_stream.take()
+        {
+            // A frame taken but not fully read still holds its capacity, which dropping the
+            // stream alone would not return.
+            let flow = recv.flow_control();
+            let used = flow.used_capacity();
+            let _ = flow.release_capacity(used);
+            this.buf = Bytes::new();
+        }
+        // A stream that stopped receiving reads as ended.
+        let Some(recv) = this.recv_stream.as_mut() else {
+            return Poll::Ready(Ok(()));
+        };
+        if this.buf.is_empty() {
+            this.buf = loop {
+                match ready!(recv.poll_data(cx)) {
+                    None => return poll_end(recv, slot, cx),
+                    Some(Ok(buf)) if buf.is_empty() && !recv.is_end_stream() => {
                         continue;
                     }
                     Some(Ok(buf)) => {
-                        self.ping.record_data(buf.len());
+                        this.ping.record_data(buf.len());
                         break buf;
                     }
                     Some(Err(e)) => {
@@ -347,10 +410,10 @@ impl AsyncRead for H2Upgraded {
                 }
             };
         }
-        let cnt = std::cmp::min(self.buf.len(), read_buf.remaining());
-        read_buf.put_slice(&self.buf[..cnt]);
-        self.buf.advance(cnt);
-        let _ = self.recv_stream.flow_control().release_capacity(cnt);
+        let cnt = std::cmp::min(this.buf.len(), read_buf.remaining());
+        read_buf.put_slice(&this.buf[..cnt]);
+        this.buf.advance(cnt);
+        let _ = recv.flow_control().release_capacity(cnt);
         Poll::Ready(Ok(()))
     }
 }
@@ -434,5 +497,75 @@ fn h2_to_io_error(e: http2::Error) -> std::io::Error {
             .expect("[BUG] http2::Error::is_io() is true, but into_io() failed")
     } else {
         io::Error::other(e)
+    }
+}
+
+#[cfg(all(test, feature = "masque"))]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::*;
+
+    /// IO whose reads panic; the first poisons the tokio split lock around it.
+    struct Panics;
+
+    impl AsyncRead for Panics {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            panic!("read failed");
+        }
+    }
+
+    impl AsyncWrite for Panics {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(0))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn stop_recv_survives_a_poisoned_split_lock() {
+        let mut extensions = http::Extensions::new();
+        let (_rx, slot) = ResetRx::new(Some(&mut extensions));
+        let reset = extensions.get::<StreamReset>().unwrap().clone();
+        let (mut read, _write) = tokio::io::split(Panics);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let poisoned = catch_unwind(AssertUnwindSafe(|| {
+            Pin::new(&mut read).poll_read(&mut cx, &mut ReadBuf::new(&mut []))
+        }));
+        assert!(poisoned.is_err());
+
+        // Called directly, the poisoned lock's panic stays inside; the flag shows the read was
+        // tried.
+        reset.stop_recv(&mut read);
+        let slot = slot.unwrap();
+        assert!(slot.stop_recv.load(Ordering::Relaxed));
+
+        // Nor while a panic unwinds through that `Drop`, when a second panic would abort.
+        struct StopOnDrop<'a>(&'a StreamReset, &'a mut tokio::io::ReadHalf<Panics>);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.stop_recv(self.1);
+            }
+        }
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            let _stop = StopOnDrop(&reset, &mut read);
+            panic!("tunnel task failed");
+        }));
+        assert!(unwound.is_err());
     }
 }

@@ -69,9 +69,10 @@ pub struct UdpSender {
 /// The receiving half of a [`UdpTunnel`].
 ///
 /// Dropping the receiver alone discards queued HTTP Datagrams; the request stream stays open
-/// until the sender is dropped too. Its capsules then go unread, so those the proxy keeps
-/// sending, every payload over HTTP/2, hold the flow-control window of the stream and its
-/// connection until then; to only send, keep receiving and discard instead.
+/// until the sender is dropped too. The proxy can then send capsules only until the stream's
+/// flow-control window fills: over HTTP/2 they are discarded and return the connection's window,
+/// over HTTP/3 they go unread and also hold the connection's. To let the proxy keep sending
+/// while this side only sends, keep receiving and discard.
 pub struct UdpReceiver {
     /// Declared before `control`, as in [`UdpSender`].
     http2: Option<Arc<Http2Stream>>,
@@ -201,7 +202,8 @@ impl UdpSender {
     /// [RFC 9000 §14]: https://www.rfc-editor.org/rfc/rfc9000.html#section-14
     pub fn max_payload_size(&self) -> usize {
         // The same order as `try_send`.
-        if self.closing || self.native.as_ref().is_some_and(Sender::is_closed) {
+        if self.closing || self.http2_reset() || self.native.as_ref().is_some_and(Sender::is_closed)
+        {
             return 0;
         }
         match self.native_limit() {
@@ -209,6 +211,14 @@ impl UdpSender {
             None if self.write_closed => 0,
             None => MAX_UDP_PAYLOAD,
         }
+    }
+
+    /// Whether the HTTP/2 request stream is being reset, which ends sending as an abort closes
+    /// the HTTP Datagrams over HTTP/3.
+    fn http2_reset(&self) -> bool {
+        self.http2
+            .as_ref()
+            .is_some_and(|http2| http2.reset.is_reset())
     }
 
     /// Payload limit of HTTP Datagrams, if they are usable.
@@ -223,7 +233,7 @@ impl UdpSender {
     /// [`poll_flush`](Self::poll_flush), [`poll_close`](Self::poll_close) or a
     /// [`poll_send_ready`](Self::poll_send_ready) that writes it.
     pub fn try_send(&mut self, payload: &[u8]) -> Result<(), SendError> {
-        if self.closing {
+        if self.closing || self.http2_reset() {
             return Err(SendError::Closed);
         }
         if payload.len() > MAX_UDP_PAYLOAD {
@@ -260,7 +270,7 @@ impl UdpSender {
     /// fails with [`TooLarge`](SendError::TooLarge) when the limit fits no payload. Capsules
     /// may still be buffered when it is ready.
     pub fn poll_send_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), SendError>> {
-        if self.closing {
+        if self.closing || self.http2_reset() {
             return Poll::Ready(Err(SendError::Closed));
         }
         if let Some(native) = &mut self.native {
@@ -371,13 +381,14 @@ impl UdpReceiver {
     /// Receives the next UDP payload; `None` once the proxy closed the tunnel.
     ///
     /// An error ends receiving and later calls report it again, with the same kind and
-    /// message. A malformed capsule or payload also resets the request stream, also after the
-    /// sender's close unless both sides have ended it: over HTTP/3 with `H3_MESSAGE_ERROR` for a
-    /// capsule cut short by the end of the stream ([RFC 9297 §3.3]) and `H3_DATAGRAM_ERROR` for
-    /// an oversized payload ([RFC 9298 §5]), over HTTP/2 with `PROTOCOL_ERROR`. Over HTTP/2, a
-    /// proxy reset with `NO_ERROR` or `CANCEL` reads as the end of the stream, so one that cuts
-    /// a capsule short is malformed, and HEADERS after the response fail receiving and, unless
-    /// both sides have ended the stream, reset it with `PROTOCOL_ERROR` ([RFC 9113 §8.5]).
+    /// message. A malformed capsule or payload also resets the request stream and ends sending,
+    /// also after the sender's close unless both sides have ended it: over HTTP/3 with
+    /// `H3_MESSAGE_ERROR` for a capsule cut short by the end of the stream ([RFC 9297 §3.3]) and
+    /// `H3_DATAGRAM_ERROR` for an oversized payload ([RFC 9298 §5]), over HTTP/2 with
+    /// `PROTOCOL_ERROR`. Over HTTP/2, a proxy reset with `NO_ERROR` or `CANCEL` reads as the end
+    /// of the stream, so one that cuts a capsule short is malformed, and HEADERS after the
+    /// response fail receiving and, unless both sides have ended the stream, reset it with
+    /// `PROTOCOL_ERROR` ([RFC 9113 §8.5]).
     ///
     /// [RFC 9297 §3.3]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3.3
     /// [RFC 9298 §5]: https://www.rfc-editor.org/rfc/rfc9298.html#section-5
@@ -460,6 +471,15 @@ impl UdpReceiver {
         }
         cx.waker().wake_by_ref();
         Poll::Pending
+    }
+}
+
+impl Drop for UdpReceiver {
+    fn drop(&mut self) {
+        // Nothing reads the HTTP/2 stream from here on, so its data would hold flow control.
+        if let Some(http2) = &self.http2 {
+            http2.reset.stop_recv(&mut self.control);
+        }
     }
 }
 
