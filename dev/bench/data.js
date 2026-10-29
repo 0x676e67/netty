@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793237879398,
+  "lastUpdate": 1793237932013,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -15767,6 +15767,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 2319742,
             "range": "± 20083.06",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "163c6b45973b8b7acec1a66e24e160349a546374",
+          "message": "fix(masque): stop HTTP/2 tunnel receive on drop and close sends on reset (#188)\n\n* fix(masque): stop HTTP/2 receiving when the receiver drops and report resets to the sender\n\n* perf(masque): stop HTTP/2 receiving through a flag instead of a per-read lock",
+          "timestamp": "2026-10-29T09:36:39+08:00",
+          "tree_id": "fe5446ffaf5cbf0e333eca7c774fd03c01c9b870",
+          "url": "https://github.com/0x676e67/netty/commit/163c6b45973b8b7acec1a66e24e160349a546374"
+        },
+        "date": 1793237931109,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 53170,
+            "range": "± 939.10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3260542,
+            "range": "± 30354.19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 18112,
+            "range": "± 216.50",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 18731,
+            "range": "± 1794.94",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 22686,
+            "range": "± 500.67",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 78633,
+            "range": "± 2114.70",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 40999581,
+            "range": "± 21453.61",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 58974,
+            "range": "± 1090.39",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 31032265,
+            "range": "± 8453933.44",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 24465655,
+            "range": "± 26056288.62",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 6667350,
+            "range": "± 105860.12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 44293431,
+            "range": "± 707802.63",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 45364673,
+            "range": "± 176176.30",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 4591691,
+            "range": "± 35232.34",
             "unit": "ns/iter"
           }
         ]
