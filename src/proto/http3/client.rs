@@ -110,8 +110,7 @@ pin_project! {
         Q: rt::quic::Connection<Bytes>,
     {
         Task {
-            #[pin]
-            task: ConnTask<Q>,
+            task: Pin<Box<ConnTask<Q>>>,
         },
         Pipe {
             #[pin]
@@ -148,7 +147,7 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         match self.project() {
-            H3ClientFutureProject::Task { task } => task.poll(cx),
+            H3ClientFutureProject::Task { task } => task.as_mut().poll(cx),
             H3ClientFutureProject::Pipe { pipe } => pipe.poll(cx),
             H3ClientFutureProject::Upgrade { task } => task.poll(cx),
         }
