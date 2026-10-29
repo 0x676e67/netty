@@ -75,6 +75,7 @@ pub(super) fn channel(ping_pong: PingPong, config: Config, timer: Time) -> (Reco
         is_keep_alive_timed_out: false,
         ping_pong,
         ping_sent_at: None,
+        payload: config.payload,
         next_bdp_at,
         timer,
     }));
@@ -94,13 +95,15 @@ pub(super) fn channel(ping_pong: PingPong, config: Config, timer: Time) -> (Reco
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     bdp_initial_window: Option<WindowSize>,
-    /// If no frames are received in this amount of time, a PING frame is sent.
+    /// If nothing is read in this amount of time, a PING frame is sent.
     keep_alive_interval: Option<Duration>,
     /// After sending a keepalive PING, the connection will be closed if
     /// a pong is not received in this amount of time.
     keep_alive_timeout: Duration,
     /// If true, sends pings even when there are no active streams.
     keep_alive_while_idle: bool,
+    /// Payload of the PING frames sent, or `None` for the default.
+    payload: Option<[u8; 8]>,
 }
 
 #[derive(Clone)]
@@ -117,6 +120,7 @@ pub(super) struct Ponger {
 struct Shared {
     ping_pong: PingPong,
     ping_sent_at: Option<Instant>,
+    payload: Option<[u8; 8]>,
 
     // bdp
     /// If `Some`, bdp is enabled, and this tracks how many bytes have been
@@ -151,7 +155,7 @@ struct Bdp {
 }
 
 struct KeepAlive {
-    /// If no frames are received in this amount of time, a PING frame is sent.
+    /// If nothing is read in this amount of time, a PING frame is sent.
     interval: Duration,
     /// After sending a keepalive PING, the connection will be closed if
     /// a pong is not received in this amount of time.
@@ -187,6 +191,7 @@ impl Config {
         keep_alive_interval: Option<Duration>,
         keep_alive_timeout: Duration,
         keep_alive_while_idle: bool,
+        payload: Option<[u8; 8]>,
     ) -> Self {
         Config {
             bdp_initial_window: if adaptive_window {
@@ -197,6 +202,7 @@ impl Config {
             keep_alive_interval,
             keep_alive_timeout,
             keep_alive_while_idle,
+            payload,
         }
     }
 
@@ -220,7 +226,6 @@ impl Recorder {
         };
 
         let mut locked = shared.lock().panic_if_poisoned();
-        locked.update_last_read_at();
 
         // are we ready to send another bdp ping?
         // if not, we don't need to record bytes either
@@ -244,15 +249,6 @@ impl Recorder {
         }
     }
 
-    pub(crate) fn record_non_data(&self) {
-        let Some(ref shared) = self.shared else {
-            return;
-        };
-
-        let mut locked = shared.lock().panic_if_poisoned();
-        locked.update_last_read_at();
-    }
-
     /// If the incoming stream is already closed, convert self into
     /// a disabled reporter.
     pub(super) fn for_stream(self, stream: &http2::RecvStream) -> Self {
@@ -263,9 +259,10 @@ impl Recorder {
         }
     }
 
-    pub(super) fn ensure_not_timed_out(&self) -> Result<()> {
+    pub(crate) fn ensure_not_timed_out(&self) -> Result<()> {
         if let Some(ref shared) = self.shared {
-            let locked = shared.lock().panic_if_poisoned();
+            // Only a flag is read, so a poisoned lock still has a valid answer.
+            let locked = shared.lock().ignore_poison();
             if locked.is_keep_alive_timed_out {
                 return Err(KeepAliveTimedOut.crate_error());
             }
@@ -346,6 +343,11 @@ impl Future for Ponger {
 }
 
 impl Ponger {
+    /// Records bytes read from the connection, including control frames.
+    pub(super) fn record_read(&self) {
+        self.shared.lock().panic_if_poisoned().update_last_read_at();
+    }
+
     #[inline]
     fn is_idle(&self) -> bool {
         Arc::strong_count(&self.shared) <= 2
@@ -356,7 +358,8 @@ impl Ponger {
 
 impl Shared {
     fn send_ping(&mut self) {
-        match self.ping_pong.send_ping(Ping::opaque()) {
+        let ping = self.payload.map_or_else(Ping::opaque, Ping::new);
+        match self.ping_pong.send_ping(ping) {
             Ok(()) => {
                 self.ping_sent_at = Some(self.timer.now());
                 trace!("sent ping");

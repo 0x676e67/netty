@@ -25,7 +25,7 @@ use futures_util::{
 use http::{Method, Request, Response};
 use http_body::Body;
 use http2::{
-    SendStream,
+    Reason, SendStream,
     client::{Builder, Connection, ResponseFuture, SendRequest},
     ext::Protocol,
 };
@@ -142,19 +142,29 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
-        match this.ponger.poll(cx) {
+        match this.ponger.as_mut().poll(cx) {
             Poll::Ready(ping::Ponged::SizeUpdate(wnd)) => {
                 this.conn.set_target_window_size(wnd);
                 this.conn.set_initial_window_size(wnd)?;
             }
             Poll::Ready(ping::Ponged::KeepAliveTimedOut) => {
                 debug!("connection keep-alive timed out");
+                // Write GOAWAY if the socket takes it now, but don't wait on an
+                // unresponsive peer to close.
+                this.conn.abrupt_shutdown(Reason::INTERNAL_ERROR);
+                let _ = Pin::new(&mut this.conn).poll(cx);
                 return Poll::Ready(Ok(()));
             }
             Poll::Pending => {}
         }
 
-        Pin::new(&mut this.conn).poll(cx)
+        let poll = Pin::new(&mut this.conn).poll(cx);
+        // Any bytes count as read activity for keep-alive, including control
+        // frames the connection handles itself.
+        if this.conn.take_read_activity() {
+            this.ponger.record_read();
+        }
+        poll
     }
 }
 
@@ -731,9 +741,6 @@ where
 
         match result {
             Ok(res) => {
-                // record that we got the response headers
-                ping.record_non_data();
-
                 // A CONNECT-UDP success that breaks the Capsule Protocol is malformed, a stream
                 // error of type PROTOCOL_ERROR.
                 // https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2

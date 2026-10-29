@@ -142,7 +142,11 @@ impl Body for Incoming {
                                 // to stop, but not fail it:
                                 return Poll::Ready(None);
                             } else {
-                                return Poll::Ready(Some(Err(Error::new_body(e))));
+                                // A keep-alive timeout closes the stream too.
+                                let err = ping.ensure_not_timed_out().err();
+                                return Poll::Ready(Some(Err(
+                                    err.unwrap_or_else(|| Error::new_body(e))
+                                )));
                             }
                         }
                         None => {
@@ -154,10 +158,7 @@ impl Body for Incoming {
 
                 // after data, check trailers
                 match ready!(recv.poll_trailers(cx)) {
-                    Ok(t) => {
-                        ping.record_non_data();
-                        Poll::Ready(Ok(t.map(Frame::trailers)).transpose())
-                    }
+                    Ok(t) => Poll::Ready(Ok(t.map(Frame::trailers)).transpose()),
                     Err(e) => {
                         if let Some(http2::Reason::NO_ERROR) = e.reason() {
                             // Same as above, a RST_STREAM with NO_ERROR indicates an early
@@ -165,7 +166,8 @@ impl Body for Incoming {
                             // not fail it:
                             Poll::Ready(None)
                         } else {
-                            Poll::Ready(Some(Err(Error::new_h2(e))))
+                            let err = ping.ensure_not_timed_out().err();
+                            Poll::Ready(Some(Err(err.unwrap_or_else(|| Error::new_h2(e)))))
                         }
                     }
                 }

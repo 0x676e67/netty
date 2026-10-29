@@ -328,6 +328,13 @@ pub struct Http2Options {
     /// Whether HTTP/2 keep-alive should apply while the connection is idle.
     pub keep_alive_while_idle: bool,
 
+    /// The payload of PING frames sent for keep-alive and adaptive flow control.
+    /// `None` uses the default from `http2`.
+    pub ping_payload: Option<[u8; 8]>,
+
+    /// The read-idle threshold after which a PING goes with the next HEADERS or DATA frame.
+    pub preface_ping: Option<Duration>,
+
     /// The maximum number of concurrent locally reset streams.
     pub max_concurrent_reset_streams: Option<usize>,
 
@@ -519,7 +526,8 @@ impl Http2OptionsBuilder {
     /// Sets an interval for HTTP2 Ping frames should be sent to keep a
     /// connection alive.
     ///
-    /// Pass `None` to disable HTTP2 keep-alive.
+    /// A PING is sent once nothing has been read from the connection for this
+    /// interval. Pass `None` to disable HTTP2 keep-alive.
     ///
     /// Default is currently disabled.
     #[inline]
@@ -531,7 +539,8 @@ impl Http2OptionsBuilder {
     /// Sets a timeout for receiving an acknowledgement of the keep-alive ping.
     ///
     /// If the ping is not acknowledged within the timeout, the connection will
-    /// be closed. Does nothing if `keep_alive_interval` is disabled.
+    /// be closed, with a GOAWAY of `INTERNAL_ERROR` if it can be written right
+    /// away. Does nothing if `keep_alive_interval` is disabled.
     ///
     /// Default is 20 seconds.
     #[inline]
@@ -551,6 +560,32 @@ impl Http2OptionsBuilder {
     #[inline]
     pub fn keep_alive_while_idle(mut self, enabled: bool) -> Self {
         self.opts.keep_alive_while_idle = enabled;
+        self
+    }
+
+    /// Sets the payload of PING frames sent for keep-alive and adaptive flow
+    /// control.
+    ///
+    /// Pass `None` to use the default from `http2`.
+    #[inline]
+    pub fn ping_payload(mut self, payload: impl Into<Option<[u8; 8]>>) -> Self {
+        self.opts.ping_payload = payload.into();
+        self
+    }
+
+    /// Sends a PING with the next HEADERS or non-empty DATA frame once nothing
+    /// has been read from the connection for longer than `threshold`.
+    ///
+    /// The PING follows HEADERS but precedes DATA, and its payload is a
+    /// big-endian counter starting at 1 that skips the payload of a keep-alive
+    /// PING in flight. Another PING is only sent after the previous one is
+    /// acknowledged; a missing ACK does not close the connection. Pass `None`
+    /// to disable it.
+    ///
+    /// Default is disabled.
+    #[inline]
+    pub fn preface_ping(mut self, threshold: impl Into<Option<Duration>>) -> Self {
+        self.opts.preface_ping = threshold.into();
         self
     }
 
@@ -741,6 +776,8 @@ impl Default for Http2Options {
             keep_alive_interval: None,
             keep_alive_timeout: Duration::from_secs(20),
             keep_alive_while_idle: false,
+            ping_payload: None,
+            preface_ping: None,
             max_concurrent_reset_streams: None,
             reset_stream_duration: None,
             max_send_buffer_size: DEFAULT_MAX_SEND_BUF_SIZE,
