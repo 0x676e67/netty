@@ -711,7 +711,7 @@ dependencies = [
 [[package]]
 name = "http2"
 version = "0.5.20"
-source = "git+https://github.com/0x676e67/http2?rev=986384b71de6ece69d642703676d5af8471aeda2#986384b71de6ece69d642703676d5af8471aeda2"
+source = "git+https://github.com/0x676e67/http2?rev=577c1dcba4c1d3e3c2ee8ffcad74aad23ed5155c#577c1dcba4c1d3e3c2ee8ffcad74aad23ed5155c"
 dependencies = [
  "atomic-waker",
  "bytes",
