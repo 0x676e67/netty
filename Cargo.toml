@@ -149,4 +149,4 @@ http3 = { git = "https://github.com/0x676e67/http3", rev = "f81d797e86a00b1f979a
 # Remove once an http2 release includes `Connection::extended_connect_protocol`, ignores
 # content-length on 1xx responses and on 2xx responses to CONNECT, and adds the preface PING,
 # custom PING payloads, read activity and client GOAWAY.
-http2 = { git = "https://github.com/0x676e67/http2", rev = "577c1dcba4c1d3e3c2ee8ffcad74aad23ed5155c" }
+http2 = { git = "https://github.com/0x676e67/http2", rev = "59d7d9663c82443ccc09dd0402b2a9f52953c29c" }
