@@ -351,6 +351,9 @@ where
         if let Some(priority) = self.opts.priorities {
             builder.priorities(priority);
         }
+        if let Some(threshold) = self.opts.preface_ping {
+            builder.preface_ping(threshold);
+        }
 
         // Create the ping configuration for the connection.
         let ping_config = ping::Config::new(
@@ -359,6 +362,7 @@ where
             self.opts.keep_alive_interval,
             self.opts.keep_alive_timeout,
             self.opts.keep_alive_while_idle,
+            self.opts.ping_payload,
         );
 
         let (tx, rx) = dispatch::channel();

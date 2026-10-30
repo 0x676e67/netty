@@ -4168,6 +4168,169 @@ mod conn {
         assert!(error.is_user());
     }
 
+    #[tokio::test]
+    async fn http2_preface_ping() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client_io, server_io, _) = setup_duplex_test_server();
+
+            let server = tokio::spawn(async move {
+                let (mut rd, mut wr) = tokio::io::split(server_io);
+                accept_h2_preface(&mut rd, &mut wr).await;
+
+                // Skip the client's connection setup until the request.
+                while read_frame(&mut rd).await.0 != FRAME_HEADERS {}
+                let (kind, flags, _, payload) = read_frame(&mut rd).await;
+                assert_eq!((kind, flags), (FRAME_PING, 0));
+                assert_eq!(payload, 1u64.to_be_bytes());
+
+                // `:status: 200` from the HPACK static table, ending the stream.
+                write_frame(&mut wr, FRAME_HEADERS, 0x5, 1, &[0x88]).await;
+            });
+
+            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .timer(rt::TokioTimer::new())
+                .options(
+                    Http2Options::builder()
+                        .preface_ping(Duration::from_millis(100))
+                        .build(),
+                )
+                .handshake(TokioIo::new(TokioIo::new(client_io)))
+                .await
+                .expect("http handshake");
+            tokio::spawn(conn);
+
+            // Stay read-idle past the threshold before the request.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let res = client
+                .try_send_request(http::Request::new(Empty::<Bytes>::new()))
+                .await
+                .expect("request");
+            assert_eq!(res.status(), StatusCode::OK);
+            server.await.expect("server");
+        })
+        .await
+        .expect("test timed out");
+    }
+
+    #[tokio::test]
+    async fn http2_keep_alive_counts_any_read() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (client_io, server_io, _) = setup_duplex_test_server();
+
+            let server = tokio::spawn(async move {
+                let (mut rd, mut wr) = tokio::io::split(server_io);
+                accept_h2_preface(&mut rd, &mut wr).await;
+
+                // Answer with `:status: 200` and keep the response body open.
+                while read_frame(&mut rd).await.0 != FRAME_HEADERS {}
+                write_frame(&mut wr, FRAME_HEADERS, 0x4, 1, &[0x88]).await;
+
+                // Server PINGs keep the client reading for longer than its interval.
+                for _ in 0..10 {
+                    write_frame(&mut wr, FRAME_PING, 0, 0, &[9; 8]).await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+
+                // So the keep-alive PING only follows the ACKs of all of them.
+                let mut acks = 0;
+                let payload = loop {
+                    match read_frame(&mut rd).await {
+                        (FRAME_PING, 0x1, _, _) => acks += 1,
+                        (FRAME_PING, 0, _, payload) => break payload,
+                        _ => {}
+                    }
+                };
+                assert_eq!(acks, 10);
+                assert_eq!(payload, [0; 8]);
+
+                // Without an ACK, the client closes with GOAWAY(0, INTERNAL_ERROR).
+                let (kind, _, _, payload) = read_frame(&mut rd).await;
+                assert_eq!(kind, FRAME_GOAWAY);
+                assert_eq!(payload, [0, 0, 0, 0, 0, 0, 0, 2]);
+            });
+
+            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .timer(rt::TokioTimer::new())
+                .options(
+                    Http2Options::builder()
+                        .keep_alive_interval(Duration::from_millis(500))
+                        .keep_alive_timeout(Duration::from_millis(500))
+                        .ping_payload([0; 8])
+                        .build(),
+                )
+                .handshake(TokioIo::new(TokioIo::new(client_io)))
+                .await
+                .expect("http handshake");
+            let conn = tokio::spawn(conn);
+
+            let res = client
+                .try_send_request(http::Request::new(Empty::<Bytes>::new()))
+                .await
+                .expect("request");
+            assert_eq!(res.status(), StatusCode::OK);
+
+            // The open body reports the keep-alive timeout.
+            let err = res
+                .into_body()
+                .frame()
+                .await
+                .expect("body frame")
+                .expect_err("body should time out");
+            assert!(err.is_timeout(), "{err:?}");
+
+            let err = conn
+                .await
+                .expect("conn task")
+                .expect_err("conn should time out");
+            assert!(err.is_timeout(), "{err:?}");
+            server.await.expect("server");
+        })
+        .await
+        .expect("test timed out");
+    }
+
+    const FRAME_HEADERS: u8 = 0x1;
+    const FRAME_SETTINGS: u8 = 0x4;
+    const FRAME_PING: u8 = 0x6;
+    const FRAME_GOAWAY: u8 = 0x7;
+
+    /// Reads the client preface and acknowledges the client SETTINGS.
+    async fn accept_h2_preface<R, W>(rd: &mut R, wr: &mut W)
+    where
+        R: tokio::io::AsyncRead + Unpin,
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        let mut preface = [0; 24];
+        rd.read_exact(&mut preface).await.expect("client preface");
+        write_frame(wr, FRAME_SETTINGS, 0, 0, &[]).await;
+        write_frame(wr, FRAME_SETTINGS, 0x1, 0, &[]).await;
+    }
+
+    /// Reads one frame as `(type, flags, stream id, payload)`.
+    async fn read_frame<R>(rd: &mut R) -> (u8, u8, u32, Vec<u8>)
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        let mut head = [0; 9];
+        rd.read_exact(&mut head).await.expect("frame head");
+        let len = u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize;
+        let stream_id = u32::from_be_bytes([head[5], head[6], head[7], head[8]]) & 0x7fff_ffff;
+        let mut payload = vec![0; len];
+        rd.read_exact(&mut payload).await.expect("frame payload");
+        (head[3], head[4], stream_id, payload)
+    }
+
+    async fn write_frame<W>(wr: &mut W, kind: u8, flags: u8, stream_id: u32, payload: &[u8])
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        let len = (payload.len() as u32).to_be_bytes();
+        let mut frame = vec![len[1], len[2], len[3], kind, flags];
+        frame.extend_from_slice(&stream_id.to_be_bytes());
+        frame.extend_from_slice(payload);
+        wr.write_all(&frame).await.expect("write frame");
+    }
+
     async fn drain_til_eof<T: tokio::io::AsyncRead + Unpin>(mut sock: T) -> io::Result<()> {
         let mut buf = [0u8; 1024];
         loop {
