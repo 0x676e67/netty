@@ -577,10 +577,10 @@ impl Http2OptionsBuilder {
     /// has been read from the connection for longer than `threshold`.
     ///
     /// The PING follows HEADERS but precedes DATA, and its payload is a
-    /// big-endian counter starting at 1 that skips the payload of a keep-alive
-    /// PING in flight. Another PING is only sent after the previous one is
-    /// acknowledged; a missing ACK does not close the connection. Pass `None`
-    /// to disable it.
+    /// big-endian counter starting at 1. It is skipped while the previous one
+    /// or a keep-alive or adaptive window PING awaits an ACK, and those PINGs
+    /// are held back until it is acknowledged; a missing ACK does not close the
+    /// connection. Pass `None` to disable it.
     ///
     /// Default is disabled.
     #[inline]
