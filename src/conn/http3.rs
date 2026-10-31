@@ -366,10 +366,11 @@ impl<E> Builder<E> {
 
         #[cfg(feature = "http3-datagram")]
         if datagrams.is_some()
-            && opts
-                .settings_order
-                .as_ref()
-                .is_some_and(|order| !order.contains(&http3::SettingId::H3_DATAGRAM))
+            && opts.settings_order.as_ref().is_some_and(|order| {
+                !order
+                    .into_iter()
+                    .any(|id| *id == http3::SettingId::H3_DATAGRAM)
+            })
         {
             return Err(Error::new_h3(
                 "HTTP Datagram settings order omits H3_DATAGRAM",
@@ -387,7 +388,7 @@ impl<E> Builder<E> {
             .send_grease(opts.send_grease)
             .enable_extended_connect(opts.enable_extended_connect);
         if let Some(order) = opts.settings_order {
-            builder.settings_order(http3::SettingsOrder::builder().extend(order).build());
+            builder.settings_order(order);
         }
         if let Some(order) = opts.headers_pseudo_order {
             builder.pseudo_order(order);
