@@ -433,6 +433,7 @@ pub(crate) fn request<Q, B, E>(
 ) -> BoxFuture<'static, Result<Response<Incoming>, TrySendError<Request<B>>>>
 where
     Q: rt::quic::Connection<Bytes>,
+    Q::SendStream: Send,
     Q::OpenStreams: Send + 'static,
     Q::BidiStream: rt::quic::BidiStream<Bytes> + Send + 'static,
     <Q::BidiStream as rt::quic::BidiStream<Bytes>>::SendStream: Send + 'static,
