@@ -288,6 +288,7 @@ impl<E> Builder<E> {
     pub async fn handshake<Q, B>(self, quic: Q) -> Result<(SendRequest<B>, Connection<Q, B, E>)>
     where
         Q: quic::Connection<Bytes>,
+        Q::SendStream: Send,
         Q::OpenStreams: Clone + Send + 'static,
         Q::BidiStream: quic::BidiStream<Bytes> + Send + 'static,
         <Q::BidiStream as quic::BidiStream<Bytes>>::SendStream: Send + 'static,
@@ -321,6 +322,7 @@ impl<E> Builder<E> {
         Q: quic::Connection<Bytes> + quic::DatagramConnection,
         Q::Sender: Send + 'static,
         Q::Receiver: Send + 'static,
+        Q::SendStream: Send,
         Q::OpenStreams: Clone + Send + 'static,
         Q::BidiStream: quic::BidiStream<Bytes> + Send + 'static,
         <Q::BidiStream as quic::BidiStream<Bytes>>::SendStream: Send + 'static,
@@ -346,6 +348,7 @@ impl<E> Builder<E> {
     ) -> Result<(SendRequest<B>, Connection<Q, B, E>)>
     where
         Q: quic::Connection<Bytes>,
+        Q::SendStream: Send,
         Q::OpenStreams: Clone + Send + 'static,
         Q::BidiStream: quic::BidiStream<Bytes> + Send + 'static,
         <Q::BidiStream as quic::BidiStream<Bytes>>::SendStream: Send + 'static,
@@ -384,7 +387,7 @@ impl<E> Builder<E> {
             .send_grease(opts.send_grease)
             .enable_extended_connect(opts.enable_extended_connect);
         if let Some(order) = opts.settings_order {
-            builder.settings_order(order);
+            builder.settings_order(http3::SettingsOrder::builder().extend(order).build());
         }
         if let Some(order) = opts.headers_pseudo_order {
             builder.pseudo_order(order);
