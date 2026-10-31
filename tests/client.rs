@@ -4032,6 +4032,122 @@ mod conn {
     }
 
     #[tokio::test]
+    async fn http2_pending_open_request_resolved_by_goaway() {
+        fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
+            let len = (payload.len() as u32).to_be_bytes();
+            let mut frame = vec![len[1], len[2], len[3], kind, flags];
+            frame.extend_from_slice(&stream.to_be_bytes());
+            frame.extend_from_slice(payload);
+            frame
+        }
+
+        // `:status: 200` (HPACK static index 8) with END_STREAM | END_HEADERS.
+        fn ok(stream: u32) -> Vec<u8> {
+            frame(1, 0x5, stream, &[0x88])
+        }
+
+        fn goaway(last_stream: u32) -> Vec<u8> {
+            let mut payload = last_stream.to_be_bytes().to_vec();
+            payload.extend_from_slice(&[0; 4]);
+            frame(7, 0, 0, &payload)
+        }
+
+        const LAST: u32 = u32::MAX >> 1;
+        // (first stream, GOAWAY sent with its response, second request served)
+        let cases = [
+            // A draining peer still serves the request sent after GOAWAY(MAX).
+            (1, Some(LAST), true),
+            // A refusing peer leaves it unprocessed.
+            (1, Some(1), false),
+            // Taking the last stream id fails the re-check, yet the stream is valid.
+            (LAST - 2, None, true),
+        ];
+        for (first, goaway_last, served) in cases {
+            let (client_io, server_io, _) = setup_duplex_test_server();
+            let server = tokio::spawn(async move {
+                let (mut rd, mut wr) = tokio::io::split(server_io);
+                let mut preface = [0; 24];
+                rd.read_exact(&mut preface).await.unwrap();
+                // SETTINGS_MAX_CONCURRENT_STREAMS = 1
+                wr.write_all(&frame(4, 0, 0, &[0, 3, 0, 0, 0, 1]))
+                    .await
+                    .unwrap();
+
+                let (mut opened, mut reset) = (Vec::new(), false);
+                let mut head = [0; 9];
+                while rd.read_exact(&mut head).await.is_ok() {
+                    let len = u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize;
+                    let stream = u32::from_be_bytes([head[5], head[6], head[7], head[8]]);
+                    let mut payload = vec![0; len];
+                    rd.read_exact(&mut payload).await.unwrap();
+                    let out = match (head[3], head[4] & 1) {
+                        (4, 0) => frame(4, 1, 0, &[]),
+                        (6, 0) => frame(6, 1, 0, &payload),
+                        (1, _) => {
+                            opened.push(stream);
+                            match goaway_last.filter(|_| stream == first) {
+                                Some(last) => [ok(stream), goaway(last)].concat(),
+                                None => ok(stream),
+                            }
+                        }
+                        (3, _) => {
+                            reset = true;
+                            continue;
+                        }
+                        _ => continue,
+                    };
+                    wr.write_all(&out).await.unwrap();
+                }
+                (opened, reset)
+            });
+
+            let options = Http2Options::builder()
+                .initial_max_send_streams(1)
+                .initial_stream_id(first)
+                .build();
+            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .options(options)
+                .handshake(client_io)
+                .await
+                .unwrap();
+            let req = || {
+                Request::get("http://localhost/")
+                    .body(Empty::<Bytes>::new())
+                    .unwrap()
+            };
+
+            // Queue both before dispatch runs, so the second parks as pending open.
+            let res1 = client.try_send_request(req());
+            let res2 = client.try_send_request(req());
+            tokio::spawn(conn);
+
+            assert_eq!(res1.await.unwrap().status(), StatusCode::OK);
+            match res2.await {
+                Ok(res) if served => assert_eq!(res.status(), StatusCode::OK),
+                Err(err) if !served => {
+                    let err = err.into_error();
+                    let cause = err
+                        .source()
+                        .and_then(|cause| cause.downcast_ref::<::http2::Error>())
+                        .unwrap_or_else(|| panic!("expected an h2 cause, got {err:?}"));
+                    assert!(cause.is_go_away() && cause.is_remote());
+                }
+                res => panic!("unexpected second response: {res:?}"),
+            }
+
+            drop(client);
+            let (opened, reset) = server.await.unwrap();
+            let expected = if served {
+                vec![first, first + 2]
+            } else {
+                vec![first]
+            };
+            assert_eq!(opened, expected);
+            assert!(!reset, "pending-open stream was reset");
+        }
+    }
+
+    #[tokio::test]
     async fn h2_connect() {
         let (client_io, server_io, _) = setup_duplex_test_server();
 
