@@ -812,6 +812,11 @@ where
             match ready!(self.h2_tx.poll_ready(cx)) {
                 Ok(()) => (),
                 Err(err) => {
+                    // `poll_ready` reports connection errors before pending-open state, so
+                    // the parked stream may already be on the wire. Let h2 resolve it.
+                    if let Some(f) = self.fut_ctx.take() {
+                        self.poll_pipe(f, cx);
+                    }
                     self.ping.ensure_not_timed_out()?;
                     self.gate.release(&err);
                     return if err.reason() == Some(::http2::Reason::NO_ERROR) {
@@ -908,20 +913,11 @@ where
                     // Check poll_ready() again.
                     // If the call to send_request() resulted in the new stream being pending open
                     // we have to wait for the open to complete before accepting new requests.
-                    match self.h2_tx.poll_ready(cx) {
-                        Poll::Pending => {
-                            // Save Context
-                            self.fut_ctx = Some(f);
-                            return Poll::Pending;
-                        }
-                        Poll::Ready(Ok(())) => (),
-                        Poll::Ready(Err(err)) => {
-                            f.cb.send(Err(TrySendError {
-                                error: Error::new_h2(err),
-                                message: None,
-                            }));
-                            continue;
-                        }
+                    // On error the stream still belongs to h2; the next iteration reports it.
+                    if self.h2_tx.poll_ready(cx).is_pending() {
+                        // Save Context
+                        self.fut_ctx = Some(f);
+                        return Poll::Pending;
                     }
                     self.poll_pipe(f, cx);
                     continue;
