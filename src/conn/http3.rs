@@ -288,6 +288,7 @@ impl<E> Builder<E> {
     pub async fn handshake<Q, B>(self, quic: Q) -> Result<(SendRequest<B>, Connection<Q, B, E>)>
     where
         Q: quic::Connection<Bytes>,
+        Q::SendStream: Send,
         Q::OpenStreams: Clone + Send + 'static,
         Q::BidiStream: quic::BidiStream<Bytes> + Send + 'static,
         <Q::BidiStream as quic::BidiStream<Bytes>>::SendStream: Send + 'static,
@@ -321,6 +322,7 @@ impl<E> Builder<E> {
         Q: quic::Connection<Bytes> + quic::DatagramConnection,
         Q::Sender: Send + 'static,
         Q::Receiver: Send + 'static,
+        Q::SendStream: Send,
         Q::OpenStreams: Clone + Send + 'static,
         Q::BidiStream: quic::BidiStream<Bytes> + Send + 'static,
         <Q::BidiStream as quic::BidiStream<Bytes>>::SendStream: Send + 'static,
@@ -346,6 +348,7 @@ impl<E> Builder<E> {
     ) -> Result<(SendRequest<B>, Connection<Q, B, E>)>
     where
         Q: quic::Connection<Bytes>,
+        Q::SendStream: Send,
         Q::OpenStreams: Clone + Send + 'static,
         Q::BidiStream: quic::BidiStream<Bytes> + Send + 'static,
         <Q::BidiStream as quic::BidiStream<Bytes>>::SendStream: Send + 'static,
@@ -363,10 +366,11 @@ impl<E> Builder<E> {
 
         #[cfg(feature = "http3-datagram")]
         if datagrams.is_some()
-            && opts
-                .settings_order
-                .as_ref()
-                .is_some_and(|order| !order.contains(&http3::SettingId::H3_DATAGRAM))
+            && opts.settings_order.as_ref().is_some_and(|order| {
+                !order
+                    .into_iter()
+                    .any(|id| *id == http3::SettingId::H3_DATAGRAM)
+            })
         {
             return Err(Error::new_h3(
                 "HTTP Datagram settings order omits H3_DATAGRAM",
