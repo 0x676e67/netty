@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793237956919,
+  "lastUpdate": 1793588551997,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -15983,6 +15983,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4531430,
             "range": "± 74823.92",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "98c5ee82edea18cb705f307281bb662344b20254",
+          "message": "chore(deps): track http3 with RFC 9218 priority signals (#192)\n\n* chore(deps): track http3 with RFC 9218 priority signals\n\n* feat(http3)!: use http3's SettingsOrder in Http3Options",
+          "timestamp": "2026-11-02T11:00:34+08:00",
+          "tree_id": "de52ab6e5db17b19b4b9e8668309d70f867b97b2",
+          "url": "https://github.com/0x676e67/netty/commit/98c5ee82edea18cb705f307281bb662344b20254"
+        },
+        "date": 1793588551117,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 28440,
+            "range": "± 921.82",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 2923837,
+            "range": "± 148665.20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 7053,
+            "range": "± 73.49",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 7641,
+            "range": "± 79.20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 10475,
+            "range": "± 196.19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 31143,
+            "range": "± 3605.14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 40999889,
+            "range": "± 77465.95",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 41604,
+            "range": "± 1128.28",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 2980444,
+            "range": "± 33564.21",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 2941408,
+            "range": "± 34901.56",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 2864583,
+            "range": "± 217988.88",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 25940900,
+            "range": "± 2924170.99",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 22730594,
+            "range": "± 2553244.85",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 2392070,
+            "range": "± 224072.52",
             "unit": "ns/iter"
           }
         ]
