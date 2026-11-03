@@ -43,7 +43,7 @@ use http::{HeaderMap, Request, Response, Version};
 use http_body_util::{BodyExt, Full};
 use netty::{
     conn::http3::{Builder, Connection, SendRequest},
-    http3::Http3Options,
+    http3::{Http3Options, SettingsOrder},
     rt::{Executor, bounds::Http3ClientConnExec},
 };
 use tokio::{sync::oneshot, time::timeout};
@@ -292,7 +292,7 @@ async fn response_header_budgets_have_distinct_failure_scopes() {
             // a section exceeding our local receive budget.
             let options = Http3Options::builder()
                 .send_grease(false)
-                .settings_order(Vec::new());
+                .settings_order(SettingsOrder::builder().build());
             let options = if compressed {
                 options.max_qpack_decode_buffer_size(128)
             } else {
@@ -836,7 +836,7 @@ async fn headers_after_a_connect_response_close_the_connection() {
         let options = if value.len() > 128 {
             Http3Options::builder()
                 .max_field_section_size(128)
-                .settings_order(Vec::new())
+                .settings_order(SettingsOrder::builder().build())
                 .build()
         } else {
             Http3Options::default()
@@ -2066,13 +2066,17 @@ async fn settings_order_and_configured_values_reach_upstream_server() {
                 .send_grease(false)
                 .max_field_section_size(32100)
                 .qpack_blocked_streams(Some(0))
-                .settings_order(vec![
-                    SettingId::QPACK_MAX_BLOCKED_STREAMS,
-                    SettingId(0xfafa),
-                    SettingId::MAX_HEADER_LIST_SIZE,
-                    SettingId::QPACK_MAX_TABLE_CAPACITY,
-                    SettingId::H3_DATAGRAM,
-                ])
+                .settings_order(
+                    SettingsOrder::builder()
+                        .extend([
+                            SettingId::QPACK_MAX_BLOCKED_STREAMS,
+                            SettingId(0xfafa),
+                            SettingId::MAX_HEADER_LIST_SIZE,
+                            SettingId::QPACK_MAX_TABLE_CAPACITY,
+                            SettingId::H3_DATAGRAM,
+                        ])
+                        .build(),
+                )
                 .build();
             let builder = Builder::new(Exec).options(options);
             let transport = crate::native::Connection::new(client);
@@ -2128,7 +2132,11 @@ async fn datagram_handshake_rejects_order_omitting_its_setting() {
         let (_, server_config, client_config) = tls::config();
         let (client, _server, _endpoints) = quic_pair(server_config, client_config).await;
         let result = Builder::new(Exec)
-            .options(Http3Options::builder().settings_order(vec![]).build())
+            .options(
+                Http3Options::builder()
+                    .settings_order(SettingsOrder::builder().build())
+                    .build(),
+            )
             .handshake_with_datagrams::<_, ClientBody>(crate::native::Connection::new(client))
             .await;
         assert!(result.is_err());

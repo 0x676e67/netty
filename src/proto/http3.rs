@@ -10,7 +10,10 @@
 //! ```
 //! Extended CONNECT still uses [`Protocol`] in request extensions.
 
-pub use http3::{PseudoId, PseudoOrder, PseudoOrderBuilder, SettingId, ext::Protocol};
+pub use http3::{
+    PseudoId, PseudoOrder, PseudoOrderBuilder, SettingId, SettingsOrder, SettingsOrderBuilder,
+    ext::Protocol,
+};
 
 pub(crate) mod body;
 pub(crate) mod client;
@@ -77,7 +80,7 @@ pub struct Http3Options {
     /// Exact order of settings in the initial SETTINGS frame; defaults to the library order.
     /// `Some` omits unlisted or unconfigured entries; GREASE, if enabled, is appended.
     /// Datagram handshakes require `H3_DATAGRAM` in an explicit order.
-    pub settings_order: Option<Vec<SettingId>>,
+    pub settings_order: Option<SettingsOrder>,
 }
 
 // ===== impl Http3Options =====
@@ -184,12 +187,15 @@ impl Http3OptionsBuilder {
         self
     }
 
-    /// Selects settings in exact wire order; unlisted settings are omitted.
-    /// Unconfigured entries are skipped and GREASE, if enabled, is appended.
-    /// Datagram handshakes require `H3_DATAGRAM` in an explicit order.
+    /// Selects settings in exact wire order; unlisted settings are omitted and `None` uses the
+    /// HTTP/3 library's default order. Unconfigured entries are skipped and GREASE, if enabled,
+    /// is appended. Datagram handshakes require `H3_DATAGRAM` in an explicit order.
     #[inline]
-    pub fn settings_order(mut self, order: Vec<SettingId>) -> Self {
-        self.opts.settings_order = Some(order);
+    pub fn settings_order<T>(mut self, settings_order: T) -> Self
+    where
+        T: Into<Option<SettingsOrder>>,
+    {
+        self.opts.settings_order = settings_order.into();
         self
     }
 

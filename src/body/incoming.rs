@@ -10,7 +10,9 @@ use http_body::{Body, Frame, SizeHint};
 use http_body_util::combinators::BoxBody;
 
 use super::{DecodedLength, chan};
-use crate::{Error, Result, proto::http2::ping};
+#[cfg(feature = "http2")]
+use crate::proto::http2::ping;
+use crate::{Error, Result};
 
 /// A stream of [`Bytes`], used when receiving bodies from the network.
 ///
@@ -26,6 +28,7 @@ enum Kind {
         rx: chan::Receiver,
         content_length: DecodedLength,
     },
+    #[cfg(feature = "http2")]
     H2 {
         ping: ping::Recorder,
         recv: http2::RecvStream,
@@ -79,6 +82,7 @@ impl Incoming {
         }
     }
 
+    #[cfg(feature = "http2")]
     pub(crate) fn h2(
         recv: http2::RecvStream,
         mut content_length: DecodedLength,
@@ -121,6 +125,7 @@ impl Body for Incoming {
                 }
                 Poll::Ready(rx.take_trailers().map(Frame::trailers).map(Ok))
             }
+            #[cfg(feature = "http2")]
             Kind::H2 {
                 ref ping,
                 ref mut recv,
@@ -182,6 +187,7 @@ impl Body for Incoming {
     fn is_end_stream(&self) -> bool {
         match self.kind {
             Kind::H1 { content_length, .. } => content_length == DecodedLength::ZERO,
+            #[cfg(feature = "http2")]
             Kind::H2 { recv: ref h2, .. } => h2.is_end_stream(),
             #[cfg(feature = "http3")]
             Kind::H3(ref body) => body.is_end_stream(),
@@ -191,14 +197,17 @@ impl Body for Incoming {
 
     #[inline]
     fn size_hint(&self) -> SizeHint {
-        match self.kind {
-            Kind::H1 { content_length, .. } | Kind::H2 { content_length, .. } => content_length
-                .into_opt()
-                .map_or_else(SizeHint::default, SizeHint::with_exact),
+        let content_length = match self.kind {
+            Kind::H1 { content_length, .. } => content_length,
+            #[cfg(feature = "http2")]
+            Kind::H2 { content_length, .. } => content_length,
             #[cfg(feature = "http3")]
-            Kind::H3(ref body) => body.size_hint(),
-            Kind::Empty => SizeHint::with_exact(0),
-        }
+            Kind::H3(ref body) => return body.size_hint(),
+            Kind::Empty => return SizeHint::with_exact(0),
+        };
+        content_length
+            .into_opt()
+            .map_or_else(SizeHint::default, SizeHint::with_exact)
     }
 }
 

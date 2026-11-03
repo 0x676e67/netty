@@ -3,6 +3,7 @@
 
 mod support;
 
+#[cfg(feature = "http2")]
 #[path = "client/h2_connect.rs"]
 mod h2_connect;
 
@@ -1526,15 +1527,17 @@ mod conn {
         rt::Timer,
         upgrade::OnUpgrade,
     };
+    #[cfg(feature = "http2")]
+    use netty::http2::Http2Options;
     use netty::{
         conn::{self},
         http1::Http1Options,
-        http2::Http2Options,
     };
     use support::{TokioExecutor, TokioIo, TokioTimer};
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream},
         net::{TcpListener as TkTcpListener, TcpStream},
+        sync::Notify,
     };
 
     use super::{FutureHyperExt, concat, s, support, tcp_connect};
@@ -3420,6 +3423,7 @@ mod conn {
         .unwrap();
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_detect_conn_eof() {
         use futures_util::future;
@@ -3500,6 +3504,7 @@ mod conn {
             .expect_err("client should be closed");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_dispatched_response_survives_connection_drop() {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -3554,6 +3559,7 @@ mod conn {
 
     // This test can intermittently time out while waiting for the connection to close.
     // See [hyper#3896](https://github.com/hyperium/hyper/issues/3896).
+    #[cfg(feature = "http2")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn http2_connect_detect_close() {
         // Regression test for failure to fully close connections when using HTTP2 CONNECT
@@ -3627,6 +3633,7 @@ mod conn {
             .expect("tx dropped without sending");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_keep_alive_detects_unresponsive_server() {
         let (client_io, server_io, _) = setup_duplex_test_server();
@@ -3662,6 +3669,7 @@ mod conn {
         conn.await.expect_err("conn should time out");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_keep_alive_not_while_idle() {
         // This tests that not setting `http2_keep_alive_while_idle(true)`
@@ -3700,6 +3708,7 @@ mod conn {
             .expect("client should be open");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_keep_alive_closes_open_streams() {
         let (client_io, server_io, _addr) = setup_duplex_test_server();
@@ -3745,6 +3754,7 @@ mod conn {
         );
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_keep_alive_with_responsive_server() {
         // Test that a responsive server works just when client keep
@@ -3804,6 +3814,7 @@ mod conn {
             .expect("client should be open");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_responds_before_consuming_request_body_no_trailers() {
         // Test that a early-response from server works correctly (request body wasn't fully
@@ -3854,6 +3865,7 @@ mod conn {
         assert!(trailers.is_none());
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_responds_before_consuming_request_body_with_trailers() {
         // Test that a early-response from server works correctly (request body wasn't fully
@@ -3944,6 +3956,7 @@ mod conn {
         assert_eq!(trailers.get("grpc").unwrap(), "0");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_max_local_error_reset_streams() {
         // Oversized response fields can be rejected with a local stream error:
@@ -4031,6 +4044,179 @@ mod conn {
         .expect("local reset limit test should complete");
     }
 
+    #[cfg(feature = "http2")]
+    #[tokio::test]
+    async fn http2_pending_open_request_resolved_on_conn_error() {
+        const LAST: u32 = u32::MAX >> 1;
+        // (first stream, shut down while the first request is in flight, second request served)
+        let cases = [
+            // Graceful shutdown refuses the parked request with GOAWAY.
+            (1, true, false),
+            // Taking the last stream id fails the re-check, yet the stream is valid.
+            (LAST - 2, false, true),
+        ];
+        for (first, shutdown, served) in cases {
+            let (client_io, server_io, _) = setup_duplex_test_server();
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            let (got, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+            let handled = Arc::new(AtomicUsize::new(0));
+            let server = tokio::spawn({
+                let (got, release, handled) = (got.clone(), release.clone(), handled.clone());
+                async move {
+                    let service = hyper::service::service_fn(move |_request| {
+                        let release = release.clone();
+                        handled.fetch_add(1, Ordering::Relaxed);
+                        got.notify_one();
+                        async move {
+                            if shutdown {
+                                release.notified().await;
+                            }
+                            Ok::<_, std::convert::Infallible>(Response::new(Empty::<Bytes>::new()))
+                        }
+                    });
+                    let mut conn = hyper::server::conn::http2::Builder::new(TokioExecutor)
+                        .max_concurrent_streams(1)
+                        .serve_connection(TokioIo::new(server_io), service);
+                    tokio::select! {
+                        _ = &mut conn => {}
+                        Ok(()) = shutdown_rx => {
+                            Pin::new(&mut conn).graceful_shutdown();
+                            let _ = conn.await;
+                        }
+                    }
+                }
+            });
+
+            let options = Http2Options::builder()
+                .initial_max_send_streams(1)
+                .initial_stream_id(first)
+                .build();
+            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .options(options)
+                .handshake(client_io)
+                .await
+                .unwrap();
+            let req = || {
+                Request::get("http://localhost/")
+                    .body(Empty::<Bytes>::new())
+                    .unwrap()
+            };
+
+            // Queue both before dispatch runs, so the second parks as pending open.
+            let res1 = client.try_send_request(req());
+            let res2 = client.try_send_request(req());
+            tokio::spawn(conn);
+
+            if shutdown {
+                got.notified().await;
+                shutdown_tx.send(()).unwrap();
+                release.notify_one();
+            }
+            assert_eq!(res1.await.unwrap().status(), StatusCode::OK);
+            match res2.await {
+                Ok(res) if served => assert_eq!(res.status(), StatusCode::OK),
+                Err(err) if !served => {
+                    let err = err.into_error();
+                    let cause = err
+                        .source()
+                        .and_then(|cause| cause.downcast_ref::<::http2::Error>())
+                        .unwrap_or_else(|| panic!("expected an h2 cause, got {err:?}"));
+                    assert!(cause.is_go_away() && cause.is_remote());
+                }
+                res => panic!("unexpected second response: {res:?}"),
+            }
+
+            drop(client);
+            server.await.unwrap();
+            assert_eq!(handled.load(Ordering::Relaxed), if served { 2 } else { 1 });
+        }
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
+    async fn http2_pending_open_request_served_while_draining() {
+        fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
+            let len = (payload.len() as u32).to_be_bytes();
+            let mut frame = vec![len[1], len[2], len[3], kind, flags];
+            frame.extend_from_slice(&stream.to_be_bytes());
+            frame.extend_from_slice(payload);
+            frame
+        }
+
+        // `:status: 200` (HPACK static index 8) with END_STREAM | END_HEADERS.
+        fn ok(stream: u32) -> Vec<u8> {
+            frame(1, 0x5, stream, &[0x88])
+        }
+
+        // Hyper's graceful shutdown follows GOAWAY(MAX) with a final GOAWAY one
+        // PING later, so a raw peer stands in for a draining proxy that keeps
+        // serving streams opened after GOAWAY(MAX).
+        let (client_io, server_io, _) = setup_duplex_test_server();
+        let server = tokio::spawn(async move {
+            let (mut rd, mut wr) = tokio::io::split(server_io);
+            let mut preface = [0; 24];
+            rd.read_exact(&mut preface).await.unwrap();
+            // SETTINGS_MAX_CONCURRENT_STREAMS = 1
+            wr.write_all(&frame(4, 0, 0, &[0, 3, 0, 0, 0, 1]))
+                .await
+                .unwrap();
+
+            let (mut opened, mut reset) = (Vec::new(), false);
+            let mut head = [0; 9];
+            while rd.read_exact(&mut head).await.is_ok() {
+                let len = u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize;
+                let stream = u32::from_be_bytes([head[5], head[6], head[7], head[8]]);
+                let mut payload = vec![0; len];
+                rd.read_exact(&mut payload).await.unwrap();
+                let out = match (head[3], head[4] & 1) {
+                    (4, 0) => frame(4, 1, 0, &[]),
+                    (6, 0) => frame(6, 1, 0, &payload),
+                    (1, _) => {
+                        opened.push(stream);
+                        let mut out = ok(stream);
+                        if stream == 1 {
+                            // GOAWAY(MAX, NO_ERROR)
+                            out.extend(frame(7, 0, 0, &[0x7f, 0xff, 0xff, 0xff, 0, 0, 0, 0]));
+                        }
+                        out
+                    }
+                    (3, _) => {
+                        reset = true;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                wr.write_all(&out).await.unwrap();
+            }
+            (opened, reset)
+        });
+
+        let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+            .options(Http2Options::builder().initial_max_send_streams(1).build())
+            .handshake(client_io)
+            .await
+            .unwrap();
+        let req = || {
+            Request::get("http://localhost/")
+                .body(Empty::<Bytes>::new())
+                .unwrap()
+        };
+
+        // Queue both before dispatch runs, so the second parks as pending open.
+        let res1 = client.try_send_request(req());
+        let res2 = client.try_send_request(req());
+        tokio::spawn(conn);
+
+        assert_eq!(res1.await.unwrap().status(), StatusCode::OK);
+        assert_eq!(res2.await.unwrap().status(), StatusCode::OK);
+
+        drop(client);
+        let (opened, reset) = server.await.unwrap();
+        assert_eq!(opened, [1, 3]);
+        assert!(!reset, "pending-open stream was reset");
+    }
+
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn h2_connect() {
         let (client_io, server_io, _) = setup_duplex_test_server();
@@ -4086,6 +4272,7 @@ mod conn {
         upgraded.shutdown().await.unwrap();
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn h2_connect_rejected() {
         let (client_io, server_io, _) = setup_duplex_test_server();
@@ -4168,6 +4355,7 @@ mod conn {
         assert!(error.is_user());
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_preface_ping() {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -4212,6 +4400,7 @@ mod conn {
         .expect("test timed out");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_keep_alive_counts_any_read() {
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -4289,11 +4478,16 @@ mod conn {
         .expect("test timed out");
     }
 
+    #[cfg(feature = "http2")]
     const FRAME_HEADERS: u8 = 0x1;
+    #[cfg(feature = "http2")]
     const FRAME_SETTINGS: u8 = 0x4;
+    #[cfg(feature = "http2")]
     const FRAME_PING: u8 = 0x6;
+    #[cfg(feature = "http2")]
     const FRAME_GOAWAY: u8 = 0x7;
 
+    #[cfg(feature = "http2")]
     /// Reads the client preface and acknowledges the client SETTINGS.
     async fn accept_h2_preface<R, W>(rd: &mut R, wr: &mut W)
     where
@@ -4306,6 +4500,7 @@ mod conn {
         write_frame(wr, FRAME_SETTINGS, 0x1, 0, &[]).await;
     }
 
+    #[cfg(feature = "http2")]
     /// Reads one frame as `(type, flags, stream id, payload)`.
     async fn read_frame<R>(rd: &mut R) -> (u8, u8, u32, Vec<u8>)
     where
@@ -4320,6 +4515,7 @@ mod conn {
         (head[3], head[4], stream_id, payload)
     }
 
+    #[cfg(feature = "http2")]
     async fn write_frame<W>(wr: &mut W, kind: u8, flags: u8, stream_id: u32, payload: &[u8])
     where
         W: tokio::io::AsyncWrite + Unpin,
@@ -4484,6 +4680,7 @@ mod conn {
     }
 
     // https://github.com/hyperium/hyper/issues/4040
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn h2_pipe_task_cancelled_on_response_future_drop() {
         let (client_io, server_io, _) = setup_duplex_test_server();
@@ -4532,6 +4729,7 @@ mod conn {
     // filled the connection window will pin the remaining byte(s), and no
     // second stream can make progress when talking to a peer that only emits
     // `WINDOW_UPDATE` after its receive window is fully exhausted.
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn h2_idle_stream_does_not_pin_connection_window() {
         use std::sync::{Arc, Mutex};
