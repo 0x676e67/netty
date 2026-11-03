@@ -359,12 +359,6 @@ impl Error {
     }
 
     #[inline]
-    #[cfg(any(feature = "http2", feature = "http3"))]
-    pub(super) fn new_user_invalid_connect() -> Error {
-        Error::new_user(User::InvalidConnectWithBody)
-    }
-
-    #[inline]
     pub(super) fn new_shutdown(cause: std::io::Error) -> Error {
         Error::new(Kind::Shutdown).with(cause)
     }
@@ -386,11 +380,6 @@ impl Error {
     #[cfg(feature = "http3")]
     pub(super) fn from_shared(cause: std::sync::Arc<Error>) -> Error {
         Error::new(cause.inner.kind).with(cause)
-    }
-
-    #[cfg(any(feature = "http2", feature = "http3"))]
-    pub(super) fn new_user_invalid_request<E: Into<Cause>>(cause: E) -> Error {
-        Error::new_user(User::InvalidRequest).with(cause)
     }
 
     /// An HTTP/3 protocol or QUIC transport error.
@@ -444,6 +433,18 @@ impl Error {
             Kind::User(User::ManualUpgrade) => "upgrade expected but low level API in use",
             Kind::User(User::DispatchGone) => "dispatch task is gone",
         }
+    }
+}
+
+#[cfg(any(feature = "http2", feature = "http3"))]
+impl Error {
+    #[inline]
+    pub(super) fn new_user_invalid_connect() -> Error {
+        Error::new_user(User::InvalidConnectWithBody)
+    }
+
+    pub(super) fn new_user_invalid_request<E: Into<Cause>>(cause: E) -> Error {
+        Error::new_user(User::InvalidRequest).with(cause)
     }
 }
 
