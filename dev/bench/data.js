@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793590269274,
+  "lastUpdate": 1793677715775,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -16199,6 +16199,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4384026,
             "range": "± 45430.07",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6e53746abc632056e3a8e518e10e26f6b86a21e6",
+          "message": "feat(http2)!: make HTTP/2 an optional default feature (#193)\n\n* feat(http2): make HTTP/2 an optional default feature\n\n* refactor(http2): group feature-gated imports\n\n* style(http2): place inline before feature cfg attributes\n\n* fix(deps): enable tokio sync explicitly\n\n* test(http2): run HTTP/1 and tunnel tests without the http2 feature\n\n* refactor(http2): move SendWhen into the HTTP/2 client\n\n* refactor(masque): attach the HTTP/2 stream reset outside UdpTunnel::new\n\n* refactor(http2): group HTTP/2 and HTTP/3 header rules under one cfg\n\n* refactor(rt): gate bounds on the HTTP/2 or HTTP/3 feature",
+          "timestamp": "2026-11-03T11:45:44+08:00",
+          "tree_id": "b94f6db41dd1552c7106b088c58a68f3b723605d",
+          "url": "https://github.com/0x676e67/netty/commit/6e53746abc632056e3a8e518e10e26f6b86a21e6"
+        },
+        "date": 1793677714727,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 139713,
+            "range": "± 2398.25",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 7504243,
+            "range": "± 351411.53",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 21513,
+            "range": "± 499.70",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 23246,
+            "range": "± 480.82",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 32820,
+            "range": "± 1135.38",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 102737,
+            "range": "± 1736.19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 41000083,
+            "range": "± 18930.68",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 77707,
+            "range": "± 1708.91",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 31855016,
+            "range": "± 8465380.77",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 33883542,
+            "range": "± 8157309.24",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 7509727,
+            "range": "± 94073.66",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 91601087,
+            "range": "± 17433692.54",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 51499448,
+            "range": "± 734629.62",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 5100050,
+            "range": "± 209181.55",
             "unit": "ns/iter"
           }
         ]
