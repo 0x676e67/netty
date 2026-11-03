@@ -15,9 +15,12 @@ use std::{
 use bytes::Buf;
 use http_body::Body;
 use http2::SendStream;
-pub use http2::frame::{
-    Priorities, PrioritiesBuilder, Priority, PseudoId, PseudoOrder, Setting, SettingId,
-    SettingsOrder, SettingsOrderBuilder, StreamDependency, StreamId,
+pub use http2::{
+    ext::{HeadersDependency, HeadersPriority},
+    frame::{
+        Priorities, PrioritiesBuilder, Priority, PseudoId, PseudoOrder, Setting, SettingId,
+        SettingsOrder, SettingsOrderBuilder, StreamDependency, StreamId,
+    },
 };
 use pin_project_lite::pin_project;
 
@@ -373,8 +376,8 @@ pub struct Http2Options {
     /// The HTTP/2 pseudo-header field order for outgoing HEADERS frames.
     pub headers_pseudo_order: Option<PseudoOrder>,
 
-    /// The stream dependency for the outgoing HEADERS frame.
-    pub headers_stream_dependency: Option<StreamDependency>,
+    /// The default priority fields of outgoing request HEADERS frames.
+    pub headers_priority: Option<HeadersPriority>,
 
     /// The order of settings parameters in the initial SETTINGS frame.
     pub settings_order: Option<SettingsOrder>,
@@ -672,18 +675,22 @@ impl Http2OptionsBuilder {
         self
     }
 
-    /// Sets the stream dependency and weight for the outgoing HEADERS frame.
+    /// Sets the default priority fields of outgoing request HEADERS frames.
     ///
-    /// This configures the priority of the stream by specifying its dependency and weight,
-    /// as defined by the HTTP/2 priority mechanism. This can be used to influence how the
-    /// server allocates resources to this stream relative to others.
+    /// A request carrying its own [`HeadersPriority`] extension replaces this default. The
+    /// handshake fails if a [`HeadersDependency::Declared`] parent is missing from
+    /// [`priorities`](Self::priorities) or could be a later request's own stream.
+    ///
+    /// These priority fields are deprecated by [RFC 9113 §5.3.2].
+    ///
+    /// [RFC 9113 §5.3.2]: https://www.rfc-editor.org/rfc/rfc9113.html#section-5.3.2
     #[inline]
-    pub fn headers_stream_dependency<T>(mut self, stream_dependency: T) -> Self
+    pub fn headers_priority<T>(mut self, priority: T) -> Self
     where
-        T: Into<Option<StreamDependency>>,
+        T: Into<Option<HeadersPriority>>,
     {
-        if let Some(stream_dependency) = stream_dependency.into() {
-            self.opts.headers_stream_dependency = Some(stream_dependency);
+        if let Some(priority) = priority.into() {
+            self.opts.headers_priority = Some(priority);
         }
         self
     }
@@ -790,7 +797,7 @@ impl Default for Http2Options {
             no_rfc7540_priorities: None,
             settings_order: None,
             headers_pseudo_order: None,
-            headers_stream_dependency: None,
+            headers_priority: None,
             priorities: None,
         }
     }

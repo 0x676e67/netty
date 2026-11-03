@@ -4402,6 +4402,59 @@ mod conn {
 
     #[cfg(feature = "http2")]
     #[tokio::test]
+    async fn http2_headers_priority() {
+        use netty::http2::{HeadersDependency, HeadersPriority};
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            // A parent missing from the declared PRIORITY frames fails the handshake.
+            let (client_io, _server_io, _) = setup_duplex_test_server();
+            let undeclared = HeadersPriority::new(HeadersDependency::Declared(3.into()), 0, false);
+            let handshake = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .options(Http2Options::builder().headers_priority(undeclared).build())
+                .handshake::<_, Empty<Bytes>>(TokioIo::new(TokioIo::new(client_io)))
+                .await;
+            assert!(handshake.is_err(), "undeclared parent");
+
+            let (client_io, server_io, _) = setup_duplex_test_server();
+            let server = tokio::spawn(async move {
+                let (mut rd, mut wr) = tokio::io::split(server_io);
+                accept_h2_preface(&mut rd, &mut wr).await;
+
+                let (flags, payload) = loop {
+                    let (kind, flags, _, payload) = read_frame(&mut rd).await;
+                    if kind == FRAME_HEADERS {
+                        break (flags, payload);
+                    }
+                };
+                // PRIORITY flag, then an exclusive dependency on stream 0 and the weight.
+                assert_eq!(flags & 0x20, 0x20);
+                assert_eq!(payload[..5], [0x80, 0, 0, 0, 219]);
+
+                // `:status: 200` from the HPACK static table, ending the stream.
+                write_frame(&mut wr, FRAME_HEADERS, 0x5, 1, &[0x88]).await;
+            });
+
+            let root = HeadersPriority::new(HeadersDependency::Root, 219, true);
+            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .options(Http2Options::builder().headers_priority(root).build())
+                .handshake(TokioIo::new(TokioIo::new(client_io)))
+                .await
+                .expect("http handshake");
+            tokio::spawn(conn);
+
+            let res = client
+                .try_send_request(http::Request::new(Empty::<Bytes>::new()))
+                .await
+                .expect("request");
+            assert_eq!(res.status(), StatusCode::OK);
+            server.await.expect("server");
+        })
+        .await
+        .expect("test timed out");
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
     async fn http2_keep_alive_counts_any_read() {
         tokio::time::timeout(Duration::from_secs(10), async {
             let (client_io, server_io, _) = setup_duplex_test_server();
