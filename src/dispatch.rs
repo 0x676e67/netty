@@ -1,14 +1,6 @@
 use std::task::{Context, Poll};
 
 use tokio::sync::{mpsc, oneshot};
-#[cfg(feature = "http2")]
-use {
-    super::{body::Incoming, proto::http2::client::ResponseFutMap},
-    http::{Request, Response},
-    http_body::Body,
-    pin_project_lite::pin_project,
-    std::{future::Future, pin::Pin},
-};
 
 use super::Error;
 
@@ -309,62 +301,5 @@ impl<T> TrySendError<T> {
     #[inline]
     pub fn error(&self) -> &Error {
         &self.error
-    }
-}
-
-#[cfg(feature = "http2")]
-pin_project! {
-    /// Drives an HTTP/2 response future and delivers its result through the callback.
-    /// Resets the request stream if its caller cancels while the response is pending.
-    pub(crate) struct SendWhen<B, E>
-    where
-        B: Body,
-        B: 'static,
-    {
-        #[pin]
-        pub(crate) when: ResponseFutMap<B, E>,
-        #[pin]
-        pub(crate) call_back: Option<Callback<Request<B>, Response<Incoming>>>,
-    }
-}
-
-#[cfg(feature = "http2")]
-impl<B, E> Future for SendWhen<B, E>
-where
-    B: Body + 'static,
-    E: crate::rt::bounds::Http2UpgradedExec<B::Data>,
-{
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.project();
-        let mut call_back = this.call_back.take().expect("polled after complete");
-
-        match Pin::new(&mut this.when).poll(cx) {
-            Poll::Ready(Ok(res)) => {
-                call_back.send(Ok(res));
-                Poll::Ready(())
-            }
-            Poll::Pending => {
-                // check if the callback is canceled
-                match call_back.poll_canceled(cx) {
-                    Poll::Ready(v) => v,
-                    Poll::Pending => {
-                        // Move call_back back to struct before return
-                        this.call_back.set(Some(call_back));
-                        return Poll::Pending;
-                    }
-                };
-                trace!("send_when canceled");
-                // Tell pipe_task to reset the h2 stream so that
-                // RST_STREAM is sent and flow-control capacity freed.
-                this.when.as_mut().cancel();
-                Poll::Ready(())
-            }
-            Poll::Ready(Err((error, message))) => {
-                call_back.send(Err(TrySendError { error, message }));
-                Poll::Ready(())
-            }
-        }
     }
 }
