@@ -1,10 +1,5 @@
 //! UDP payloads over a CONNECT-UDP request stream.
 
-#[cfg(feature = "http2")]
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 use std::{
     fmt, io, mem,
     pin::Pin,
@@ -12,13 +7,18 @@ use std::{
 };
 
 use bytes::{Buf, Bytes, BytesMut};
-#[cfg(feature = "http2")]
-use http2::Reason;
 use tokio::io::{AsyncWrite, ReadHalf, WriteHalf};
+#[cfg(feature = "http2")]
+use {
+    crate::proto::http2::upgrade::StreamReset,
+    http2::Reason,
+    std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use super::{MAX_UDP_PAYLOAD, MasqueError, SendError, capsule};
-#[cfg(feature = "http2")]
-use crate::proto::http2::upgrade::StreamReset;
 use crate::{
     conn::http3::datagram::{Receiver, SendErrorKind, Sender},
     upgrade::Upgraded,

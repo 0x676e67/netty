@@ -1,18 +1,16 @@
 use std::task::{Context, Poll};
-#[cfg(feature = "http2")]
-use std::{future::Future, pin::Pin};
 
-#[cfg(feature = "http2")]
-use http::{Request, Response};
-#[cfg(feature = "http2")]
-use http_body::Body;
-#[cfg(feature = "http2")]
-use pin_project_lite::pin_project;
 use tokio::sync::{mpsc, oneshot};
+#[cfg(feature = "http2")]
+use {
+    super::{body::Incoming, proto::http2::client::ResponseFutMap},
+    http::{Request, Response},
+    http_body::Body,
+    pin_project_lite::pin_project,
+    std::{future::Future, pin::Pin},
+};
 
 use super::Error;
-#[cfg(feature = "http2")]
-use super::{body::Incoming, proto::http2::client::ResponseFutMap};
 
 type RetryPromise<T, U> = oneshot::Receiver<Result<U, TrySendError<T>>>;
 
