@@ -186,12 +186,7 @@ impl UdpTunnel {
         let (control, sender, receiver) = crate::conn::http3::datagram::on(response)
             .ok_or(MasqueError::InvalidResponse)?
             .into_parts();
-        Ok(UdpTunnel::new(
-            control,
-            Some((sender, receiver)),
-            #[cfg(feature = "http2")]
-            None,
-        ))
+        Ok(UdpTunnel::new(control, Some((sender, receiver))))
     }
 
     /// Opens the tunnel from this crate's HTTP/2 client's successful response to
@@ -219,7 +214,7 @@ impl UdpTunnel {
             .take_fulfilled()
             .ok_or(MasqueError::InvalidResponse)?;
         response.extensions_mut().remove::<StreamReset>();
-        Ok(UdpTunnel::new(control, None, Some(reset)))
+        Ok(UdpTunnel::new(control, None).with_reset(reset))
     }
 }
 

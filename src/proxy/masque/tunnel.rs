@@ -116,20 +116,9 @@ enum RecvError {
 // ===== impl UdpTunnel =====
 
 impl UdpTunnel {
-    pub(super) fn new(
-        control: Upgraded,
-        native: Option<(Sender, Receiver)>,
-        #[cfg(feature = "http2")] reset: Option<StreamReset>,
-    ) -> Self {
+    pub(super) fn new(control: Upgraded, native: Option<(Sender, Receiver)>) -> Self {
         let (read, write) = tokio::io::split(control);
         let (sender, receiver) = native.unzip();
-        #[cfg(feature = "http2")]
-        let http2 = reset.map(|reset| {
-            Arc::new(Http2Stream {
-                reset,
-                closed: AtomicBool::new(false),
-            })
-        });
         UdpTunnel {
             sender: UdpSender {
                 control: write,
@@ -140,7 +129,7 @@ impl UdpTunnel {
                 write_closed: false,
                 write_error: None,
                 #[cfg(feature = "http2")]
-                http2: http2.clone(),
+                http2: None,
             },
             receiver: UdpReceiver {
                 control: read,
@@ -151,9 +140,21 @@ impl UdpTunnel {
                 error: None,
                 stream_first: false,
                 #[cfg(feature = "http2")]
-                http2,
+                http2: None,
             },
         }
+    }
+
+    /// Shares the HTTP/2 request stream's reset with both halves.
+    #[cfg(feature = "http2")]
+    pub(super) fn with_reset(mut self, reset: StreamReset) -> Self {
+        let http2 = Arc::new(Http2Stream {
+            reset,
+            closed: AtomicBool::new(false),
+        });
+        self.receiver.http2 = Some(http2.clone());
+        self.sender.http2 = Some(http2);
+        self
     }
 
     /// Splits the tunnel into halves that two tasks can own. Unlike
@@ -573,13 +574,7 @@ mod tests {
         } else {
             Upgraded::new(client, Bytes::new())
         };
-        let tunnel = UdpTunnel::new(
-            control,
-            None,
-            #[cfg(feature = "http2")]
-            None,
-        );
-        (tunnel, proxy)
+        (UdpTunnel::new(control, None), proxy)
     }
 
     async fn bounded<F: Future>(future: F) -> F::Output {
@@ -747,12 +742,7 @@ mod tests {
         }
 
         // An I/O error comes back with its kind and message, every time.
-        let mut tunnel = UdpTunnel::new(
-            Upgraded::new(Failing, Bytes::new()),
-            None,
-            #[cfg(feature = "http2")]
-            None,
-        );
+        let mut tunnel = UdpTunnel::new(Upgraded::new(Failing, Bytes::new()), None);
         for _ in 0..2 {
             let result = poll_fn(|cx| tunnel.poll_recv(cx)).await;
             let Err(MasqueError::Io(err)) = result else {
