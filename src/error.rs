@@ -60,6 +60,7 @@ pub(super) enum Kind {
     /// Error calling AsyncWrite::shutdown()
     Shutdown,
     /// A general error from h2.
+    #[cfg(feature = "http2")]
     Http2,
     #[cfg(feature = "http3")]
     Http3,
@@ -90,12 +91,14 @@ pub(crate) enum Header {
 #[cfg_attr(feature = "http3", derive(Clone, Copy))]
 pub(super) enum User {
     /// A request the protocol or peer settings do not allow.
+    #[cfg(any(feature = "http2", feature = "http3"))]
     InvalidRequest,
     /// Error calling user's Body::poll_data().
     Body,
     /// The user aborted writing of the outgoing body.
     BodyWriteAborted,
     /// User tried to send a connect request with a nonzero body
+    #[cfg(any(feature = "http2", feature = "http3"))]
     InvalidConnectWithBody,
     /// Error from future of user's Service.
     Service,
@@ -196,7 +199,7 @@ impl Error {
     /// Returns true if the error was caused by a timeout.
     ///
     /// For HTTP/2 clients, this includes the keep-alive timeout (see
-    /// [`keep_alive_timeout`](crate::http2::Http2OptionsBuilder::keep_alive_timeout)).
+    /// `http2::Http2OptionsBuilder::keep_alive_timeout`).
     /// For HTTP/3, this also includes QUIC connection timeouts.
     #[inline]
     pub fn is_timeout(&self) -> bool {
@@ -271,6 +274,7 @@ impl Error {
         None
     }
 
+    #[cfg(feature = "http2")]
     pub(super) fn h2_reason(&self) -> http2::Reason {
         // Find an http2::Reason somewhere in the cause stack, if it exists,
         // otherwise assume an INTERNAL_ERROR.
@@ -354,6 +358,7 @@ impl Error {
         Error::new_user(User::Body).with(cause)
     }
 
+    #[cfg(any(feature = "http2", feature = "http3"))]
     #[inline]
     pub(super) fn new_user_invalid_connect() -> Error {
         Error::new_user(User::InvalidConnectWithBody)
@@ -369,6 +374,7 @@ impl Error {
         Error::new(Kind::User(User::DispatchGone))
     }
 
+    #[cfg(feature = "http2")]
     pub(super) fn new_h2(cause: ::http2::Error) -> Error {
         if cause.is_io() {
             Error::new_io(cause.into_io().expect("http2::Error::is_io"))
@@ -382,6 +388,7 @@ impl Error {
         Error::new(cause.inner.kind).with(cause)
     }
 
+    #[cfg(any(feature = "http2", feature = "http3"))]
     pub(super) fn new_user_invalid_request<E: Into<Cause>>(cause: E) -> Error {
         Error::new_user(User::InvalidRequest).with(cause)
     }
@@ -418,14 +425,17 @@ impl Error {
             Kind::Body => "error reading a body from connection",
             Kind::BodyWrite => "error writing a body to connection",
             Kind::Shutdown => "error shutting down connection",
+            #[cfg(feature = "http2")]
             Kind::Http2 => "http2 error",
             #[cfg(feature = "http3")]
             Kind::Http3 => "http3 error",
             Kind::Io => "connection error",
 
+            #[cfg(any(feature = "http2", feature = "http3"))]
             Kind::User(User::InvalidRequest) => "invalid request",
             Kind::User(User::Body) => "error from user's Body stream",
             Kind::User(User::BodyWriteAborted) => "user body write aborted",
+            #[cfg(any(feature = "http2", feature = "http3"))]
             Kind::User(User::InvalidConnectWithBody) => {
                 "user sent CONNECT request with non-zero body"
             }
@@ -566,18 +576,21 @@ mod tests {
         assert_eq!(mem::size_of::<Error>(), mem::size_of::<usize>());
     }
 
+    #[cfg(feature = "http2")]
     #[test]
     fn h2_reason_unknown() {
         let closed = Error::new_closed();
         assert_eq!(closed.h2_reason(), http2::Reason::INTERNAL_ERROR);
     }
 
+    #[cfg(feature = "http2")]
     #[test]
     fn h2_reason_one_level() {
         let body_err = Error::new_user_body(http2::Error::from(http2::Reason::ENHANCE_YOUR_CALM));
         assert_eq!(body_err.h2_reason(), http2::Reason::ENHANCE_YOUR_CALM);
     }
 
+    #[cfg(feature = "http2")]
     #[test]
     fn h2_reason_nested() {
         let recvd = Error::new_h2(http2::Error::from(http2::Reason::HTTP_1_1_REQUIRED));

@@ -1,15 +1,18 @@
-use std::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::task::{Context, Poll};
+#[cfg(feature = "http2")]
+use std::{future::Future, pin::Pin};
 
+#[cfg(feature = "http2")]
 use http::{Request, Response};
+#[cfg(feature = "http2")]
 use http_body::Body;
+#[cfg(feature = "http2")]
 use pin_project_lite::pin_project;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{Error, body::Incoming, proto::http2::client::ResponseFutMap};
+use super::Error;
+#[cfg(feature = "http2")]
+use super::{body::Incoming, proto::http2::client::ResponseFutMap};
 
 type RetryPromise<T, U> = oneshot::Receiver<Result<U, TrySendError<T>>>;
 
@@ -64,6 +67,7 @@ pub(crate) struct Sender<T, U> {
 ///
 /// Cannot poll the Giver, but can still use it to determine if the Receiver
 /// has been dropped. However, this version can be cloned.
+#[cfg(feature = "http2")]
 pub(crate) struct UnboundedSender<T, U> {
     /// Only used for `is_closed`, since mpsc::UnboundedSender cannot be checked.
     giver: want::SharedGiver,
@@ -99,6 +103,7 @@ impl<T, U> Sender<T, U> {
             .map_err(|mut e| (e.0).0.take().expect("envelope not dropped").0)
     }
 
+    #[cfg(feature = "http2")]
     #[inline]
     pub(crate) fn unbound(self) -> UnboundedSender<T, U> {
         UnboundedSender {
@@ -108,6 +113,7 @@ impl<T, U> Sender<T, U> {
     }
 }
 
+#[cfg(feature = "http2")]
 impl<T, U> UnboundedSender<T, U> {
     #[inline]
     pub(crate) fn is_ready(&self) -> bool {
@@ -128,6 +134,7 @@ impl<T, U> UnboundedSender<T, U> {
     }
 }
 
+#[cfg(feature = "http2")]
 impl<T, U> Clone for UnboundedSender<T, U> {
     #[inline]
     fn clone(&self) -> Self {
@@ -188,6 +195,7 @@ impl<T, U> Drop for Receiver<T, U> {
 /// with a cancellation error.
 pub(crate) struct Envelope<T, U>(Option<(T, Callback<T, U>)>);
 
+#[cfg(feature = "http2")]
 impl<T, U> Envelope<T, U> {
     #[inline]
     pub(crate) fn new(message: T, callback: Callback<T, U>) -> Self {
@@ -254,6 +262,7 @@ impl<T, U> Callback<T, U> {
         Self { tx: Some(tx) }
     }
 
+    #[cfg(feature = "http2")]
     #[inline]
     pub(crate) fn is_canceled(&self) -> bool {
         self.tx.as_ref().expect(Self::MISSING_SENDER).is_closed()
@@ -305,6 +314,7 @@ impl<T> TrySendError<T> {
     }
 }
 
+#[cfg(feature = "http2")]
 pin_project! {
     /// Drives an HTTP/2 response future and delivers its result through the callback.
     /// Resets the request stream if its caller cancels while the response is pending.
@@ -320,6 +330,7 @@ pin_project! {
     }
 }
 
+#[cfg(feature = "http2")]
 impl<B, E> Future for SendWhen<B, E>
 where
     B: Body + 'static,

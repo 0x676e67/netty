@@ -1,16 +1,19 @@
 use bytes::BytesMut;
 use http::{
-    HeaderMap, Method, StatusCode,
-    header::{
-        CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue, TE, TRANSFER_ENCODING,
-        UPGRADE, ValueIter,
-    },
+    HeaderMap,
+    header::{CONTENT_LENGTH, HeaderValue, ValueIter},
+};
+#[cfg(any(feature = "http2", feature = "http3"))]
+use http::{
+    Method, StatusCode,
+    header::{CONNECTION, CONTENT_TYPE, HeaderName, TE, TRANSFER_ENCODING, UPGRADE},
 };
 
 // List of connection headers from RFC 9110 Section 7.6.1
 //
 // TE headers are allowed in HTTP/2 or HTTP/3 requests as long as the value is "trailers", so
 // they're tested separately.
+#[cfg(any(feature = "http2", feature = "http3"))]
 static CONNECTION_HEADERS: [HeaderName; 4] = [
     HeaderName::from_static("keep-alive"),
     HeaderName::from_static("proxy-connection"),
@@ -18,6 +21,7 @@ static CONNECTION_HEADERS: [HeaderName; 4] = [
     UPGRADE,
 ];
 
+#[cfg(any(feature = "http2", feature = "http3"))]
 pub(super) fn strip_connection_headers(headers: &mut HeaderMap, is_request: bool) {
     for header in &CONNECTION_HEADERS {
         if headers.remove(header).is_some() {
@@ -94,6 +98,7 @@ fn connection_has(value: &HeaderValue, needle: &str) -> bool {
 
 /// Whether a success response breaks the Capsule Protocol, which makes it malformed
 /// ([RFC 9297 §3.2](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2)).
+#[cfg(any(feature = "http2", feature = "http3"))]
 pub(crate) fn breaks_capsule_protocol(status: StatusCode, headers: &HeaderMap) -> bool {
     matches!(status.as_u16(), 204..=206)
         || [CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING]
@@ -157,6 +162,7 @@ fn from_digits(bytes: &[u8]) -> Option<u64> {
     Some(result)
 }
 
+#[cfg(any(feature = "http2", feature = "http3"))]
 #[inline]
 pub(super) fn method_has_defined_payload_semantics(method: &Method) -> bool {
     !matches!(
@@ -165,6 +171,7 @@ pub(super) fn method_has_defined_payload_semantics(method: &Method) -> bool {
     )
 }
 
+#[cfg(any(feature = "http2", feature = "http3"))]
 #[inline]
 pub(super) fn set_content_length_if_missing(headers: &mut HeaderMap, len: u64) {
     headers

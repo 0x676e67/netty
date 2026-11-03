@@ -1,23 +1,26 @@
 //! UDP payloads over a CONNECT-UDP request stream.
 
+#[cfg(feature = "http2")]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::{
     fmt, io, mem,
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
     task::{Context, Poll, Waker, ready},
 };
 
 use bytes::{Buf, Bytes, BytesMut};
+#[cfg(feature = "http2")]
 use http2::Reason;
 use tokio::io::{AsyncWrite, ReadHalf, WriteHalf};
 
 use super::{MAX_UDP_PAYLOAD, MasqueError, SendError, capsule};
+#[cfg(feature = "http2")]
+use crate::proto::http2::upgrade::StreamReset;
 use crate::{
     conn::http3::datagram::{Receiver, SendErrorKind, Sender},
-    proto::http2::upgrade::StreamReset,
     upgrade::Upgraded,
 };
 
@@ -52,6 +55,7 @@ pub struct UdpTunnel {
 pub struct UdpSender {
     /// Declared before `control`: fields drop in order, so the last half resets the stream
     /// while its IO, which the reset needs, still lives.
+    #[cfg(feature = "http2")]
     http2: Option<Arc<Http2Stream>>,
     control: WriteHalf<Upgraded>,
     native: Option<Sender>,
@@ -75,6 +79,7 @@ pub struct UdpSender {
 /// while this side only sends, keep receiving and discard.
 pub struct UdpReceiver {
     /// Declared before `control`, as in [`UdpSender`].
+    #[cfg(feature = "http2")]
     http2: Option<Arc<Http2Stream>>,
     control: ReadHalf<Upgraded>,
     native: Option<Receiver>,
@@ -94,6 +99,7 @@ pub struct UdpReceiver {
 /// Once both halves drop before the sender's close, it resets the stream with `CANCEL`: the send
 /// task may hold a capsule that waits on the proxy's flow control, which would keep the stream
 /// open. After a close, the stream ends as usual.
+#[cfg(feature = "http2")]
 struct Http2Stream {
     reset: StreamReset,
     /// Set when a sender whose writes ended drops.
@@ -113,10 +119,11 @@ impl UdpTunnel {
     pub(super) fn new(
         control: Upgraded,
         native: Option<(Sender, Receiver)>,
-        reset: Option<StreamReset>,
+        #[cfg(feature = "http2")] reset: Option<StreamReset>,
     ) -> Self {
         let (read, write) = tokio::io::split(control);
         let (sender, receiver) = native.unzip();
+        #[cfg(feature = "http2")]
         let http2 = reset.map(|reset| {
             Arc::new(Http2Stream {
                 reset,
@@ -132,6 +139,7 @@ impl UdpTunnel {
                 closing: false,
                 write_closed: false,
                 write_error: None,
+                #[cfg(feature = "http2")]
                 http2: http2.clone(),
             },
             receiver: UdpReceiver {
@@ -142,6 +150,7 @@ impl UdpTunnel {
                 read_buf: BytesMut::new(),
                 error: None,
                 stream_first: false,
+                #[cfg(feature = "http2")]
                 http2,
             },
         }
@@ -216,9 +225,11 @@ impl UdpSender {
     /// Whether the HTTP/2 request stream is being reset, which ends sending as an abort closes
     /// the HTTP Datagrams over HTTP/3.
     fn http2_reset(&self) -> bool {
-        self.http2
-            .as_ref()
-            .is_some_and(|http2| http2.reset.is_reset())
+        #[cfg(feature = "http2")]
+        if let Some(http2) = &self.http2 {
+            return http2.reset.is_reset();
+        }
+        false
     }
 
     /// Payload limit of HTTP Datagrams, if they are usable.
@@ -356,6 +367,7 @@ impl UdpSender {
     }
 }
 
+#[cfg(feature = "http2")]
 impl Drop for UdpSender {
     fn drop(&mut self) {
         if self.write_closed
@@ -419,6 +431,7 @@ impl UdpReceiver {
                         native.abort_malformed();
                     }
                 }
+                #[cfg(feature = "http2")]
                 if let Some(http2) = &self.http2 {
                     http2.reset.reset(Reason::PROTOCOL_ERROR);
                 }
@@ -474,6 +487,7 @@ impl UdpReceiver {
     }
 }
 
+#[cfg(feature = "http2")]
 impl Drop for UdpReceiver {
     fn drop(&mut self) {
         // Nothing reads the HTTP/2 stream from here on, so its data would hold flow control.
@@ -493,6 +507,7 @@ impl fmt::Debug for UdpReceiver {
 
 // ===== impl Http2Stream =====
 
+#[cfg(feature = "http2")]
 impl Drop for Http2Stream {
     fn drop(&mut self) {
         if !*self.closed.get_mut() {
@@ -558,7 +573,13 @@ mod tests {
         } else {
             Upgraded::new(client, Bytes::new())
         };
-        (UdpTunnel::new(control, None, None), proxy)
+        let tunnel = UdpTunnel::new(
+            control,
+            None,
+            #[cfg(feature = "http2")]
+            None,
+        );
+        (tunnel, proxy)
     }
 
     async fn bounded<F: Future>(future: F) -> F::Output {
@@ -726,7 +747,12 @@ mod tests {
         }
 
         // An I/O error comes back with its kind and message, every time.
-        let mut tunnel = UdpTunnel::new(Upgraded::new(Failing, Bytes::new()), None, None);
+        let mut tunnel = UdpTunnel::new(
+            Upgraded::new(Failing, Bytes::new()),
+            None,
+            #[cfg(feature = "http2")]
+            None,
+        );
         for _ in 0..2 {
             let result = poll_fn(|cx| tunnel.poll_recv(cx)).await;
             let Err(MasqueError::Io(err)) = result else {

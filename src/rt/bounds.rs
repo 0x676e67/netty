@@ -3,11 +3,14 @@
 //! Traits in this module ease setting bounds and usually automatically
 //! implemented by implementing another trait.
 
+#[cfg(feature = "http2")]
 pub use self::h2_client::Http2ClientConnExec;
+#[cfg(feature = "http2")]
 pub(crate) use self::h2_common::Http2UpgradedExec;
 #[cfg(feature = "http3")]
 pub use self::h3_client::Http3ClientConnExec;
 
+#[cfg(feature = "http2")]
 mod h2_common {
     use crate::{proto::http2::upgrade::UpgradedSendStreamTask, rt::Executor};
 
@@ -25,6 +28,7 @@ mod h2_common {
     }
 }
 
+#[cfg(feature = "http2")]
 mod h2_client {
     use std::future::Future;
 

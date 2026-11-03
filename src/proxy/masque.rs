@@ -1,11 +1,11 @@
 //! MASQUE CONNECT-UDP clients ([RFC 9298](https://www.rfc-editor.org/rfc/rfc9298)).
 //!
 //! [`ConnectUdp`] opens a [`UdpTunnel`] to a UDP target through a proxy over HTTP/3. For other
-//! setups, build the request with [`http3_request`] or [`http2_request`] and open the tunnel from
-//! the response with [`UdpTunnel::from_http3`] or [`UdpTunnel::from_http2`]. Over HTTP/2 every
-//! payload travels as a DATAGRAM capsule
-//! ([RFC 9297 §3.5](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.5)). HTTP/1.1 Upgrade
-//! is not supported.
+//! setups, build the request with [`http3_request`] and open the tunnel from the response with
+//! [`UdpTunnel::from_http3`]; with the `http2` feature, `http2_request` and
+//! `UdpTunnel::from_http2` do the same over HTTP/2, where every payload travels as a DATAGRAM
+//! capsule ([RFC 9297 §3.5](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.5)). HTTP/1.1
+//! Upgrade is not supported.
 
 mod capsule;
 mod template;
@@ -29,14 +29,13 @@ pub use self::{
     tunnel::{UdpReceiver, UdpSender, UdpTunnel},
 };
 use super::{Tunneling, dst_host};
+#[cfg(feature = "http2")]
+use crate::proto::http2::upgrade::{CONNECT_UDP, StreamReset};
 use crate::{
     conn::http3::{SendRequest, datagram::DatagramRequest},
     error::BoxError,
     http3::Protocol,
-    proto::{
-        headers,
-        http2::upgrade::{CONNECT_UDP, StreamReset},
-    },
+    proto::headers,
 };
 
 /// Largest UDP payload carried under Context ID 0
@@ -68,6 +67,7 @@ pub fn http3_request<B: Default>(uri: Uri) -> Request<B> {
 /// an unclosed tunnel resets at once.
 ///
 /// [RFC 9298 §3.4]: https://www.rfc-editor.org/rfc/rfc9298.html#section-3.4
+#[cfg(feature = "http2")]
 pub fn http2_request<B: Default>(uri: Uri) -> Request<B> {
     let mut request = connect_request(uri);
     request
@@ -186,7 +186,12 @@ impl UdpTunnel {
         let (control, sender, receiver) = crate::conn::http3::datagram::on(response)
             .ok_or(MasqueError::InvalidResponse)?
             .into_parts();
-        Ok(UdpTunnel::new(control, Some((sender, receiver)), None))
+        Ok(UdpTunnel::new(
+            control,
+            Some((sender, receiver)),
+            #[cfg(feature = "http2")]
+            None,
+        ))
     }
 
     /// Opens the tunnel from this crate's HTTP/2 client's successful response to
@@ -202,6 +207,7 @@ impl UdpTunnel {
     ///
     /// [RFC 9298 §3.1]: https://www.rfc-editor.org/rfc/rfc9298.html#section-3.1
     /// [RFC 9297 §3.2]: https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
+    #[cfg(feature = "http2")]
     pub fn from_http2<B>(response: &mut Response<B>) -> Result<Self, MasqueError> {
         validate(response)?;
         let reset = response
