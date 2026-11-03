@@ -154,12 +154,17 @@ jobs:
       - name: Test CONNECT-UDP without MASQUE
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo test -p netty --no-default-features --test client h2_connect::h2_connect_udp_rejects_capsule_headers -- --exact
+        run: cargo test -p netty --no-default-features --features http2 --test client h2_connect::h2_connect_udp_rejects_capsule_headers -- --exact
 
       - name: Test HTTP/3 without HTTP Datagrams
         env:
           RUSTFLAGS: "-D warnings"
         run: cargo test -p netty --no-default-features --features http3 --test http3
+
+      - name: Test without HTTP/2
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo test -p netty --no-default-features --features tunnel,socks,masque
 
       - name: check --feature-powerset
         env:

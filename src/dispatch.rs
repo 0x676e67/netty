@@ -1,15 +1,8 @@
-use std::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::task::{Context, Poll};
 
-use http::{Request, Response};
-use http_body::Body;
-use pin_project_lite::pin_project;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{Error, body::Incoming, proto::http2::client::ResponseFutMap};
+use super::Error;
 
 type RetryPromise<T, U> = oneshot::Receiver<Result<U, TrySendError<T>>>;
 
@@ -64,6 +57,7 @@ pub(crate) struct Sender<T, U> {
 ///
 /// Cannot poll the Giver, but can still use it to determine if the Receiver
 /// has been dropped. However, this version can be cloned.
+#[cfg(feature = "http2")]
 pub(crate) struct UnboundedSender<T, U> {
     /// Only used for `is_closed`, since mpsc::UnboundedSender cannot be checked.
     giver: want::SharedGiver,
@@ -100,6 +94,7 @@ impl<T, U> Sender<T, U> {
     }
 
     #[inline]
+    #[cfg(feature = "http2")]
     pub(crate) fn unbound(self) -> UnboundedSender<T, U> {
         UnboundedSender {
             giver: self.giver.shared(),
@@ -108,6 +103,7 @@ impl<T, U> Sender<T, U> {
     }
 }
 
+#[cfg(feature = "http2")]
 impl<T, U> UnboundedSender<T, U> {
     #[inline]
     pub(crate) fn is_ready(&self) -> bool {
@@ -128,6 +124,7 @@ impl<T, U> UnboundedSender<T, U> {
     }
 }
 
+#[cfg(feature = "http2")]
 impl<T, U> Clone for UnboundedSender<T, U> {
     #[inline]
     fn clone(&self) -> Self {
@@ -188,6 +185,7 @@ impl<T, U> Drop for Receiver<T, U> {
 /// with a cancellation error.
 pub(crate) struct Envelope<T, U>(Option<(T, Callback<T, U>)>);
 
+#[cfg(feature = "http2")]
 impl<T, U> Envelope<T, U> {
     #[inline]
     pub(crate) fn new(message: T, callback: Callback<T, U>) -> Self {
@@ -255,6 +253,7 @@ impl<T, U> Callback<T, U> {
     }
 
     #[inline]
+    #[cfg(feature = "http2")]
     pub(crate) fn is_canceled(&self) -> bool {
         self.tx.as_ref().expect(Self::MISSING_SENDER).is_closed()
     }
@@ -302,60 +301,5 @@ impl<T> TrySendError<T> {
     #[inline]
     pub fn error(&self) -> &Error {
         &self.error
-    }
-}
-
-pin_project! {
-    /// Drives an HTTP/2 response future and delivers its result through the callback.
-    /// Resets the request stream if its caller cancels while the response is pending.
-    pub(crate) struct SendWhen<B, E>
-    where
-        B: Body,
-        B: 'static,
-    {
-        #[pin]
-        pub(crate) when: ResponseFutMap<B, E>,
-        #[pin]
-        pub(crate) call_back: Option<Callback<Request<B>, Response<Incoming>>>,
-    }
-}
-
-impl<B, E> Future for SendWhen<B, E>
-where
-    B: Body + 'static,
-    E: crate::rt::bounds::Http2UpgradedExec<B::Data>,
-{
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.project();
-        let mut call_back = this.call_back.take().expect("polled after complete");
-
-        match Pin::new(&mut this.when).poll(cx) {
-            Poll::Ready(Ok(res)) => {
-                call_back.send(Ok(res));
-                Poll::Ready(())
-            }
-            Poll::Pending => {
-                // check if the callback is canceled
-                match call_back.poll_canceled(cx) {
-                    Poll::Ready(v) => v,
-                    Poll::Pending => {
-                        // Move call_back back to struct before return
-                        this.call_back.set(Some(call_back));
-                        return Poll::Pending;
-                    }
-                };
-                trace!("send_when canceled");
-                // Tell pipe_task to reset the h2 stream so that
-                // RST_STREAM is sent and flow-control capacity freed.
-                this.when.as_mut().cancel();
-                Poll::Ready(())
-            }
-            Poll::Ready(Err((error, message))) => {
-                call_back.send(Err(TrySendError { error, message }));
-                Poll::Ready(())
-            }
-        }
     }
 }

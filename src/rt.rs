@@ -16,6 +16,7 @@
 //! By implementing these traits, you can customize how netty interacts with your chosen
 //! runtime environment. Concrete runtime adapters in this repository are test utilities only.
 
+#[cfg(any(feature = "http2", feature = "http3"))]
 pub mod bounds;
 #[cfg(feature = "http3")]
 pub mod quic;

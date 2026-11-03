@@ -40,7 +40,7 @@ use super::{
 use crate::{
     Error, Result,
     body::{self, Incoming},
-    dispatch::{self, Callback, Envelope, SendWhen, TrySendError},
+    dispatch::{self, Callback, Envelope, TrySendError},
     error::BoxError,
     ext::OnPreserveHeader,
     proto::{Dispatched, headers},
@@ -688,7 +688,62 @@ where
 }
 
 pin_project! {
-    pub(crate) struct ResponseFutMap<B, E>
+    /// Drives an HTTP/2 response future and delivers its result through the callback.
+    /// Resets the request stream if its caller cancels while the response is pending.
+    struct SendWhen<B, E>
+    where
+        B: Body,
+        B: 'static,
+    {
+        #[pin]
+        when: ResponseFutMap<B, E>,
+        #[pin]
+        call_back: Option<Callback<Request<B>, Response<Incoming>>>,
+    }
+}
+
+impl<B, E> Future for SendWhen<B, E>
+where
+    B: Body + 'static,
+    E: Http2UpgradedExec<B::Data>,
+{
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        let mut call_back = this.call_back.take().expect("polled after complete");
+
+        match Pin::new(&mut this.when).poll(cx) {
+            Poll::Ready(Ok(res)) => {
+                call_back.send(Ok(res));
+                Poll::Ready(())
+            }
+            Poll::Pending => {
+                // check if the callback is canceled
+                match call_back.poll_canceled(cx) {
+                    Poll::Ready(v) => v,
+                    Poll::Pending => {
+                        // Move call_back back to struct before return
+                        this.call_back.set(Some(call_back));
+                        return Poll::Pending;
+                    }
+                };
+                trace!("send_when canceled");
+                // Tell pipe_task to reset the h2 stream so that
+                // RST_STREAM is sent and flow-control capacity freed.
+                this.when.as_mut().cancel();
+                Poll::Ready(())
+            }
+            Poll::Ready(Err((error, message))) => {
+                call_back.send(Err(TrySendError { error, message }));
+                Poll::Ready(())
+            }
+        }
+    }
+}
+
+pin_project! {
+    struct ResponseFutMap<B, E>
     where
         B: Body,
         B: 'static,
@@ -707,7 +762,7 @@ pin_project! {
 
 impl<B: Body + 'static, E> ResponseFutMap<B, E> {
     /// Signal the pipe_task to reset the stream (e.g. on client cancellation).
-    pub(crate) fn cancel(self: Pin<&mut Self>) {
+    fn cancel(self: Pin<&mut Self>) {
         if let Some(cancel_tx) = self.project().cancel_tx.take() {
             let _ = cancel_tx.send(());
         }

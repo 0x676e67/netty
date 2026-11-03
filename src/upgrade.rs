@@ -173,7 +173,7 @@ impl OnUpgrade {
     ///
     /// Unlike polling, this never draws on tokio's cooperative budget, so it cannot miss a
     /// fulfilled upgrade in a task that has run out of it.
-    #[cfg(feature = "masque")]
+    #[cfg(all(feature = "masque", feature = "http2"))]
     pub(crate) fn take_fulfilled(self) -> Option<Upgraded> {
         self.rx?.lock().ignore_poison().try_recv().ok()?.ok()
     }
