@@ -125,12 +125,10 @@ harness = false
 [[test]]
 name = "client"
 path = "tests/client.rs"
-required-features = ["http2"]
 
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
-required-features = ["http2"]
 
 [[test]]
 name = "http3"

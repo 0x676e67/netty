@@ -3,6 +3,7 @@
 
 mod support;
 
+#[cfg(feature = "http2")]
 #[path = "client/h2_connect.rs"]
 mod h2_connect;
 
@@ -1526,10 +1527,11 @@ mod conn {
         rt::Timer,
         upgrade::OnUpgrade,
     };
+    #[cfg(feature = "http2")]
+    use netty::http2::Http2Options;
     use netty::{
         conn::{self},
         http1::Http1Options,
-        http2::Http2Options,
     };
     use support::{TokioExecutor, TokioIo, TokioTimer};
     use tokio::{
@@ -3421,6 +3423,7 @@ mod conn {
         .unwrap();
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_detect_conn_eof() {
         use futures_util::future;
@@ -3501,6 +3504,7 @@ mod conn {
             .expect_err("client should be closed");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_dispatched_response_survives_connection_drop() {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -3555,6 +3559,7 @@ mod conn {
 
     // This test can intermittently time out while waiting for the connection to close.
     // See [hyper#3896](https://github.com/hyperium/hyper/issues/3896).
+    #[cfg(feature = "http2")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn http2_connect_detect_close() {
         // Regression test for failure to fully close connections when using HTTP2 CONNECT
@@ -3628,6 +3633,7 @@ mod conn {
             .expect("tx dropped without sending");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_keep_alive_detects_unresponsive_server() {
         let (client_io, server_io, _) = setup_duplex_test_server();
@@ -3663,6 +3669,7 @@ mod conn {
         conn.await.expect_err("conn should time out");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_keep_alive_not_while_idle() {
         // This tests that not setting `http2_keep_alive_while_idle(true)`
@@ -3701,6 +3708,7 @@ mod conn {
             .expect("client should be open");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_keep_alive_closes_open_streams() {
         let (client_io, server_io, _addr) = setup_duplex_test_server();
@@ -3746,6 +3754,7 @@ mod conn {
         );
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_keep_alive_with_responsive_server() {
         // Test that a responsive server works just when client keep
@@ -3805,6 +3814,7 @@ mod conn {
             .expect("client should be open");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_responds_before_consuming_request_body_no_trailers() {
         // Test that a early-response from server works correctly (request body wasn't fully
@@ -3855,6 +3865,7 @@ mod conn {
         assert!(trailers.is_none());
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_responds_before_consuming_request_body_with_trailers() {
         // Test that a early-response from server works correctly (request body wasn't fully
@@ -3945,6 +3956,7 @@ mod conn {
         assert_eq!(trailers.get("grpc").unwrap(), "0");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_max_local_error_reset_streams() {
         // Oversized response fields can be rejected with a local stream error:
@@ -4032,6 +4044,7 @@ mod conn {
         .expect("local reset limit test should complete");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_pending_open_request_resolved_on_conn_error() {
         const LAST: u32 = u32::MAX >> 1;
@@ -4119,6 +4132,7 @@ mod conn {
         }
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_pending_open_request_served_while_draining() {
         fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
@@ -4202,6 +4216,7 @@ mod conn {
         assert!(!reset, "pending-open stream was reset");
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn h2_connect() {
         let (client_io, server_io, _) = setup_duplex_test_server();
@@ -4257,6 +4272,7 @@ mod conn {
         upgraded.shutdown().await.unwrap();
     }
 
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn h2_connect_rejected() {
         let (client_io, server_io, _) = setup_duplex_test_server();
@@ -4492,6 +4508,7 @@ mod conn {
     }
 
     // https://github.com/hyperium/hyper/issues/4040
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn h2_pipe_task_cancelled_on_response_future_drop() {
         let (client_io, server_io, _) = setup_duplex_test_server();
@@ -4540,6 +4557,7 @@ mod conn {
     // filled the connection window will pin the remaining byte(s), and no
     // second stream can make progress when talking to a peer that only emits
     // `WINDOW_UPDATE` after its receive window is fully exhausted.
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn h2_idle_stream_does_not_pin_connection_window() {
         use std::sync::{Arc, Mutex};
