@@ -16,10 +16,11 @@ use bytes::Buf;
 use http_body::Body;
 use http2::SendStream;
 pub use http2::{
+    StreamId,
     ext::{HeadersDependency, HeadersPriority},
     frame::{
         Priorities, PrioritiesBuilder, Priority, PseudoId, PseudoOrder, Setting, SettingId,
-        SettingsOrder, SettingsOrderBuilder, StreamDependency, StreamId,
+        SettingsOrder, SettingsOrderBuilder, StreamDependency,
     },
 };
 use pin_project_lite::pin_project;

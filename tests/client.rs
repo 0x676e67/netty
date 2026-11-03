@@ -4403,12 +4403,14 @@ mod conn {
     #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_headers_priority() {
-        use netty::http2::{HeadersDependency, HeadersPriority};
+        use netty::http2::{HeadersDependency, HeadersPriority, StreamId};
 
         tokio::time::timeout(Duration::from_secs(5), async {
-            // A parent missing from the declared PRIORITY frames fails the handshake.
+            // A parent missing from the declared PRIORITY frames fails the handshake. Stream 2
+            // is server-initiated, so it can never be a request's own stream.
             let (client_io, _server_io, _) = setup_duplex_test_server();
-            let undeclared = HeadersPriority::new(HeadersDependency::Declared(3.into()), 0, false);
+            let parent = HeadersDependency::Declared(StreamId::from(2));
+            let undeclared = HeadersPriority::new(parent, 0, false);
             let handshake = conn::http2::Builder::new(rt::TokioExecutor::new())
                 .options(Http2Options::builder().headers_priority(undeclared).build())
                 .handshake::<_, Empty<Bytes>>(TokioIo::new(TokioIo::new(client_io)))
