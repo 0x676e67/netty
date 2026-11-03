@@ -162,8 +162,8 @@ fn from_digits(bytes: &[u8]) -> Option<u64> {
     Some(result)
 }
 
-#[cfg(any(feature = "http2", feature = "http3"))]
 #[inline]
+#[cfg(any(feature = "http2", feature = "http3"))]
 pub(super) fn method_has_defined_payload_semantics(method: &Method) -> bool {
     !matches!(
         *method,
@@ -171,8 +171,8 @@ pub(super) fn method_has_defined_payload_semantics(method: &Method) -> bool {
     )
 }
 
-#[cfg(any(feature = "http2", feature = "http3"))]
 #[inline]
+#[cfg(any(feature = "http2", feature = "http3"))]
 pub(super) fn set_content_length_if_missing(headers: &mut HeaderMap, len: u64) {
     headers
         .entry(CONTENT_LENGTH)

@@ -101,8 +101,8 @@ impl<T, U> Sender<T, U> {
             .map_err(|mut e| (e.0).0.take().expect("envelope not dropped").0)
     }
 
-    #[cfg(feature = "http2")]
     #[inline]
+    #[cfg(feature = "http2")]
     pub(crate) fn unbound(self) -> UnboundedSender<T, U> {
         UnboundedSender {
             giver: self.giver.shared(),
@@ -260,8 +260,8 @@ impl<T, U> Callback<T, U> {
         Self { tx: Some(tx) }
     }
 
-    #[cfg(feature = "http2")]
     #[inline]
+    #[cfg(feature = "http2")]
     pub(crate) fn is_canceled(&self) -> bool {
         self.tx.as_ref().expect(Self::MISSING_SENDER).is_closed()
     }

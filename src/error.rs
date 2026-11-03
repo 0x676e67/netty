@@ -358,8 +358,8 @@ impl Error {
         Error::new_user(User::Body).with(cause)
     }
 
-    #[cfg(any(feature = "http2", feature = "http3"))]
     #[inline]
+    #[cfg(any(feature = "http2", feature = "http3"))]
     pub(super) fn new_user_invalid_connect() -> Error {
         Error::new_user(User::InvalidConnectWithBody)
     }
