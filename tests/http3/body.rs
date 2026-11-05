@@ -1080,6 +1080,62 @@ async fn response_failure_cancels_pending_upload() {
 }
 
 #[tokio::test]
+async fn unread_response_bodies_do_not_hold_admission() {
+    // Past the peer's 100 initial streams and the default admission limit of 128.
+    const REQUESTS: usize = 200;
+
+    bounded(async {
+        let Pair {
+            tx,
+            driver,
+            mut server,
+            _endpoints,
+            ..
+        } = pair(Http3Options::default()).await;
+        let peer = tokio::spawn(async move {
+            for _ in 0..REQUESTS {
+                let (_, mut stream) = server
+                    .accept()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .resolve_request()
+                    .await
+                    .unwrap();
+                stream.send_response(Response::new(())).await.unwrap();
+                stream.send_data(Bytes::from_static(b"body")).await.unwrap();
+                stream.finish().await.unwrap();
+            }
+            let _ = server.accept().await;
+        });
+        // Every response arrives while all bodies stay unread.
+        let responses = futures_util::future::join_all((0..REQUESTS).map(|_| {
+            let mut tx = tx.clone();
+            async move {
+                tx.try_send_request(
+                    Request::get("https://localhost/")
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        }))
+        .await;
+        for response in responses {
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                "body"
+            );
+        }
+        drop(tx);
+        driver.await.unwrap();
+        peer.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn upload_holds_admission_until_finished() {
     type Body = http_body_util::combinators::BoxBody<Bytes, std::convert::Infallible>;
 
@@ -1220,8 +1276,10 @@ async fn graceful_shutdown_completes_with_an_unpolled_request_holding_an_assigne
             _endpoints,
             ..
         } = pair(Http3Options::builder().max_concurrent_requests(1).build()).await;
+        let (accepted, slot_open) = oneshot::channel::<()>();
+        let (respond, head) = oneshot::channel::<()>();
         let peer = tokio::spawn(async move {
-            let (_, mut stream) = server
+            let (request, mut stream) = server
                 .accept()
                 .await
                 .unwrap()
@@ -1229,19 +1287,23 @@ async fn graceful_shutdown_completes_with_an_unpolled_request_holding_an_assigne
                 .resolve_request()
                 .await
                 .unwrap();
+            assert_eq!(request.uri().path(), "/slot");
+            accepted.send(()).unwrap();
+            head.await.unwrap();
             stream.send_response(Response::new(())).await.unwrap();
             stream.finish().await.unwrap();
             let _ = server.accept().await;
         });
         let mut driver = Box::pin(driver);
-        let response = tx
-            .try_send_request(
+        // The first request holds the only slot until its response head arrives.
+        let slot = tokio::spawn(
+            tx.try_send_request(
                 Request::get("https://localhost/slot")
                     .body(Full::new(Bytes::new()))
                     .unwrap(),
-            )
-            .await
-            .unwrap();
+            ),
+        );
+        slot_open.await.unwrap();
         let mut queued = tokio_test::task::spawn(
             tx.try_send_request(
                 Request::get("https://localhost/queued")
@@ -1250,9 +1312,10 @@ async fn graceful_shutdown_completes_with_an_unpolled_request_holding_an_assigne
             ),
         );
         assert!(queued.poll().is_pending());
-        // Releasing the slot hands its permit to the queued request, which is
+        // The head hands the slot's permit to the queued request, which is
         // not polled again; the shutdown must not wait for it.
-        drop(response);
+        respond.send(()).unwrap();
+        drop(slot.await.unwrap().unwrap());
         driver.as_mut().graceful_shutdown();
         driver.await.unwrap();
         let returned = queued.await.unwrap_err().take_message().unwrap();

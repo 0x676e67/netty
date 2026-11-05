@@ -38,8 +38,10 @@ pub struct Http3OptionsBuilder {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Http3Options {
-    /// Maximum number of active requests, including requests waiting for QUIC stream credit.
-    /// Defaults to 128; zero fails the handshake. This is a local admission limit.
+    /// Local admission limit on requests that wait for QUIC stream credit, send, or await their
+    /// response head. A request whose sending is done frees its slot when the head arrives, so
+    /// an unread body holds none; a CONNECT tunnel holds one until it closes.
+    /// Defaults to 128; zero fails the handshake.
     pub max_concurrent_requests: usize,
 
     /// Maximum decoded response field-section size in bytes; defaults to 64 KiB.
@@ -116,7 +118,7 @@ impl Http3Options {
 // ===== impl Http3OptionsBuilder =====
 
 impl Http3OptionsBuilder {
-    /// Sets the active request limit, including requests waiting for QUIC credit.
+    /// Sets the local admission limit; see [`Http3Options::max_concurrent_requests`].
     /// Zero fails the handshake.
     #[inline]
     pub fn max_concurrent_requests(mut self, value: usize) -> Self {

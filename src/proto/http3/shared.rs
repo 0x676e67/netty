@@ -49,17 +49,18 @@ pub(crate) struct Shared {
 }
 
 /// Keeps the connection open until dropped. A reservation is taken when the
-/// request future is created; admission adds the permit, which the exchange
-/// holds until both of its directions are done.
+/// request future is created; admission adds the permit, which returns once
+/// only the response body remains, while the exchange stays active until done.
 pub(crate) struct Active {
     shared: Arc<Shared>,
+    admitted: bool,
     permit: bool,
 }
 
 // ===== impl Shared =====
 
 impl Shared {
-    /// `limit` caps admitted requests.
+    /// `limit` caps admission permits; see [`Active`] for when one returns.
     pub(crate) fn new(
         limit: usize,
         #[cfg(feature = "http3-datagram")] datagrams: Option<Arc<Registry>>,
@@ -177,6 +178,7 @@ impl Active {
         shared.reserved.fetch_add(1, Ordering::AcqRel);
         Self {
             shared: shared.clone(),
+            admitted: false,
             permit: false,
         }
     }
@@ -189,10 +191,18 @@ impl Active {
         }
         // Count the exchange before releasing the reservation, so the driver
         // never observes the request as finished in between.
+        self.admitted = true;
         self.permit = true;
         self.shared.active.fetch_add(1, Ordering::AcqRel);
         self.shared.reserved.fetch_sub(1, Ordering::AcqRel);
         Ok(self)
+    }
+
+    /// Returns the admission permit; the exchange stays active until dropped.
+    pub(crate) fn release_permit(&mut self) {
+        if std::mem::take(&mut self.permit) {
+            self.shared.permits.add_permits(1);
+        }
     }
 
     /// The connection state this exchange belongs to.
@@ -203,8 +213,8 @@ impl Active {
 
 impl Drop for Active {
     fn drop(&mut self) {
-        if self.permit {
-            self.shared.permits.add_permits(1);
+        if self.admitted {
+            self.release_permit();
             self.shared.active.fetch_sub(1, Ordering::AcqRel);
         } else {
             self.shared.reserved.fetch_sub(1, Ordering::AcqRel);
