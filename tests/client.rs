@@ -4373,6 +4373,11 @@ mod conn {
 
                 // `:status: 200` from the HPACK static table, ending the stream.
                 write_frame(&mut wr, FRAME_HEADERS, 0x5, 1, &[0x88]).await;
+
+                // Without an ACK or further reads, the timer closes the connection.
+                let (kind, _, _, payload) = read_frame(&mut rd).await;
+                assert_eq!(kind, FRAME_GOAWAY);
+                assert_eq!(payload, b"\0\0\0\0\0\0\0\x01Failed ping.");
             });
 
             let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
@@ -4380,6 +4385,7 @@ mod conn {
                 .options(
                     Http2Options::builder()
                         .preface_ping(Duration::from_millis(100))
+                        .preface_ping_timeout(Duration::from_millis(200))
                         .build(),
                 )
                 .handshake(TokioIo::new(TokioIo::new(client_io)))

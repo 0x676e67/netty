@@ -354,6 +354,9 @@ where
         if let Some(threshold) = self.opts.preface_ping {
             builder.preface_ping(threshold);
         }
+        if let Some(timeout) = self.opts.preface_ping_timeout {
+            builder.preface_ping_timeout(timeout);
+        }
 
         // Create the ping configuration for the connection.
         let ping_config = ping::Config::new(

@@ -9,6 +9,7 @@ use std::{
         atomic::{AtomicU8, Ordering},
     },
     task::{Context, Poll, ready},
+    time::Instant,
 };
 
 use bytes::Bytes;
@@ -45,7 +46,7 @@ use crate::{
     ext::OnPreserveHeader,
     proto::{Dispatched, headers},
     rt::{
-        Time,
+        Sleep, Time, Timer,
         bounds::{Http2ClientConnExec, Http2UpgradedExec},
     },
     upgrade::{self, Upgraded},
@@ -89,6 +90,10 @@ where
     let (conn_drop_ref, conn_drop_rx) = mpsc::channel(1);
     let (cancel_tx, conn_eof) = oneshot::channel();
 
+    let preface_ping = match &timer {
+        Time::Timer(timer) => Some(PrefacePingTimer::new(timer.clone())),
+        Time::Empty => None,
+    };
     let (conn, ping) = if ping_config.is_enabled() {
         let pp = conn.ping_pong().expect("conn.ping_pong");
         let (recorder, ponger) = ping::channel(pp, ping_config, timer);
@@ -100,6 +105,7 @@ where
     };
     let conn: ConnMapErr<T, B> = ConnMapErr {
         conn,
+        preface_ping,
         is_terminated: false,
     };
     let peer = Arc::new(PeerSettings::new());
@@ -178,6 +184,7 @@ pin_project! {
     {
         #[pin]
         conn: Either<Conn<T, B>, Connection<T, SendBuf<<B as Body>::Data>>>,
+        preface_ping: Option<PrefacePingTimer>,
         #[pin]
         is_terminated: bool,
     }
@@ -196,9 +203,18 @@ where
         if *this.is_terminated {
             return Poll::Pending;
         }
-        let polled = this.conn.poll(cx);
+        let polled = this.conn.as_mut().poll(cx);
         if polled.is_ready() {
             *this.is_terminated = true;
+        } else if let Some(preface_ping) = this.preface_ping {
+            // Reads move the deadline, so it is read after every poll.
+            let deadline = match this.conn.as_ref().get_ref() {
+                Either::Left(conn) => conn.conn.preface_ping_deadline(),
+                Either::Right(conn) => conn.preface_ping_deadline(),
+            };
+            if preface_ping.poll(cx, deadline).is_ready() {
+                cx.waker().wake_by_ref();
+            }
         }
         polled.map_err(|_e| {
             debug!(error = %_e, "connection error");
@@ -228,6 +244,49 @@ where
     #[inline]
     fn is_terminated(&self) -> bool {
         self.is_terminated
+    }
+}
+
+/// Wakes the connection task when its preface PING times out, since `http2` has no timer.
+struct PrefacePingTimer {
+    timer: Arc<dyn Timer + Send + Sync>,
+    sleep: Option<Pin<Box<dyn Sleep>>>,
+    /// The deadline `sleep` was last set to, kept after it fires.
+    deadline: Option<Instant>,
+}
+
+// ===== impl PrefacePingTimer =====
+
+impl PrefacePingTimer {
+    fn new(timer: Arc<dyn Timer + Send + Sync>) -> Self {
+        Self {
+            timer,
+            sleep: None,
+            deadline: None,
+        }
+    }
+
+    /// Polls the sleep for `deadline`, moving it when the deadline moves.
+    ///
+    /// Each deadline fires once, so a timer clock ahead of the connection's, such as a paused
+    /// one, cannot make the task spin.
+    fn poll(&mut self, cx: &mut Context<'_>, deadline: Option<Instant>) -> Poll<()> {
+        let Some(deadline) = deadline else {
+            return Poll::Pending;
+        };
+        if self.deadline != Some(deadline) {
+            self.deadline = Some(deadline);
+            match self.sleep {
+                Some(ref mut sleep) => self.timer.reset(sleep, deadline),
+                None => self.sleep = Some(self.timer.sleep_until(deadline)),
+            }
+        }
+        let Some(sleep) = self.sleep.as_mut() else {
+            return Poll::Pending;
+        };
+        ready!(sleep.as_mut().poll(cx));
+        self.sleep = None;
+        Poll::Ready(())
     }
 }
 

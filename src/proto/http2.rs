@@ -339,6 +339,9 @@ pub struct Http2Options {
     /// The read-idle threshold after which a PING goes with the next HEADERS or DATA frame.
     pub preface_ping: Option<Duration>,
 
+    /// How long an unanswered preface PING may go without reads before the connection closes.
+    pub preface_ping_timeout: Option<Duration>,
+
     /// The maximum number of concurrent locally reset streams.
     pub max_concurrent_reset_streams: Option<usize>,
 
@@ -583,13 +586,32 @@ impl Http2OptionsBuilder {
     /// The PING follows HEADERS but precedes DATA, and its payload is a
     /// big-endian counter starting at 1. It is skipped while the previous one
     /// or a keep-alive or adaptive window PING awaits an ACK, and those PINGs
-    /// are held back until it is acknowledged; a missing ACK does not close the
-    /// connection. Pass `None` to disable it.
+    /// are held back until it is acknowledged. An ACK with any payload
+    /// acknowledges it, and a missing ACK closes the connection only with
+    /// [`preface_ping_timeout`](Self::preface_ping_timeout). Pass `None` to
+    /// disable it.
     ///
     /// Default is disabled.
     #[inline]
     pub fn preface_ping(mut self, threshold: impl Into<Option<Duration>>) -> Self {
         self.opts.preface_ping = threshold.into();
+        self
+    }
+
+    /// Closes the connection once a preface PING is unanswered and nothing has
+    /// been read for `timeout`, counted from when the PING is queued or the
+    /// last read, whichever is later; Chrome uses 10 seconds.
+    ///
+    /// The connection then closes with a GOAWAY of `PROTOCOL_ERROR` and the
+    /// debug data `Failed ping.` if it can be written right away, failing its
+    /// streams. Without a [`timer`](crate::conn::http2::Builder::timer), the
+    /// timeout is only checked when the connection is polled for other reasons.
+    /// Does nothing if `preface_ping` is disabled. Pass `None` to disable it.
+    ///
+    /// Default is disabled.
+    #[inline]
+    pub fn preface_ping_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
+        self.opts.preface_ping_timeout = timeout.into();
         self
     }
 
@@ -786,6 +808,7 @@ impl Default for Http2Options {
             keep_alive_while_idle: false,
             ping_payload: None,
             preface_ping: None,
+            preface_ping_timeout: None,
             max_concurrent_reset_streams: None,
             reset_stream_duration: None,
             max_send_buffer_size: DEFAULT_MAX_SEND_BUF_SIZE,
