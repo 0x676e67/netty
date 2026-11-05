@@ -58,7 +58,7 @@ pub(super) struct PipeGuard<S: quic::RecvStream> {
 /// abandoned by the application.
 struct State<S: quic::RecvStream> {
     recv: Option<RecvGuard<S>>,
-    /// Released once the response is finished and sending is complete.
+    /// Returns its permit once sending is complete and released once the response is finished too.
     active: Option<Active>,
     #[cfg(feature = "http3-datagram")]
     registration: Option<Registration>,
@@ -87,18 +87,20 @@ impl<S: quic::RecvStream> RecvBody<S> {
         pipe_pending: bool,
         refused: Option<Box<dyn Send>>,
     ) -> Self {
+        let mut state = State {
+            recv: Some(recv),
+            active: Some(active),
+            #[cfg(feature = "http3-datagram")]
+            registration,
+            pipe_pending,
+            refused,
+            error: None,
+            waker: None,
+        };
+        state.release();
         Self {
             link: Arc::new(Link {
-                state: Mutex::new(State {
-                    recv: Some(recv),
-                    active: Some(active),
-                    #[cfg(feature = "http3-datagram")]
-                    registration,
-                    pipe_pending,
-                    refused,
-                    error: None,
-                    waker: None,
-                }),
+                state: Mutex::new(state),
                 abort: AtomicBool::new(false),
                 pipe_waker: AtomicWaker::new(),
             }),
@@ -305,15 +307,23 @@ impl<S: quic::RecvStream> State<S> {
         error
     }
 
-    /// Returns the permit once the response is done and sending is complete.
+    /// Releases the exchange once the response is done and sending is complete. Completed
+    /// sending alone returns the admission permit, so an unread body does not block admission.
     fn release(&mut self) {
-        if self.recv.is_none() && !self.pipe_pending {
+        if self.pipe_pending {
+            return;
+        }
+        if self.recv.is_none() {
             self.refused = None;
             #[cfg(feature = "http3-datagram")]
             {
                 self.registration = None;
             }
             self.active = None;
+        } else if self.refused.is_none()
+            && let Some(active) = &mut self.active
+        {
+            active.release_permit();
         }
     }
 }
