@@ -342,14 +342,20 @@ where
         if let Some(order) = self.opts.settings_order {
             builder.settings_order(order);
         }
-        if let Some(stream_dependency) = self.opts.headers_stream_dependency {
-            builder.headers_stream_dependency(stream_dependency);
+        if let Some(priority) = self.opts.headers_priority {
+            builder.headers_priority(priority);
         }
         if let Some(order) = self.opts.headers_pseudo_order {
             builder.headers_pseudo_order(order);
         }
         if let Some(priority) = self.opts.priorities {
             builder.priorities(priority);
+        }
+        if let Some(threshold) = self.opts.preface_ping {
+            builder.preface_ping(threshold);
+        }
+        if let Some(timeout) = self.opts.preface_ping_timeout {
+            builder.preface_ping_timeout(timeout);
         }
 
         // Create the ping configuration for the connection.
@@ -359,6 +365,7 @@ where
             self.opts.keep_alive_interval,
             self.opts.keep_alive_timeout,
             self.opts.keep_alive_while_idle,
+            self.opts.ping_payload,
         );
 
         let (tx, rx) = dispatch::channel();

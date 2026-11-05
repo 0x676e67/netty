@@ -15,9 +15,13 @@ use std::{
 use bytes::Buf;
 use http_body::Body;
 use http2::SendStream;
-pub use http2::frame::{
-    Priorities, PrioritiesBuilder, Priority, PseudoId, PseudoOrder, Setting, SettingId,
-    SettingsOrder, SettingsOrderBuilder, StreamDependency, StreamId,
+pub use http2::{
+    StreamId,
+    ext::{HeadersDependency, HeadersPriority},
+    frame::{
+        Priorities, PrioritiesBuilder, Priority, PseudoId, PseudoOrder, Setting, SettingId,
+        SettingsOrder, SettingsOrderBuilder, StreamDependency,
+    },
 };
 use pin_project_lite::pin_project;
 
@@ -328,6 +332,16 @@ pub struct Http2Options {
     /// Whether HTTP/2 keep-alive should apply while the connection is idle.
     pub keep_alive_while_idle: bool,
 
+    /// The payload of PING frames sent for keep-alive and adaptive flow control.
+    /// `None` uses the default from `http2`.
+    pub ping_payload: Option<[u8; 8]>,
+
+    /// The read-idle threshold after which a PING goes with the next HEADERS or DATA frame.
+    pub preface_ping: Option<Duration>,
+
+    /// How long an unanswered preface PING may go without reads before the connection closes.
+    pub preface_ping_timeout: Option<Duration>,
+
     /// The maximum number of concurrent locally reset streams.
     pub max_concurrent_reset_streams: Option<usize>,
 
@@ -366,8 +380,8 @@ pub struct Http2Options {
     /// The HTTP/2 pseudo-header field order for outgoing HEADERS frames.
     pub headers_pseudo_order: Option<PseudoOrder>,
 
-    /// The stream dependency for the outgoing HEADERS frame.
-    pub headers_stream_dependency: Option<StreamDependency>,
+    /// The default priority fields of outgoing request HEADERS frames.
+    pub headers_priority: Option<HeadersPriority>,
 
     /// The order of settings parameters in the initial SETTINGS frame.
     pub settings_order: Option<SettingsOrder>,
@@ -519,7 +533,8 @@ impl Http2OptionsBuilder {
     /// Sets an interval for HTTP2 Ping frames should be sent to keep a
     /// connection alive.
     ///
-    /// Pass `None` to disable HTTP2 keep-alive.
+    /// A PING is sent once nothing has been read from the connection for this
+    /// interval. Pass `None` to disable HTTP2 keep-alive.
     ///
     /// Default is currently disabled.
     #[inline]
@@ -531,7 +546,8 @@ impl Http2OptionsBuilder {
     /// Sets a timeout for receiving an acknowledgement of the keep-alive ping.
     ///
     /// If the ping is not acknowledged within the timeout, the connection will
-    /// be closed. Does nothing if `keep_alive_interval` is disabled.
+    /// be closed, with a GOAWAY of `INTERNAL_ERROR` if it can be written right
+    /// away. Does nothing if `keep_alive_interval` is disabled.
     ///
     /// Default is 20 seconds.
     #[inline]
@@ -551,6 +567,53 @@ impl Http2OptionsBuilder {
     #[inline]
     pub fn keep_alive_while_idle(mut self, enabled: bool) -> Self {
         self.opts.keep_alive_while_idle = enabled;
+        self
+    }
+
+    /// Sets the payload of PING frames sent for keep-alive and adaptive flow
+    /// control.
+    ///
+    /// Pass `None` to use the default from `http2`.
+    #[inline]
+    pub fn ping_payload(mut self, payload: impl Into<Option<[u8; 8]>>) -> Self {
+        self.opts.ping_payload = payload.into();
+        self
+    }
+
+    /// Sends a PING with the next HEADERS or non-empty DATA frame once nothing
+    /// has been read from the connection for longer than `threshold`.
+    ///
+    /// The PING follows HEADERS but precedes DATA, and its payload is a
+    /// big-endian counter starting at 1. It is skipped while the previous one
+    /// or a keep-alive or adaptive window PING awaits an ACK, and those PINGs
+    /// are held back until it is acknowledged. An ACK with any payload
+    /// acknowledges it, and a missing ACK closes the connection only with
+    /// [`preface_ping_timeout`](Self::preface_ping_timeout). Pass `None` to
+    /// disable it.
+    ///
+    /// Default is disabled.
+    #[inline]
+    pub fn preface_ping(mut self, threshold: impl Into<Option<Duration>>) -> Self {
+        self.opts.preface_ping = threshold.into();
+        self
+    }
+
+    /// Closes the connection once a preface PING is unanswered and nothing has
+    /// been read for `timeout`, counted from when the PING is queued or the
+    /// last read, whichever is later; Chrome uses 10 seconds.
+    ///
+    /// The connection then closes with a GOAWAY of `PROTOCOL_ERROR` and the
+    /// debug data `Failed ping.` if it can be written right away, failing its
+    /// streams with that error, which [`Error::is_timeout`](crate::Error::is_timeout)
+    /// does not report. Without a [`timer`](crate::conn::http2::Builder::timer),
+    /// the timeout is only checked when the connection is polled for other
+    /// reasons, and a paused runtime clock never fires it. Does nothing if
+    /// `preface_ping` is disabled. Pass `None` to disable it.
+    ///
+    /// Default is disabled.
+    #[inline]
+    pub fn preface_ping_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
+        self.opts.preface_ping_timeout = timeout.into();
         self
     }
 
@@ -637,18 +700,22 @@ impl Http2OptionsBuilder {
         self
     }
 
-    /// Sets the stream dependency and weight for the outgoing HEADERS frame.
+    /// Sets the default priority fields of outgoing request HEADERS frames.
     ///
-    /// This configures the priority of the stream by specifying its dependency and weight,
-    /// as defined by the HTTP/2 priority mechanism. This can be used to influence how the
-    /// server allocates resources to this stream relative to others.
+    /// A request carrying its own [`HeadersPriority`] extension replaces this default. The
+    /// handshake fails if a [`HeadersDependency::Declared`] parent is missing from
+    /// [`priorities`](Self::priorities) or could be a later request's own stream.
+    ///
+    /// These priority fields are deprecated by [RFC 9113 §5.3.2].
+    ///
+    /// [RFC 9113 §5.3.2]: https://www.rfc-editor.org/rfc/rfc9113.html#section-5.3.2
     #[inline]
-    pub fn headers_stream_dependency<T>(mut self, stream_dependency: T) -> Self
+    pub fn headers_priority<T>(mut self, priority: T) -> Self
     where
-        T: Into<Option<StreamDependency>>,
+        T: Into<Option<HeadersPriority>>,
     {
-        if let Some(stream_dependency) = stream_dependency.into() {
-            self.opts.headers_stream_dependency = Some(stream_dependency);
+        if let Some(priority) = priority.into() {
+            self.opts.headers_priority = Some(priority);
         }
         self
     }
@@ -741,6 +808,9 @@ impl Default for Http2Options {
             keep_alive_interval: None,
             keep_alive_timeout: Duration::from_secs(20),
             keep_alive_while_idle: false,
+            ping_payload: None,
+            preface_ping: None,
+            preface_ping_timeout: None,
             max_concurrent_reset_streams: None,
             reset_stream_duration: None,
             max_send_buffer_size: DEFAULT_MAX_SEND_BUF_SIZE,
@@ -753,7 +823,7 @@ impl Default for Http2Options {
             no_rfc7540_priorities: None,
             settings_order: None,
             headers_pseudo_order: None,
-            headers_stream_dependency: None,
+            headers_priority: None,
             priorities: None,
         }
     }

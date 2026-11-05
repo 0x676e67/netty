@@ -404,7 +404,11 @@ impl AsyncRead for H2Upgraded {
                             Some(Reason::STREAM_CLOSED) => {
                                 Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
                             }
-                            _ => Err(h2_to_io_error(e)),
+                            // A keep-alive timeout closes the stream too.
+                            _ => Err(match this.ping.ensure_not_timed_out() {
+                                Err(timeout) => io::Error::new(io::ErrorKind::TimedOut, timeout),
+                                Ok(()) => h2_to_io_error(e),
+                            }),
                         });
                     }
                 }
