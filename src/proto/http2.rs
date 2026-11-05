@@ -604,9 +604,11 @@ impl Http2OptionsBuilder {
     ///
     /// The connection then closes with a GOAWAY of `PROTOCOL_ERROR` and the
     /// debug data `Failed ping.` if it can be written right away, failing its
-    /// streams. Without a [`timer`](crate::conn::http2::Builder::timer), the
-    /// timeout is only checked when the connection is polled for other reasons.
-    /// Does nothing if `preface_ping` is disabled. Pass `None` to disable it.
+    /// streams with that error, which [`Error::is_timeout`](crate::Error::is_timeout)
+    /// does not report. Without a [`timer`](crate::conn::http2::Builder::timer),
+    /// the timeout is only checked when the connection is polled for other
+    /// reasons, and a paused runtime clock never fires it. Does nothing if
+    /// `preface_ping` is disabled. Pass `None` to disable it.
     ///
     /// Default is disabled.
     #[inline]
