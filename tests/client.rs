@@ -2947,6 +2947,44 @@ mod conn {
         rt.block_on(future::join(res, rx).map(|r| r.0)).unwrap();
     }
 
+    #[tokio::test]
+    async fn http1_rejects_request_version_without_http1_form() {
+        // The mock panics on any write other than the final HTTP/1.1 request.
+        let io = tokio_test::io::Builder::new()
+            .write(b"GET /a HTTP/1.1\r\n\r\n")
+            .read(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+            .build();
+        let (mut client, connection) = conn::http1::Builder::default()
+            .handshake(io)
+            .await
+            .expect("handshake");
+        let connection = tokio::spawn(connection);
+
+        for version in [hyper::Version::HTTP_09, hyper::Version::HTTP_3] {
+            let req = Request::builder()
+                .uri("/a")
+                .version(version)
+                .body(Empty::<Bytes>::new())
+                .unwrap();
+            let mut err = client
+                .try_send_request(req)
+                .await
+                .expect_err("version without an HTTP/1 form");
+            assert!(err.error().is_user(), "{:?}", err.error());
+            assert_eq!(err.take_message().map(|req| req.version()), Some(version));
+        }
+
+        // The rejected requests were never written, so the connection stays usable.
+        let req = Request::builder()
+            .uri("/a")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+        let res = client.try_send_request(req).await.expect("send_request");
+        assert_eq!(res.status(), StatusCode::OK);
+        drop(client);
+        connection.await.unwrap().unwrap();
+    }
+
     #[test]
     fn pipeline() {
         let (server, addr) = setup_std_test_server();

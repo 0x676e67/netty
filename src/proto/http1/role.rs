@@ -302,7 +302,8 @@ impl Http1Transaction for Client {
                 debug!("request with HTTP2 version coerced to HTTP/1.1");
                 extend(dst, b"HTTP/1.1");
             }
-            other => panic!("unexpected request version: {other:?}"),
+            // `SendRequest` rejects versions without an HTTP/1 form before encoding.
+            _ => extend(dst, b"HTTP/1.1"),
         }
         extend(dst, b"\r\n");
 
