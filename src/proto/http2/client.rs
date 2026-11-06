@@ -165,14 +165,6 @@ where
                     .is_err()
                     .then_some(wnd);
             }
-            Poll::Ready(ping::Ponged::KeepAliveTimedOut) => {
-                debug!("connection keep-alive timed out");
-                // Write GOAWAY if the socket takes it now, but don't wait on an
-                // unresponsive peer to close.
-                this.conn.abrupt_shutdown(Reason::INTERNAL_ERROR);
-                let _ = Pin::new(&mut this.conn).poll(cx);
-                return Poll::Ready(Ok(()));
-            }
             Poll::Pending => {}
         }
 
@@ -189,6 +181,22 @@ where
         // frames the connection handles itself.
         if this.conn.take_read_activity() {
             this.ponger.record_read();
+        }
+        // Checked once the connection has read what it received.
+        if poll.is_pending()
+            && this
+                .ponger
+                .as_mut()
+                .get_mut()
+                .poll_keep_alive_timeout(cx)
+                .is_ready()
+        {
+            debug!("connection keep-alive timed out");
+            // Write GOAWAY if the socket takes it now, but don't wait on an
+            // unresponsive peer to close.
+            this.conn.abrupt_shutdown(Reason::INTERNAL_ERROR);
+            let _ = Pin::new(&mut this.conn).poll(cx);
+            return Poll::Ready(Ok(()));
         }
         poll
     }
@@ -441,14 +449,16 @@ impl<B> ConnectGate<B> {
         self.parked.pop_front().and_then(|mut parked| parked.take())
     }
 
-    /// Returns parked requests unsent, keeping the connection failure as their cause.
-    fn release(&mut self, err: &::http2::Error) {
+    /// Returns parked requests unsent, with the keep-alive timeout or else the
+    /// connection failure as their cause.
+    fn release(&mut self, err: &::http2::Error, timed_out: bool) {
         for mut parked in self.parked.drain(..) {
             let Some((req, cb)) = parked.take() else {
                 continue;
             };
             // `http2::Error` is not `Clone`; rebuild the protocol reason or I/O kind.
             let error = match (err.reason(), err.get_io()) {
+                _ if timed_out => ping::KeepAliveTimedOut.crate_error(),
                 (Some(reason), _) => Error::new_canceled().with(::http2::Error::from(reason)),
                 (None, Some(io)) => {
                     Error::new_canceled().with(std::io::Error::new(io.kind(), io.to_string()))
@@ -958,8 +968,9 @@ where
                     if let Some(f) = self.fut_ctx.take() {
                         self.poll_pipe(f, cx);
                     }
-                    self.ping.ensure_not_timed_out()?;
-                    self.gate.release(&err);
+                    let timed_out = self.ping.ensure_not_timed_out();
+                    self.gate.release(&err, timed_out.is_err());
+                    timed_out?;
                     return if err.reason() == Some(::http2::Reason::NO_ERROR) {
                         trace!("connection gracefully shutdown");
                         Poll::Ready(Ok(Dispatched::Shutdown))

@@ -4490,6 +4490,114 @@ mod conn {
 
     #[cfg(feature = "http2")]
     #[tokio::test]
+    async fn http2_keep_alive_rearms_after_idle() {
+        /// Panics if a sleep is polled after it completed, as some timers do.
+        struct StrictTimer;
+
+        struct StrictSleep {
+            inner: Pin<Box<dyn netty::rt::Sleep>>,
+            done: bool,
+        }
+
+        impl netty::rt::Timer for StrictTimer {
+            fn sleep(&self, duration: Duration) -> Pin<Box<dyn netty::rt::Sleep>> {
+                self.sleep_until(self.now() + duration)
+            }
+
+            fn sleep_until(&self, deadline: std::time::Instant) -> Pin<Box<dyn netty::rt::Sleep>> {
+                let inner = rt::TokioTimer::new().sleep_until(deadline);
+                Box::pin(StrictSleep { inner, done: false })
+            }
+
+            fn now(&self) -> std::time::Instant {
+                rt::TokioTimer::new().now()
+            }
+
+            fn reset(
+                &self,
+                sleep: &mut Pin<Box<dyn netty::rt::Sleep>>,
+                deadline: std::time::Instant,
+            ) {
+                sleep.as_mut().reset(deadline);
+            }
+        }
+
+        impl Future for StrictSleep {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                assert!(!self.done, "sleep polled after it completed");
+                futures_util::ready!(self.inner.as_mut().poll(cx));
+                self.done = true;
+                Poll::Ready(())
+            }
+        }
+
+        impl netty::rt::Sleep for StrictSleep {
+            fn reset(mut self: Pin<&mut Self>, deadline: std::time::Instant) {
+                self.inner.as_mut().reset(deadline);
+                self.done = false;
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client_io, server_io, _) = setup_duplex_test_server();
+
+            let server = tokio::spawn(async move {
+                let (mut rd, mut wr) = tokio::io::split(server_io);
+                accept_h2_preface(&mut rd, &mut wr).await;
+
+                // Stay silent past the interval, then end the response before
+                // the PING ACK, so keep-alive is rescheduled on an idle
+                // connection.
+                while read_frame(&mut rd).await.0 != FRAME_HEADERS {}
+                let ping = loop {
+                    if let (FRAME_PING, 0, _, payload) = read_frame(&mut rd).await {
+                        break payload;
+                    }
+                };
+                write_frame(&mut wr, FRAME_HEADERS, 0x5, 1, &[0x88]).await;
+                write_frame(&mut wr, FRAME_PING, 0x1, 0, &ping).await;
+
+                while read_frame(&mut rd).await.0 != FRAME_HEADERS {}
+                write_frame(&mut wr, FRAME_HEADERS, 0x5, 3, &[0x88]).await;
+            });
+
+            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .timer(StrictTimer)
+                .options(
+                    Http2Options::builder()
+                        .keep_alive_interval(Duration::from_millis(100))
+                        .keep_alive_timeout(Duration::from_secs(1))
+                        .build(),
+                )
+                .handshake(TokioIo::new(TokioIo::new(client_io)))
+                .await
+                .expect("http handshake");
+            tokio::spawn(conn);
+
+            let res = client
+                .try_send_request(http::Request::new(Empty::<Bytes>::new()))
+                .await
+                .expect("first request");
+            assert_eq!(res.status(), StatusCode::OK);
+
+            // The rescheduled sleep fires while idle, and the next request
+            // arms keep-alive again.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let res = client
+                .try_send_request(http::Request::new(Empty::<Bytes>::new()))
+                .await
+                .expect("second request");
+            assert_eq!(res.status(), StatusCode::OK);
+            server.await.expect("server");
+        })
+        .await
+        .expect("test timed out");
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
     async fn http2_adaptive_window_waits_for_settings_ack() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let (client_io, server_io, _) = setup_duplex_test_server();
@@ -4624,17 +4732,25 @@ mod conn {
     #[tokio::test]
     async fn http2_keep_alive_counts_any_read() {
         tokio::time::timeout(Duration::from_secs(10), async {
-            // Keep-alive without a timer fails the handshake.
-            let (client_io, _server_io, _) = setup_duplex_test_server();
-            let handshake = conn::http2::Builder::new(rt::TokioExecutor::new())
-                .options(
-                    Http2Options::builder()
-                        .keep_alive_interval(Duration::from_millis(500))
-                        .build(),
-                )
-                .handshake::<_, Empty<Bytes>>(TokioIo::new(TokioIo::new(client_io)))
-                .await;
-            assert!(handshake.is_err(), "keep-alive without a timer");
+            // Keep-alive without a timer fails the handshake, also when the
+            // timer given is an empty `Time`.
+            for empty in [false, true] {
+                let (client_io, _server_io, _) = setup_duplex_test_server();
+                let mut builder = conn::http2::Builder::new(rt::TokioExecutor::new());
+                if empty {
+                    builder = builder.timer(netty::rt::Time::Empty);
+                }
+                let handshake = builder
+                    .options(
+                        Http2Options::builder()
+                            .keep_alive_interval(Duration::from_millis(500))
+                            .build(),
+                    )
+                    .handshake::<_, Empty<Bytes>>(TokioIo::new(TokioIo::new(client_io)))
+                    .await;
+                let err = handshake.err().expect("keep-alive without a timer");
+                assert!(err.is_user(), "{err:?}");
+            }
 
             let (client_io, server_io, _) = setup_duplex_test_server();
 
@@ -4665,23 +4781,29 @@ mod conn {
                 assert_eq!(payload, [0; 8]);
 
                 // Reads keep the connection open past the timeout while that
-                // PING is unanswered.
+                // PING is unanswered; a write failing here means it closed.
                 for _ in 0..10 {
                     write_frame(&mut wr, FRAME_PING, 0, 0, &[9; 8]).await;
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
 
-                // Then, with no ACK or other reads, the client closes with
-                // GOAWAY(0, INTERNAL_ERROR).
+                // A late ACK still answers it, so keep-alive goes on.
+                write_frame(&mut wr, FRAME_PING, 0x1, 0, &[0; 8]).await;
                 let mut acks = 0;
                 let payload = loop {
                     match read_frame(&mut rd).await {
                         (FRAME_PING, 0x1, _, _) => acks += 1,
-                        (FRAME_GOAWAY, _, _, payload) => break payload,
+                        (FRAME_PING, 0, _, payload) => break payload,
                         _ => {}
                     }
                 };
                 assert_eq!(acks, 10);
+                assert_eq!(payload, [0; 8]);
+
+                // Then, with no ACK or other reads, the client closes with
+                // GOAWAY(0, INTERNAL_ERROR).
+                let (kind, _, _, payload) = read_frame(&mut rd).await;
+                assert_eq!(kind, FRAME_GOAWAY);
                 assert_eq!(payload, [0, 0, 0, 0, 0, 0, 0, 2]);
             });
 

@@ -21,7 +21,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
-    task::{self, Poll},
+    task::{self, Poll, ready},
     time::{Duration, Instant},
 };
 
@@ -131,8 +131,8 @@ struct Shared {
     next_bdp_at: Option<Instant>,
 
     // keep-alive
-    /// If `Some`, keep-alive is enabled, and the Instant is how long ago
-    /// the connection read the last frame.
+    /// If `Some`, keep-alive is enabled, and the Instant is when bytes were
+    /// last read from the connection.
     last_read_at: Option<Instant>,
 
     is_keep_alive_timed_out: bool,
@@ -170,12 +170,13 @@ struct KeepAlive {
 enum KeepAliveState {
     Init,
     Scheduled(Instant),
-    PingSent,
+    /// The PING is unanswered, and the connection times out at this instant
+    /// unless something is read before it.
+    PingSent(Instant),
 }
 
 pub(super) enum Ponged {
     SizeUpdate(WindowSize),
-    KeepAliveTimedOut,
 }
 
 #[derive(Debug)]
@@ -232,8 +233,8 @@ impl Recorder {
 
         // are we ready to send another bdp ping?
         // if not, we don't need to record bytes either
-        if let Some(ref next_bdp_at) = locked.next_bdp_at {
-            if Instant::now() < *next_bdp_at {
+        if let Some(next_bdp_at) = locked.next_bdp_at {
+            if locked.timer.now() < next_bdp_at {
                 return;
             } else {
                 locked.next_bdp_at = None;
@@ -241,7 +242,7 @@ impl Recorder {
         }
 
         if let Some(ref mut bytes) = locked.bytes {
-            *bytes += len;
+            *bytes = bytes.saturating_add(len);
         } else {
             // no need to send bdp ping if bdp is disabled
             return;
@@ -329,15 +330,7 @@ impl Future for Ponger {
             Poll::Ready(Err(_e)) => {
                 debug!("pong error: {}", _e);
             }
-            Poll::Pending => {
-                if let Some(ref mut ka) = this.keep_alive
-                    && let Err(KeepAliveTimedOut) = ka.maybe_timeout(cx, &locked)
-                {
-                    this.keep_alive = None;
-                    locked.is_keep_alive_timed_out = true;
-                    return Poll::Ready(Ponged::KeepAliveTimedOut);
-                }
-            }
+            Poll::Pending => {}
         }
 
         // XXX: this doesn't register a waker...?
@@ -349,6 +342,23 @@ impl Ponger {
     /// Records bytes read from the connection, including control frames.
     pub(super) fn record_read(&self) {
         self.shared.lock().panic_if_poisoned().update_last_read_at();
+    }
+
+    /// Returns `Ready` once a keep-alive PING is unanswered and nothing has
+    /// been read for its timeout. Polled after the connection reads, so bytes
+    /// already received, a PONG included, count.
+    pub(super) fn poll_keep_alive_timeout(
+        &mut self,
+        cx: &mut task::Context<'_>,
+    ) -> Poll<KeepAliveTimedOut> {
+        let Some(ref mut ka) = self.keep_alive else {
+            return Poll::Pending;
+        };
+        let mut locked = self.shared.lock().panic_if_poisoned();
+        ready!(ka.poll_timeout(cx, &locked));
+        self.keep_alive = None;
+        locked.is_keep_alive_timed_out = true;
+        Poll::Ready(KeepAliveTimedOut)
     }
 
     #[inline]
@@ -404,8 +414,15 @@ impl Bdp {
             return None;
         }
 
-        // average the rtt
+        // A round trip too short for the timer's clock says nothing about the
+        // bandwidth, and would make it infinite.
         let rtt = seconds(rtt);
+        if rtt == 0.0 {
+            self.stabilize_delay();
+            return None;
+        }
+
+        // average the rtt
         if self.rtt == 0.0 {
             // First sample means rtt is first rtt.
             self.rtt = rtt;
@@ -429,7 +446,7 @@ impl Bdp {
         // if the current `bytes` sample is at least 2/3 the previous
         // bdp, increase to double the current sample.
         if bytes >= self.bdp as usize * 2 / 3 {
-            self.bdp = (bytes * 2).min(BDP_LIMIT) as WindowSize;
+            self.bdp = bytes.saturating_mul(2).min(BDP_LIMIT) as WindowSize;
             trace!("BDP increased to {}", self.bdp);
 
             self.stable_count = 0;
@@ -472,7 +489,7 @@ impl KeepAlive {
 
                 self.schedule(shared);
             }
-            KeepAliveState::PingSent => {
+            KeepAliveState::PingSent(_) => {
                 if shared.is_ping_sent() {
                     return;
                 }
@@ -494,7 +511,7 @@ impl KeepAlive {
                 if Pin::new(&mut self.sleep).poll(cx).is_pending() {
                     return;
                 }
-                // check if we've received a frame while we were scheduled
+                // check if anything was read while we were scheduled
                 if shared.last_read_at() + self.interval > at {
                     self.state = KeepAliveState::Init;
                     cx.waker().wake_by_ref(); // schedule us again
@@ -502,41 +519,38 @@ impl KeepAlive {
                 }
                 if !self.while_idle && is_idle {
                     trace!("keep-alive no need to ping when idle and while_idle=false");
+                    // The sleep has fired, so it waits to be reset once busy.
+                    self.state = KeepAliveState::Init;
                     return;
                 }
                 trace!("keep-alive interval ({:?}) reached", self.interval);
                 shared.send_ping();
-                self.state = KeepAliveState::PingSent;
                 let timeout = self.timer.now() + self.timeout;
+                self.state = KeepAliveState::PingSent(timeout);
                 self.timer.reset(&mut self.sleep, timeout);
             }
-            KeepAliveState::Init | KeepAliveState::PingSent => (),
+            KeepAliveState::Init | KeepAliveState::PingSent(_) => (),
         }
     }
 
-    fn maybe_timeout(
-        &mut self,
-        cx: &mut task::Context<'_>,
-        shared: &Shared,
-    ) -> Result<(), KeepAliveTimedOut> {
-        match self.state {
-            KeepAliveState::PingSent => {
-                if Pin::new(&mut self.sleep).poll(cx).is_pending() {
-                    return Ok(());
-                }
-                // Reads while the PING is unanswered show the connection is
-                // alive, so the timeout counts from the last one.
-                let deadline = shared.last_read_at() + self.timeout;
-                if deadline > self.timer.now() {
-                    self.timer.reset(&mut self.sleep, deadline);
-                    cx.waker().wake_by_ref(); // poll the new deadline
-                    return Ok(());
-                }
+    fn poll_timeout(&mut self, cx: &mut task::Context<'_>, shared: &Shared) -> Poll<()> {
+        let KeepAliveState::PingSent(mut deadline) = self.state else {
+            return Poll::Pending;
+        };
+        while Pin::new(&mut self.sleep).poll(cx).is_ready() {
+            // Reads while the PING is unanswered show the connection is alive,
+            // so the timeout counts from the last one. Each extension needs a
+            // new read, whatever clocks the timer uses.
+            let next = shared.last_read_at() + self.timeout;
+            if next <= deadline {
                 trace!("keep-alive timeout ({:?}) reached", self.timeout);
-                Err(KeepAliveTimedOut)
+                return Poll::Ready(());
             }
-            KeepAliveState::Init | KeepAliveState::Scheduled(..) => Ok(()),
+            deadline = next;
+            self.state = KeepAliveState::PingSent(deadline);
+            self.timer.reset(&mut self.sleep, deadline);
         }
+        Poll::Pending
     }
 }
 

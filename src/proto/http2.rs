@@ -323,7 +323,7 @@ pub struct Http2Options {
     /// The maximum frame size to use for HTTP/2.
     pub max_frame_size: Option<u32>,
 
-    /// The interval for HTTP/2 keep-alive ping frames.
+    /// The read-idle time after which a keep-alive PING is sent; needs a timer.
     pub keep_alive_interval: Option<Duration>,
 
     /// How long an unanswered keep-alive PING may go without reads before the connection closes.
@@ -458,11 +458,14 @@ impl Http2OptionsBuilder {
         self
     }
 
-    /// Sets whether to use an adaptive flow control.
+    /// Sets whether to use adaptive flow control, which sizes the windows from
+    /// BDP PING round trips.
     ///
-    /// Enabling this will override the limits set in
-    /// `initial_stream_window_size` and
-    /// `initial_connection_window_size`.
+    /// Enabling it resets [`initial_window_size`](Self::initial_window_size) and
+    /// [`initial_connection_window_size`](Self::initial_connection_window_size)
+    /// to 65,535, and a size passed to either later disables it.
+    ///
+    /// Default is `false`.
     #[inline]
     pub fn adaptive_window(mut self, enabled: bool) -> Self {
         self.opts.adaptive_window = enabled;
@@ -539,12 +542,11 @@ impl Http2OptionsBuilder {
         self
     }
 
-    /// Sets an interval for HTTP2 Ping frames should be sent to keep a
-    /// connection alive.
+    /// Sets how long the connection may go without reads before a keep-alive
+    /// PING is sent.
     ///
-    /// A PING is sent once nothing has been read from the connection for this
-    /// interval. It needs a [`timer`](crate::conn::http2::Builder::timer): the
-    /// handshake fails without one. Pass `None` to disable HTTP2 keep-alive.
+    /// It needs a [`timer`](crate::conn::http2::Builder::timer): the handshake
+    /// fails without one. Pass `None` to disable HTTP2 keep-alive.
     ///
     /// Default is currently disabled.
     #[inline]
@@ -554,7 +556,7 @@ impl Http2OptionsBuilder {
     }
 
     /// Closes the connection once a keep-alive PING is unanswered and nothing
-    /// has been read for `timeout`, counted from when the PING is sent or the
+    /// has been read for `timeout`, counted from when the PING is queued or the
     /// last read, whichever is later.
     ///
     /// The connection then closes with a GOAWAY of `INTERNAL_ERROR` if it can

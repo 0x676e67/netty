@@ -141,7 +141,8 @@ impl Error {
     /// yields an error.
     ///
     /// It also covers requests the protocol or the peer's SETTINGS do not allow,
-    /// such as Extended CONNECT to a server that did not enable it.
+    /// such as Extended CONNECT to a server that did not enable it, and options
+    /// that cannot work as given, such as HTTP/2 keep-alive without a timer.
     #[inline]
     pub fn is_user(&self) -> bool {
         matches!(self.inner.kind, Kind::User(_))

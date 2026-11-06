@@ -263,13 +263,18 @@ where
         }
     }
 
-    /// Provide a timer to execute background HTTP2 tasks.
+    /// Provide a timer to execute background HTTP2 tasks, such as keep-alive,
+    /// which requires one.
     #[inline]
     pub fn timer<M>(mut self, timer: M) -> Self
     where
         M: Timer + Send + Sync + 'static,
     {
-        self.timer = Time::Timer(Arc::new(timer));
+        // A `Time` keeps its variant, so an empty one still means no timer.
+        self.timer = match (&timer as &dyn std::any::Any).downcast_ref::<Time>() {
+            Some(time) => time.clone(),
+            None => Time::Timer(Arc::new(timer)),
+        };
         self
     }
 
@@ -287,7 +292,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns an error if the HTTP/2 connection handshake fails.
+    /// Returns an [`is_user`](crate::Error::is_user) error if keep-alive is
+    /// enabled without a [`timer`](Self::timer), or an error if the HTTP/2
+    /// connection handshake fails.
     pub async fn handshake<T, B>(self, io: T) -> Result<(SendRequest<B>, Connection<T, B, Ex>)>
     where
         T: AsyncRead + AsyncWrite + Unpin,
