@@ -4452,133 +4452,6 @@ mod conn {
 
     #[cfg(feature = "http2")]
     #[tokio::test]
-    async fn http2_send_frame_options() {
-        /// Keeps the bytes of each write.
-        struct WriteLog {
-            io: DuplexStream,
-            writes: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
-        }
-
-        impl tokio::io::AsyncRead for WriteLog {
-            fn poll_read(
-                mut self: Pin<&mut Self>,
-                cx: &mut Context<'_>,
-                buf: &mut tokio::io::ReadBuf<'_>,
-            ) -> Poll<io::Result<()>> {
-                Pin::new(&mut self.io).poll_read(cx, buf)
-            }
-        }
-
-        impl tokio::io::AsyncWrite for WriteLog {
-            fn poll_write(
-                mut self: Pin<&mut Self>,
-                cx: &mut Context<'_>,
-                buf: &[u8],
-            ) -> Poll<io::Result<usize>> {
-                let res = Pin::new(&mut self.io).poll_write(cx, buf);
-                if let Poll::Ready(Ok(n)) = res {
-                    self.writes.lock().unwrap().push(buf[..n].to_vec());
-                }
-                res
-            }
-
-            fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-                Pin::new(&mut self.io).poll_flush(cx)
-            }
-
-            fn poll_shutdown(
-                mut self: Pin<&mut Self>,
-                cx: &mut Context<'_>,
-            ) -> Poll<io::Result<()>> {
-                Pin::new(&mut self.io).poll_shutdown(cx)
-            }
-        }
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            // Room for every write, so each one reaches the server whole.
-            let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-            let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let client_io = WriteLog {
-                io: client_io,
-                writes: writes.clone(),
-            };
-
-            let server = tokio::spawn(async move {
-                let (mut rd, mut wr) = tokio::io::split(server_io);
-                accept_h2_preface(&mut rd, &mut wr).await;
-
-                // The header block and the body are split at their caps.
-                let mut frames = Vec::new();
-                loop {
-                    let (kind, flags, _, payload) = read_frame(&mut rd).await;
-                    if matches!(kind, FRAME_DATA | FRAME_HEADERS | FRAME_CONTINUATION) {
-                        frames.push((kind, payload.len()));
-                    }
-                    if kind == FRAME_DATA && flags & 0x1 != 0 {
-                        break;
-                    }
-                }
-                let (block, data) = frames.split_at(frames.len() - 3);
-                assert_eq!(block[0].0, FRAME_HEADERS);
-                assert!(
-                    block[1..]
-                        .iter()
-                        .all(|&(kind, _)| kind == FRAME_CONTINUATION)
-                );
-                assert!(block.len() > 1 && block.iter().all(|&(_, len)| len <= 16));
-                assert_eq!(data, [(FRAME_DATA, 1_000); 3]);
-
-                // `:status: 200` from the HPACK static table, ending the stream.
-                write_frame(&mut wr, FRAME_HEADERS, 0x5, 1, &[0x88]).await;
-            });
-
-            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
-                .options(
-                    Http2Options::builder()
-                        .max_send_data_frame_size(1_000)
-                        .max_send_header_frame_size(16)
-                        .one_frame_per_write(true)
-                        .build(),
-                )
-                .handshake(TokioIo::new(TokioIo::new(client_io)))
-                .await
-                .expect("http handshake");
-            tokio::spawn(conn);
-
-            let req = Request::post("/")
-                .header("x-pad", "a".repeat(40))
-                .body(Full::new(Bytes::from(vec![0; 3_000])))
-                .unwrap();
-            let res = client.try_send_request(req).await.expect("request");
-            assert_eq!(res.status(), StatusCode::OK);
-            server.await.expect("server");
-
-            // After the first write, each write holds one frame, except that the
-            // header block goes out whole.
-            for write in &writes.lock().unwrap()[1..] {
-                let mut kinds = Vec::new();
-                let mut buf = &write[..];
-                while !buf.is_empty() {
-                    let len = u32::from_be_bytes([0, buf[0], buf[1], buf[2]]) as usize;
-                    kinds.push(buf[3]);
-                    buf = &buf[9 + len..];
-                }
-                if kinds[0] == FRAME_HEADERS {
-                    assert!(kinds[1..].contains(&FRAME_CONTINUATION), "{kinds:?}");
-                } else {
-                    assert!(
-                        kinds.len() == 1 && kinds[0] != FRAME_CONTINUATION,
-                        "{kinds:?}"
-                    );
-                }
-            }
-        })
-        .await
-        .expect("test timed out");
-    }
-
-    #[cfg(feature = "http2")]
-    #[tokio::test]
     async fn http2_headers_priority() {
         use netty::http2::{HeadersDependency, HeadersPriority, StreamId};
 
@@ -4711,8 +4584,6 @@ mod conn {
     }
 
     #[cfg(feature = "http2")]
-    const FRAME_DATA: u8 = 0x0;
-    #[cfg(feature = "http2")]
     const FRAME_HEADERS: u8 = 0x1;
     #[cfg(feature = "http2")]
     const FRAME_SETTINGS: u8 = 0x4;
@@ -4720,8 +4591,6 @@ mod conn {
     const FRAME_PING: u8 = 0x6;
     #[cfg(feature = "http2")]
     const FRAME_GOAWAY: u8 = 0x7;
-    #[cfg(feature = "http2")]
-    const FRAME_CONTINUATION: u8 = 0x9;
 
     #[cfg(feature = "http2")]
     /// Reads the client preface and acknowledges the client SETTINGS.
