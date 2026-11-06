@@ -288,13 +288,6 @@ impl Future for Ponger {
         // hoping this is fine to move within the lock
         let now = locked.timer.now();
 
-        let is_idle = this.is_idle();
-
-        if let Some(ref mut ka) = this.keep_alive {
-            ka.maybe_schedule(is_idle, &locked);
-            ka.maybe_ping(cx, is_idle, &mut locked);
-        }
-
         if !locked.is_ping_sent() {
             // XXX: this doesn't register a waker...?
             return Poll::Pending;
@@ -308,12 +301,8 @@ impl Future for Ponger {
                 locked.ping_sent_at = None;
                 let rtt = now - start;
                 trace!("recv pong");
-
-                if let Some(ref mut ka) = this.keep_alive {
-                    locked.update_last_read_at();
-                    ka.maybe_schedule(is_idle, &locked);
-                    ka.maybe_ping(cx, is_idle, &mut locked);
-                }
+                // Keep-alive reschedules once the connection has been polled.
+                locked.update_last_read_at();
 
                 if let Some(ref mut bdp) = this.bdp {
                     let bytes = locked.bytes.expect("bdp enabled implies bytes");
@@ -344,16 +333,29 @@ impl Ponger {
         self.shared.lock().panic_if_poisoned().update_last_read_at();
     }
 
-    /// Returns `Ready` once a keep-alive PING is unanswered and nothing has
-    /// been read for its timeout. Polled after the connection reads, so bytes
-    /// already received, a PONG included, count.
-    pub(super) fn poll_keep_alive_timeout(
+    /// Returns whether keep-alive waits for the connection to be busy.
+    pub(super) fn tracks_idle(&self) -> bool {
+        self.keep_alive.as_ref().is_some_and(|ka| !ka.while_idle)
+    }
+
+    /// Schedules and sends keep-alive PINGs, returning `Ready` once one is
+    /// unanswered and nothing has been read for its timeout.
+    ///
+    /// Polled once the connection returns `Pending`, so `is_idle` and the reads
+    /// reflect that poll, and a request sent later wakes the task again.
+    pub(super) fn poll_keep_alive(
         &mut self,
         cx: &mut task::Context<'_>,
+        is_idle: bool,
     ) -> Poll<KeepAliveTimedOut> {
         let Some(ref mut ka) = self.keep_alive else {
             return Poll::Pending;
         };
+        {
+            let mut locked = self.shared.lock().panic_if_poisoned();
+            ka.maybe_schedule(is_idle, &locked);
+            ka.maybe_ping(cx, is_idle, &mut locked);
+        }
         ready!(ka.poll_timeout(cx, &self.shared));
         self.keep_alive = None;
         self.shared
@@ -361,11 +363,6 @@ impl Ponger {
             .panic_if_poisoned()
             .is_keep_alive_timed_out = true;
         Poll::Ready(KeepAliveTimedOut)
-    }
-
-    #[inline]
-    fn is_idle(&self) -> bool {
-        Arc::strong_count(&self.shared) <= 2
     }
 }
 

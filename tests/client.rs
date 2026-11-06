@@ -4360,7 +4360,7 @@ mod conn {
         let (client_io, server_io, _) = setup_duplex_test_server();
         let (done_tx, done_rx) = oneshot::channel();
 
-        tokio::spawn(async move {
+        let server = tokio::spawn(async move {
             let sock = server_io;
             let mut h2 = h2::server::handshake(sock).await.unwrap();
 
@@ -4369,12 +4369,18 @@ mod conn {
                 poll_fn(|cx| h2.poll_closed(cx)).await.unwrap();
             });
             assert_eq!(req.method(), Method::CONNECT);
+            let mut req_body = req.into_body();
 
             let res = Response::builder().status(400).body(()).unwrap();
             let mut send_stream = respond.send_response(res, false).unwrap();
             send_stream
                 .send_data("No bread for you!".into(), true)
                 .unwrap();
+            // The refused request ends cleanly instead of being reset once the
+            // client drops the body.
+            while let Some(chunk) = req_body.data().await {
+                assert!(chunk.expect("request body").is_empty());
+            }
             done_rx.await.unwrap();
         });
 
@@ -4402,7 +4408,11 @@ mod conn {
             .unwrap();
         assert_eq!(body, "No bread for you!");
 
-        done_tx.send(()).unwrap();
+        let _ = done_tx.send(());
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("server timed out")
+            .expect("server");
     }
 
     #[tokio::test]
@@ -4502,7 +4512,6 @@ mod conn {
                     Http2Options::builder()
                         .keep_alive_interval(Duration::from_millis(100))
                         .keep_alive_timeout(Duration::from_millis(100))
-                        .keep_alive_while_idle(true)
                         .build(),
                 )
                 .handshake(TokioIo::new(TokioIo::new(client_io)))
@@ -4510,8 +4519,9 @@ mod conn {
                 .expect("http handshake");
             tokio::spawn(conn);
 
-            // Extended CONNECT waits for the server's SETTINGS, so the timeout
-            // returns it unsent, canceled by the timeout.
+            // Extended CONNECT waits for the server's SETTINGS, which keeps the
+            // connection busy, so the timeout returns it unsent, canceled by the
+            // timeout.
             let mut request = Request::connect("https://localhost:443/chat")
                 .body(Empty::<Bytes>::new())
                 .unwrap();
@@ -4525,6 +4535,52 @@ mod conn {
             assert!(err.error().is_canceled(), "{:?}", err.error());
             assert!(err.error().is_timeout(), "{:?}", err.error());
             assert!(err.take_message().is_some());
+        })
+        .await
+        .expect("test timed out");
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
+    async fn http2_keep_alive_while_body_outlives_handles() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client_io, server_io, _) = setup_duplex_test_server();
+
+            tokio::spawn(async move {
+                let (mut rd, mut wr) = tokio::io::split(server_io);
+                accept_h2_preface(&mut rd, &mut wr).await;
+                while read_frame(&mut rd).await.0 != FRAME_HEADERS {}
+                // Response HEADERS without END_STREAM, then no PING answers.
+                write_frame(&mut wr, FRAME_HEADERS, 0x4, 1, &[0x88]).await;
+                drain_til_eof(rd).await.expect("server read");
+            });
+
+            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .timer(rt::TokioTimer::new())
+                .options(
+                    Http2Options::builder()
+                        .keep_alive_interval(Duration::from_millis(100))
+                        .keep_alive_timeout(Duration::from_millis(100))
+                        .build(),
+                )
+                .handshake(TokioIo::new(TokioIo::new(client_io)))
+                .await
+                .expect("http handshake");
+            tokio::spawn(conn);
+
+            let res = client
+                .try_send_request(http::Request::new(Empty::<Bytes>::new()))
+                .await
+                .expect("response");
+            // The open body alone keeps the connection busy.
+            drop(client);
+            let err = res
+                .into_body()
+                .frame()
+                .await
+                .expect("body error")
+                .expect_err("keep-alive timeout");
+            assert!(err.is_timeout(), "{:?}", err);
         })
         .await
         .expect("test timed out");

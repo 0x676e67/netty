@@ -572,10 +572,10 @@ impl Http2OptionsBuilder {
 
     /// Sets whether HTTP2 keep-alive should apply while the connection is idle.
     ///
-    /// If disabled, keep-alive pings are only sent while there are open
-    /// request/responses streams. If enabled, pings are also sent when no
-    /// streams are active. Does nothing if `keep_alive_interval` is
-    /// disabled.
+    /// If disabled, keep-alive pings are only sent while a stream is open or a
+    /// request waits to open, even after every handle but a body or upgraded
+    /// connection is dropped. If enabled, pings are also sent when nothing is
+    /// in progress. Does nothing if `keep_alive_interval` is disabled.
     ///
     /// Default is `false`.
     #[inline]

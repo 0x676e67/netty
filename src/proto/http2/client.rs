@@ -6,7 +6,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     task::{Context, Poll, ready},
     time::Instant,
@@ -94,6 +94,7 @@ where
         Time::Timer(timer) => Some(PrefacePingTimer::new(timer.clone())),
         Time::Empty => None,
     };
+    let peer = Arc::new(PeerSettings::new());
     let (conn, ping) = if ping_config.is_enabled() {
         let pp = conn.ping_pong().expect("conn.ping_pong");
         let (recorder, ponger) = ping::channel(pp, ping_config, timer);
@@ -101,6 +102,7 @@ where
         let conn: Conn<_, B> = Conn {
             ponger,
             conn,
+            peer: peer.clone(),
             pending_window: None,
         };
         (Either::Left(conn), recorder)
@@ -112,7 +114,6 @@ where
         preface_ping,
         is_terminated: false,
     };
-    let peer = Arc::new(PeerSettings::new());
 
     exec.execute_h2_future(H2ClientFuture::Task {
         task: Box::pin(ConnTask::new(conn, conn_drop_rx, cancel_tx, peer.clone())),
@@ -140,6 +141,8 @@ pin_project! {
         ponger: Ponger,
         #[pin]
         conn: Connection<T, SendBuf<<B as Body>::Data>>,
+        // Tells whether the dispatcher parks requests until the server's SETTINGS.
+        peer: Arc<PeerSettings>,
         // A BDP stream window waiting for the previous SETTINGS to be acknowledged.
         pending_window: Option<u32>,
     }
@@ -182,21 +185,26 @@ where
         if this.conn.take_read_activity() {
             this.ponger.record_read();
         }
-        // Checked once the connection has read what it received.
-        if poll.is_pending()
-            && this
+        // Checked once the connection has read what it received and registered its
+        // wakeups, so a request sent later wakes this task. Parked requests wait on the
+        // server too.
+        if poll.is_pending() {
+            let is_idle =
+                this.ponger.tracks_idle() && !this.conn.has_streams() && !this.peer.poll_parked(cx);
+            if this
                 .ponger
                 .as_mut()
                 .get_mut()
-                .poll_keep_alive_timeout(cx)
+                .poll_keep_alive(cx, is_idle)
                 .is_ready()
-        {
-            debug!("connection keep-alive timed out");
-            // Write GOAWAY if the socket takes it now, but don't wait on an
-            // unresponsive peer to close.
-            this.conn.abrupt_shutdown(Reason::INTERNAL_ERROR);
-            let _ = Pin::new(&mut this.conn).poll(cx);
-            return Poll::Ready(Ok(()));
+            {
+                debug!("connection keep-alive timed out");
+                // Write GOAWAY if the socket takes it now, but don't wait on an
+                // unresponsive peer to close.
+                this.conn.abrupt_shutdown(Reason::INTERNAL_ERROR);
+                let _ = Pin::new(&mut this.conn).poll(cx);
+                return Poll::Ready(Ok(()));
+            }
         }
         poll
     }
@@ -318,12 +326,16 @@ impl PrefacePingTimer {
     }
 }
 
-/// Server SETTINGS published by the connection task, the only writer.
+/// Server SETTINGS published by the connection task, the only writer, and whether the
+/// dispatcher parks requests until they arrive.
 ///
-/// The dispatcher is the only waiter, and senders read it without locking.
+/// The dispatcher waits for the SETTINGS, the connection task for parked requests, and
+/// senders read it without locking.
 pub(crate) struct PeerSettings {
     extended_connect: AtomicU8,
     waker: AtomicWaker,
+    parked: AtomicBool,
+    conn_waker: AtomicWaker,
 }
 
 // ===== impl PeerSettings =====
@@ -337,6 +349,8 @@ impl PeerSettings {
         Self {
             extended_connect: AtomicU8::new(Self::UNKNOWN),
             waker: AtomicWaker::new(),
+            parked: AtomicBool::new(false),
+            conn_waker: AtomicWaker::new(),
         }
     }
 
@@ -370,6 +384,19 @@ impl PeerSettings {
             Some(enabled) => Poll::Ready(enabled),
             None => Poll::Pending,
         }
+    }
+
+    /// Records whether requests are parked, waking the connection task when the first is.
+    fn set_parked(&self, parked: bool) {
+        if !self.parked.swap(parked, Ordering::AcqRel) && parked {
+            self.conn_waker.wake();
+        }
+    }
+
+    /// Returns whether requests are parked, registering the connection task first.
+    fn poll_parked(&self, cx: &mut Context<'_>) -> bool {
+        self.conn_waker.register(cx.waker());
+        self.parked.load(Ordering::Acquire)
     }
 }
 
@@ -415,6 +442,7 @@ impl<B> ConnectGate<B> {
             Poll::Pending => {
                 trace!("extended CONNECT waits for peer SETTINGS");
                 self.parked.push_back(Envelope::new(req, cb));
+                self.peer.set_parked(true);
                 None
             }
         }
@@ -439,6 +467,7 @@ impl<B> ConnectGate<B> {
                 .parked
                 .retain_mut(|parked| parked.poll_canceled(cx).is_pending()),
         }
+        self.peer.set_parked(!self.parked.is_empty());
     }
 
     /// Takes the oldest parked request once the server enabled the protocol.
@@ -446,7 +475,9 @@ impl<B> ConnectGate<B> {
         if self.peer.extended_connect() != Some(true) {
             return None;
         }
-        self.parked.pop_front().and_then(|mut parked| parked.take())
+        let parked = self.parked.pop_front();
+        self.peer.set_parked(!self.parked.is_empty());
+        parked.and_then(|mut parked| parked.take())
     }
 
     /// Returns parked requests unsent, each with an error from `error`.
@@ -460,6 +491,14 @@ impl<B> ConnectGate<B> {
                 message: Some(req),
             }));
         }
+        self.peer.set_parked(false);
+    }
+}
+
+impl<B> Drop for ConnectGate<B> {
+    fn drop(&mut self) {
+        // Requests dropped with the dispatcher no longer wait on the server.
+        self.peer.set_parked(false);
     }
 }
 
@@ -652,8 +691,6 @@ pin_project! {
         pipe: PipeToSendStream<S>,
         #[pin]
         conn_drop_ref: Option<Sender<Infallible>>,
-        #[pin]
-        ping: Option<Recorder>,
         cancel_rx: Option<oneshot::Receiver<()>>,
     }
 }
@@ -678,7 +715,6 @@ where
                 debug!("client request body send cancelled, resetting stream");
                 this.pipe.as_mut().send_reset(http2::Reason::CANCEL);
                 this.conn_drop_ref.take().expect(EXPECT_TAKEN_ONCE_MSG);
-                this.ping.take().expect(EXPECT_TAKEN_ONCE_MSG);
                 return Poll::Ready(());
             }
             Some(Poll::Ready(Err(_))) => {
@@ -695,7 +731,6 @@ where
                     debug!("client request body error: {}", _e);
                 }
                 drop(this.conn_drop_ref.take().expect(EXPECT_TAKEN_ONCE_MSG));
-                drop(this.ping.take().expect(EXPECT_TAKEN_ONCE_MSG));
                 return Poll::Ready(());
             }
             Poll::Pending => (),
@@ -731,15 +766,10 @@ where
                         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
                         pipe_cancel_tx = Some(cancel_tx);
                         let conn_drop_ref = self.conn_drop_ref.clone();
-                        // keep the ping recorder's knowledge of an
-                        // "open stream" alive while this body is
-                        // still sending...
-                        let ping = ping.clone();
 
                         let pipe = PipeMap {
                             pipe,
                             conn_drop_ref: Some(conn_drop_ref),
-                            ping: Some(ping),
                             cancel_rx: Some(cancel_rx),
                         };
                         // Clear send task
@@ -914,7 +944,9 @@ where
                 // no content, and what follows is tunneled data.
                 // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.5
                 // https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
-                if let Some(send_stream) = send_stream.filter(|_| res.status().is_success()) {
+                if res.status().is_success()
+                    && let Some(send_stream) = send_stream
+                {
                     let (parts, recv_stream) = res.into_parts();
                     let mut res = Response::from_parts(parts, Incoming::empty());
 
@@ -935,6 +967,11 @@ where
 
                     Poll::Ready(Ok(res))
                 } else {
+                    // A refused CONNECT tunnels nothing, so its request half ends here and the
+                    // stream closes with the response rather than when the body drops.
+                    if let Some(mut send_stream) = send_stream {
+                        let _ = send_stream.send_data(SendBuf::None, true);
+                    }
                     let content_length = headers::content_length_parse_all(res.headers());
                     let res = res.map(|stream| {
                         let ping = ping.for_stream(&stream);
