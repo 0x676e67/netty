@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793855425046,
+  "lastUpdate": 1793939949388,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -16523,6 +16523,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 3417950,
             "range": "± 603966.22",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8a40c00b04d73aea21cff2a7f3cc10d519bed131",
+          "message": "fix(http2): cap keep-alive durations instead of overflowing (#196)\n\n* fix(http2): cap keep-alive durations instead of overflowing\n\n* refactor(http2): scope the keep-alive cap to Config::new",
+          "timestamp": "2026-11-06T12:37:10+08:00",
+          "tree_id": "2350a3be7610a6cfcb4b313186a5b6c832f6e6cd",
+          "url": "https://github.com/0x676e67/netty/commit/8a40c00b04d73aea21cff2a7f3cc10d519bed131"
+        },
+        "date": 1793939948594,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 42091,
+            "range": "± 763.01",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 2704966,
+            "range": "± 149959.62",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 15988,
+            "range": "± 219.92",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 16578,
+            "range": "± 1164.49",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 19171,
+            "range": "± 330.94",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 58566,
+            "range": "± 2452.10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 41000414,
+            "range": "± 33083.85",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 50229,
+            "range": "± 1754.84",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 26439813,
+            "range": "± 9489116.17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 5386936,
+            "range": "± 21198396.12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 5144763,
+            "range": "± 247979.15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 35077103,
+            "range": "± 2899421.03",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 35012249,
+            "range": "± 1625496.00",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 3567555,
+            "range": "± 37991.02",
             "unit": "ns/iter"
           }
         ]
