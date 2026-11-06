@@ -352,6 +352,15 @@ pub struct Http2Options {
     /// The maximum size of the send buffer for HTTP/2 streams.
     pub max_send_buffer_size: usize,
 
+    /// The cap on sent DATA payloads, within the peer's max frame size.
+    pub max_send_data_frame_size: Option<u32>,
+
+    /// The cap on sent HEADERS and CONTINUATION payloads, within the peer's max frame size.
+    pub max_send_header_frame_size: Option<u32>,
+
+    /// Whether each frame after the initial write takes a write of its own.
+    pub one_frame_per_write: bool,
+
     /// The maximum number of concurrent streams initiated by the remote peer.
     pub max_concurrent_streams: Option<u32>,
 
@@ -600,7 +609,7 @@ impl Http2OptionsBuilder {
 
     /// Closes the connection once a preface PING is unanswered and nothing has
     /// been read for `timeout`, counted from when the PING is queued or the
-    /// last read, whichever is later; Chrome uses 10 seconds.
+    /// last read, whichever is later.
     ///
     /// The connection then closes with a GOAWAY of `PROTOCOL_ERROR` and the
     /// debug data `Failed ping.` if it can be written right away, failing its
@@ -676,6 +685,62 @@ impl Http2OptionsBuilder {
     pub fn max_send_buf_size(mut self, max: usize) -> Self {
         assert!(max <= u32::MAX as usize);
         self.opts.max_send_buffer_size = max;
+        self
+    }
+
+    /// Caps the payload of sent DATA frames, within the peer's max frame size.
+    ///
+    /// Each capped frame starts a write and shares none. DATA queued on a
+    /// stream is coalesced into frames of up to `max` bytes, but without
+    /// vectored writes only while capped frames are at most 16,384 bytes. A
+    /// `max` of 0 is treated as 1. With 16,375 bytes, a full frame and its
+    /// 9-byte header fit one TLS record of 2^14 bytes ([RFC 8446 §5.1]). Very
+    /// small values send many small frames, which peers may treat as abuse. See
+    /// [`http2::client::Builder::max_send_data_frame_size`]. Pass `None` to
+    /// disable it.
+    ///
+    /// Default is disabled.
+    ///
+    /// [RFC 8446 §5.1]: https://www.rfc-editor.org/rfc/rfc8446.html#section-5.1
+    #[inline]
+    pub fn max_send_data_frame_size(mut self, max: impl Into<Option<u32>>) -> Self {
+        self.opts.max_send_data_frame_size = max.into();
+        self
+    }
+
+    /// Caps the payload of sent HEADERS and CONTINUATION frames, within the
+    /// peer's max frame size.
+    ///
+    /// A header block is split into frames of at most `max` bytes, and a `max`
+    /// under 5 is treated as 5. Small values split a block into many
+    /// CONTINUATION frames, which peers may limit or treat as abuse. See
+    /// [`http2::client::Builder::max_send_header_frame_size`]. Pass `None` to
+    /// disable it.
+    ///
+    /// Default is disabled.
+    #[inline]
+    pub fn max_send_header_frame_size(mut self, max: impl Into<Option<u32>>) -> Self {
+        self.opts.max_send_header_frame_size = max.into();
+        self
+    }
+
+    /// Sets whether each frame takes a write of its own.
+    ///
+    /// The preface, SETTINGS and the initial WINDOW_UPDATE and PRIORITY frames
+    /// still share the first write. After it, each frame is written alone,
+    /// except that a header block goes out in one write with its CONTINUATION
+    /// frames and the stream WINDOW_UPDATE after it. TLS stacks commonly seal
+    /// each write into its own records, though [RFC 8446 §5.1] lets them split
+    /// or coalesce application data. Each frame costs a write, so this lowers
+    /// throughput when many small frames are queued at once. See
+    /// [`http2::client::Builder::one_frame_per_write`].
+    ///
+    /// Default is `false`.
+    ///
+    /// [RFC 8446 §5.1]: https://www.rfc-editor.org/rfc/rfc8446.html#section-5.1
+    #[inline]
+    pub fn one_frame_per_write(mut self, enabled: bool) -> Self {
+        self.opts.one_frame_per_write = enabled;
         self
     }
 
@@ -814,6 +879,9 @@ impl Default for Http2Options {
             max_concurrent_reset_streams: None,
             reset_stream_duration: None,
             max_send_buffer_size: DEFAULT_MAX_SEND_BUF_SIZE,
+            max_send_data_frame_size: None,
+            max_send_header_frame_size: None,
+            one_frame_per_write: false,
             max_pending_accept_reset_streams: None,
             max_local_error_reset_streams: Some(1024),
             header_table_size: None,

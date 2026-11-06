@@ -357,6 +357,13 @@ where
         if let Some(timeout) = self.opts.preface_ping_timeout {
             builder.preface_ping_timeout(timeout);
         }
+        if let Some(max) = self.opts.max_send_data_frame_size {
+            builder.max_send_data_frame_size(max);
+        }
+        if let Some(max) = self.opts.max_send_header_frame_size {
+            builder.max_send_header_frame_size(max);
+        }
+        builder.one_frame_per_write(self.opts.one_frame_per_write);
 
         // Create the ping configuration for the connection.
         let ping_config = ping::Config::new(

@@ -152,7 +152,7 @@ incremental = false
 http3 = { git = "https://github.com/0x676e67/http3", rev = "96443870515f1e3e3189771c3442576db18226ed" }
 # Remove once an http2 release includes `Connection::extended_connect_protocol`, ignores
 # content-length on 1xx responses and on 2xx responses to CONNECT, adds the preface PING and
-# its timeout, custom PING payloads, read activity, client GOAWAY and
-# `Builder::headers_priority`, and keeps reading while control frames or a GOAWAY wait to be
-# written.
-http2 = { git = "https://github.com/0x676e67/http2", rev = "4c3b044cd223686eca8935ac959fdbba876d7116" }
+# its timeout, custom PING payloads, read activity, client GOAWAY,
+# `Builder::headers_priority`, the DATA and header frame caps and one frame per write, and
+# keeps reading while control frames or a GOAWAY wait to be written.
+http2 = { git = "https://github.com/0x676e67/http2", rev = "4735acb476bb58af19d91c4082feab7e77d14c0e" }
