@@ -107,6 +107,9 @@ pub(super) enum User {
     ManualUpgrade,
     /// The dispatch task is gone.
     DispatchGone,
+    /// HTTP/2 keep-alive was enabled without a timer.
+    #[cfg(feature = "http2")]
+    KeepAliveWithoutTimer,
 }
 
 // Sentinel type to indicate the error was caused by a timeout.
@@ -138,7 +141,8 @@ impl Error {
     /// yields an error.
     ///
     /// It also covers requests the protocol or the peer's SETTINGS do not allow,
-    /// such as Extended CONNECT to a server that did not enable it.
+    /// such as Extended CONNECT to a server that did not enable it, and options
+    /// that cannot work as given, such as HTTP/2 keep-alive without a timer.
     #[inline]
     pub fn is_user(&self) -> bool {
         matches!(self.inner.kind, Kind::User(_))
@@ -434,6 +438,8 @@ impl Error {
             Kind::User(User::NoUpgrade) => "no upgrade available",
             Kind::User(User::ManualUpgrade) => "upgrade expected but low level API in use",
             Kind::User(User::DispatchGone) => "dispatch task is gone",
+            #[cfg(feature = "http2")]
+            Kind::User(User::KeepAliveWithoutTimer) => "HTTP/2 keep-alive requires a timer",
         }
     }
 }
@@ -443,6 +449,14 @@ impl Error {
     #[inline]
     pub(super) fn new_user_invalid_connect() -> Error {
         Error::new_user(User::InvalidConnectWithBody)
+    }
+}
+
+#[cfg(feature = "http2")]
+impl Error {
+    #[inline]
+    pub(super) fn new_user_keep_alive_without_timer() -> Error {
+        Error::new_user(User::KeepAliveWithoutTimer)
     }
 }
 

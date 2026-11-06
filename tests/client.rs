@@ -4490,6 +4490,155 @@ mod conn {
 
     #[cfg(feature = "http2")]
     #[tokio::test]
+    async fn http2_keep_alive_timeout_releases_parked_connect() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            // The server reads, but sends no SETTINGS and answers no PING.
+            let (client_io, server_io, _) = setup_duplex_test_server();
+            tokio::spawn(drain_til_eof(server_io));
+
+            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .timer(rt::TokioTimer::new())
+                .options(
+                    Http2Options::builder()
+                        .keep_alive_interval(Duration::from_millis(100))
+                        .keep_alive_timeout(Duration::from_millis(100))
+                        .keep_alive_while_idle(true)
+                        .build(),
+                )
+                .handshake(TokioIo::new(TokioIo::new(client_io)))
+                .await
+                .expect("http handshake");
+            tokio::spawn(conn);
+
+            // Extended CONNECT waits for the server's SETTINGS, so the timeout
+            // returns it unsent, canceled by the timeout.
+            let mut request = Request::connect("https://localhost:443/chat")
+                .body(Empty::<Bytes>::new())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(::http2::ext::Protocol::from_static("websocket"));
+            let mut err = client
+                .try_send_request(request)
+                .await
+                .expect_err("parked request");
+            assert!(err.error().is_canceled(), "{:?}", err.error());
+            assert!(err.error().is_timeout(), "{:?}", err.error());
+            assert!(err.take_message().is_some());
+        })
+        .await
+        .expect("test timed out");
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
+    async fn http2_keep_alive_rearms_after_idle() {
+        /// Panics if a sleep is polled after it completed, as some timers do.
+        struct StrictTimer;
+
+        struct StrictSleep {
+            inner: Pin<Box<dyn netty::rt::Sleep>>,
+            done: bool,
+        }
+
+        impl netty::rt::Timer for StrictTimer {
+            fn sleep(&self, duration: Duration) -> Pin<Box<dyn netty::rt::Sleep>> {
+                self.sleep_until(self.now() + duration)
+            }
+
+            fn sleep_until(&self, deadline: std::time::Instant) -> Pin<Box<dyn netty::rt::Sleep>> {
+                let inner = rt::TokioTimer::new().sleep_until(deadline);
+                Box::pin(StrictSleep { inner, done: false })
+            }
+        }
+
+        impl Future for StrictSleep {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                assert!(!self.done, "sleep polled after it completed");
+                futures_util::ready!(self.inner.as_mut().poll(cx));
+                self.done = true;
+                Poll::Ready(())
+            }
+        }
+
+        impl netty::rt::Sleep for StrictSleep {
+            fn reset(mut self: Pin<&mut Self>, deadline: std::time::Instant) {
+                self.inner.as_mut().reset(deadline);
+                self.done = false;
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client_io, server_io, _) = setup_duplex_test_server();
+
+            let server = tokio::spawn(async move {
+                let (mut rd, mut wr) = tokio::io::split(server_io);
+                accept_h2_preface(&mut rd, &mut wr).await;
+
+                // Stay silent past the interval, then end the response before
+                // the PING ACK, so keep-alive is rescheduled on an idle
+                // connection. The PING may come before or after the HEADERS.
+                let (mut headers, mut ping) = (false, None);
+                while !headers || ping.is_none() {
+                    match read_frame(&mut rd).await {
+                        (FRAME_HEADERS, ..) => headers = true,
+                        (FRAME_PING, 0, _, payload) => ping = Some(payload),
+                        _ => {}
+                    }
+                }
+                let ping = ping.unwrap();
+                write_frame(&mut wr, FRAME_HEADERS, 0x5, 1, &[0x88]).await;
+                write_frame(&mut wr, FRAME_PING, 0x1, 0, &ping).await;
+
+                // Idle past the interval, the next request is followed by a PING.
+                let (mut headers, mut ping) = (false, false);
+                while !(headers && ping) {
+                    match read_frame(&mut rd).await {
+                        (FRAME_HEADERS, ..) => headers = true,
+                        (FRAME_PING, 0, ..) => ping = true,
+                        _ => {}
+                    }
+                }
+                write_frame(&mut wr, FRAME_HEADERS, 0x5, 3, &[0x88]).await;
+            });
+
+            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .timer(StrictTimer)
+                .options(
+                    Http2Options::builder()
+                        .keep_alive_interval(Duration::from_millis(100))
+                        .keep_alive_timeout(Duration::from_secs(1))
+                        .build(),
+                )
+                .handshake(TokioIo::new(TokioIo::new(client_io)))
+                .await
+                .expect("http handshake");
+            tokio::spawn(conn);
+
+            let res = client
+                .try_send_request(http::Request::new(Empty::<Bytes>::new()))
+                .await
+                .expect("first request");
+            assert_eq!(res.status(), StatusCode::OK);
+
+            // The rescheduled sleep fires while idle, and the next request
+            // arms keep-alive again, which the server checks.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let res = client
+                .try_send_request(http::Request::new(Empty::<Bytes>::new()))
+                .await
+                .expect("second request");
+            assert_eq!(res.status(), StatusCode::OK);
+            server.await.expect("server");
+        })
+        .await
+        .expect("test timed out");
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
     async fn http2_adaptive_window_waits_for_settings_ack() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let (client_io, server_io, _) = setup_duplex_test_server();
@@ -4624,6 +4773,26 @@ mod conn {
     #[tokio::test]
     async fn http2_keep_alive_counts_any_read() {
         tokio::time::timeout(Duration::from_secs(10), async {
+            // Keep-alive without a timer fails the handshake, also when the
+            // timer given is an empty `Time`.
+            for empty in [false, true] {
+                let (client_io, _server_io, _) = setup_duplex_test_server();
+                let mut builder = conn::http2::Builder::new(rt::TokioExecutor::new());
+                if empty {
+                    builder = builder.timer(netty::rt::Time::Empty);
+                }
+                let handshake = builder
+                    .options(
+                        Http2Options::builder()
+                            .keep_alive_interval(Duration::from_millis(500))
+                            .build(),
+                    )
+                    .handshake::<_, Empty<Bytes>>(TokioIo::new(TokioIo::new(client_io)))
+                    .await;
+                let err = handshake.err().expect("keep-alive without a timer");
+                assert!(err.is_user(), "{err:?}");
+            }
+
             let (client_io, server_io, _) = setup_duplex_test_server();
 
             let server = tokio::spawn(async move {
@@ -4634,25 +4803,33 @@ mod conn {
                 while read_frame(&mut rd).await.0 != FRAME_HEADERS {}
                 write_frame(&mut wr, FRAME_HEADERS, 0x4, 1, &[0x88]).await;
 
-                // Server PINGs keep the client reading for longer than its interval.
-                for _ in 0..10 {
-                    write_frame(&mut wr, FRAME_PING, 0, 0, &[9; 8]).await;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                // Server PINGs keep the client reading for longer than its
+                // interval, so its keep-alive PING only follows the ACKs of all
+                // of them. The second time, they keep that PING alive past its
+                // timeout, and a late ACK still answers it; a write failing
+                // here means the client closed.
+                for late_ack in [false, true] {
+                    for _ in 0..10 {
+                        write_frame(&mut wr, FRAME_PING, 0, 0, &[9; 8]).await;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    if late_ack {
+                        write_frame(&mut wr, FRAME_PING, 0x1, 0, &[0; 8]).await;
+                    }
+                    let mut acks = 0;
+                    let payload = loop {
+                        match read_frame(&mut rd).await {
+                            (FRAME_PING, 0x1, _, _) => acks += 1,
+                            (FRAME_PING, 0, _, payload) => break payload,
+                            _ => {}
+                        }
+                    };
+                    assert_eq!(acks, 10);
+                    assert_eq!(payload, [0; 8]);
                 }
 
-                // So the keep-alive PING only follows the ACKs of all of them.
-                let mut acks = 0;
-                let payload = loop {
-                    match read_frame(&mut rd).await {
-                        (FRAME_PING, 0x1, _, _) => acks += 1,
-                        (FRAME_PING, 0, _, payload) => break payload,
-                        _ => {}
-                    }
-                };
-                assert_eq!(acks, 10);
-                assert_eq!(payload, [0; 8]);
-
-                // Without an ACK, the client closes with GOAWAY(0, INTERNAL_ERROR).
+                // Then, with no ACK or other reads, the client closes with
+                // GOAWAY(0, INTERNAL_ERROR).
                 let (kind, _, _, payload) = read_frame(&mut rd).await;
                 assert_eq!(kind, FRAME_GOAWAY);
                 assert_eq!(payload, [0, 0, 0, 0, 0, 0, 0, 2]);
