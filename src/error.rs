@@ -91,7 +91,6 @@ pub(crate) enum Header {
 #[cfg_attr(feature = "http3", derive(Clone, Copy))]
 pub(super) enum User {
     /// A request the protocol or peer settings do not allow.
-    #[cfg(any(feature = "http2", feature = "http3"))]
     InvalidRequest,
     /// Error calling user's Body::poll_data().
     Body,
@@ -368,6 +367,10 @@ impl Error {
         Error::new(Kind::User(User::DispatchGone))
     }
 
+    pub(super) fn new_user_invalid_request<E: Into<Cause>>(cause: E) -> Error {
+        Error::new_user(User::InvalidRequest).with(cause)
+    }
+
     #[cfg(feature = "http2")]
     pub(super) fn new_h2(cause: ::http2::Error) -> Error {
         if cause.is_io() {
@@ -420,7 +423,6 @@ impl Error {
             Kind::Http3 => "http3 error",
             Kind::Io => "connection error",
 
-            #[cfg(any(feature = "http2", feature = "http3"))]
             Kind::User(User::InvalidRequest) => "invalid request",
             Kind::User(User::Body) => "error from user's Body stream",
             Kind::User(User::BodyWriteAborted) => "user body write aborted",
@@ -441,10 +443,6 @@ impl Error {
     #[inline]
     pub(super) fn new_user_invalid_connect() -> Error {
         Error::new_user(User::InvalidConnectWithBody)
-    }
-
-    pub(super) fn new_user_invalid_request<E: Into<Cause>>(cause: E) -> Error {
-        Error::new_user(User::InvalidRequest).with(cause)
     }
 }
 

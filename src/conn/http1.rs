@@ -7,7 +7,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{Request, Response};
+use http::{Request, Response, Version};
 use http_body::Body;
 use httparse::ParserConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -139,7 +139,9 @@ where
     /// # Errors
     ///
     /// If there was an error before trying to serialize the request to the
-    /// connection, the message will be returned as part of this error.
+    /// connection, the message will be returned as part of this error. A request
+    /// whose version has no HTTP/1 form, such as HTTP/3, is returned this way with
+    /// an [`Error::is_user`] error.
     ///
     /// # Cancel safety
     ///
@@ -153,21 +155,30 @@ where
         &mut self,
         req: Request<B>,
     ) -> impl Future<Output = Result<Response<Incoming>, TrySendError<Request<B>>>> + use<B> {
-        let sent = self.dispatch.try_send(req);
-        async move {
-            match sent {
-                Ok(rx) => match rx.await {
-                    Ok(res) => res,
-                    // this is definite bug if it happens, but it shouldn't happen!
-                    Err(_) => panic!("dispatch dropped without returning error"),
-                },
-                Err(req) => {
+        let sent = match req.version() {
+            // The encoder sends HTTP/2 requests as HTTP/1.1.
+            Version::HTTP_10 | Version::HTTP_11 | Version::HTTP_2 => {
+                self.dispatch.try_send(req).map_err(|req| {
                     debug!("connection was not ready");
-                    Err(TrySendError {
+                    TrySendError {
                         error: Error::new_canceled().with("connection was not ready"),
                         message: Some(req),
-                    })
-                }
+                    }
+                })
+            }
+            _ => {
+                debug!("HTTP/1 cannot send a {:?} request", req.version());
+                Err(TrySendError {
+                    error: Error::new_user_invalid_request("unsupported HTTP/1 request version"),
+                    message: Some(req),
+                })
+            }
+        };
+        async move {
+            match sent?.await {
+                Ok(res) => res,
+                // this is definite bug if it happens, but it shouldn't happen!
+                Err(_) => panic!("dispatch dropped without returning error"),
             }
         }
     }
