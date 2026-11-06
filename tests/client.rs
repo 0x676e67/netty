@@ -4490,6 +4490,83 @@ mod conn {
 
     #[cfg(feature = "http2")]
     #[tokio::test]
+    async fn http2_adaptive_window_waits_for_settings_ack() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client_io, server_io, _) = setup_duplex_test_server();
+            let (read_tx, read_rx) = oneshot::channel();
+
+            let server = tokio::spawn(async move {
+                let (mut rd, mut wr) = tokio::io::split(server_io);
+                let mut preface = [0; 24];
+                rd.read_exact(&mut preface).await.expect("client preface");
+                // The client SETTINGS stay unacknowledged.
+                write_frame(&mut wr, FRAME_SETTINGS, 0, 0, &[]).await;
+                while read_frame(&mut rd).await.0 != FRAME_HEADERS {}
+                write_frame(&mut wr, FRAME_HEADERS, 0x4, 1, &[0x88]).await;
+
+                // The first DATA read sends a BDP PING. Fill the 65,535-byte
+                // stream window and ACK the PING once it is read, which doubles
+                // the window.
+                write_frame(&mut wr, FRAME_DATA, 0, 1, &[0; 16_384]).await;
+                let ping = loop {
+                    if let (FRAME_PING, 0, _, payload) = read_frame(&mut rd).await {
+                        break payload;
+                    }
+                };
+                for len in [16_384, 16_384, 16_383] {
+                    write_frame(&mut wr, FRAME_DATA, 0, 1, &vec![0; len]).await;
+                }
+                read_rx.await.expect("body read");
+                write_frame(&mut wr, FRAME_PING, 0x1, 0, &ping).await;
+
+                // The connection window grows to 131,070 at once, while the
+                // stream window waits for the SETTINGS ACK instead of failing
+                // the connection.
+                let mut released = 0;
+                while released < 131_070 {
+                    if let (FRAME_WINDOW_UPDATE, _, 0, payload) = read_frame(&mut rd).await {
+                        released += u32::from_be_bytes(payload[..4].try_into().unwrap());
+                    }
+                }
+                write_frame(&mut wr, FRAME_SETTINGS, 0x1, 0, &[]).await;
+                let settings = loop {
+                    if let (FRAME_SETTINGS, 0, _, payload) = read_frame(&mut rd).await {
+                        break payload;
+                    }
+                };
+                // SETTINGS_INITIAL_WINDOW_SIZE of 131,070.
+                assert_eq!(settings, [0, 4, 0, 1, 0xff, 0xfe]);
+                write_frame(&mut wr, FRAME_DATA, 0x1, 1, &[]).await;
+            });
+
+            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .options(Http2Options::builder().adaptive_window(true).build())
+                .handshake(TokioIo::new(TokioIo::new(client_io)))
+                .await
+                .expect("http handshake");
+            tokio::spawn(conn);
+
+            let res = client
+                .try_send_request(http::Request::new(Empty::<Bytes>::new()))
+                .await
+                .expect("request");
+            let mut body = res.into_body();
+            let mut read = 0;
+            while read < 65_535 {
+                let frame = body.frame().await.expect("data").expect("frame");
+                read += frame.data_ref().map_or(0, Bytes::len);
+            }
+            read_tx.send(()).expect("server");
+            let rest = body.collect().await.expect("body");
+            assert!(rest.to_bytes().is_empty());
+            server.await.expect("server");
+        })
+        .await
+        .expect("test timed out");
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
     async fn http2_headers_priority() {
         use netty::http2::{HeadersDependency, HeadersPriority, StreamId};
 
@@ -4622,6 +4699,8 @@ mod conn {
     }
 
     #[cfg(feature = "http2")]
+    const FRAME_DATA: u8 = 0x0;
+    #[cfg(feature = "http2")]
     const FRAME_HEADERS: u8 = 0x1;
     #[cfg(feature = "http2")]
     const FRAME_SETTINGS: u8 = 0x4;
@@ -4629,6 +4708,8 @@ mod conn {
     const FRAME_PING: u8 = 0x6;
     #[cfg(feature = "http2")]
     const FRAME_GOAWAY: u8 = 0x7;
+    #[cfg(feature = "http2")]
+    const FRAME_WINDOW_UPDATE: u8 = 0x8;
 
     #[cfg(feature = "http2")]
     /// Reads the client preface and acknowledges the client SETTINGS.

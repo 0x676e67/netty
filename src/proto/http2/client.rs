@@ -98,7 +98,11 @@ where
         let pp = conn.ping_pong().expect("conn.ping_pong");
         let (recorder, ponger) = ping::channel(pp, ping_config, timer);
 
-        let conn: Conn<_, B> = Conn { ponger, conn };
+        let conn: Conn<_, B> = Conn {
+            ponger,
+            conn,
+            pending_window: None,
+        };
         (Either::Left(conn), recorder)
     } else {
         (Either::Right(conn), ping::Recorder::disabled())
@@ -136,6 +140,8 @@ pin_project! {
         ponger: Ponger,
         #[pin]
         conn: Connection<T, SendBuf<<B as Body>::Data>>,
+        // A BDP stream window waiting for the previous SETTINGS to be acknowledged.
+        pending_window: Option<u32>,
     }
 }
 
@@ -151,7 +157,13 @@ where
         match this.ponger.as_mut().poll(cx) {
             Poll::Ready(ping::Ponged::SizeUpdate(wnd)) => {
                 this.conn.set_target_window_size(wnd);
-                this.conn.set_initial_window_size(wnd)?;
+                // http2 lets one SETTINGS await its ACK at a time, so the
+                // newest window waits for it instead of failing the connection.
+                *this.pending_window = this
+                    .conn
+                    .set_initial_window_size(wnd)
+                    .is_err()
+                    .then_some(wnd);
             }
             Poll::Ready(ping::Ponged::KeepAliveTimedOut) => {
                 debug!("connection keep-alive timed out");
@@ -164,7 +176,15 @@ where
             Poll::Pending => {}
         }
 
-        let poll = Pin::new(&mut this.conn).poll(cx);
+        let mut poll = Pin::new(&mut this.conn).poll(cx);
+        // An ACK read by this poll lets the waiting window go out now.
+        if poll.is_pending()
+            && let Some(wnd) = *this.pending_window
+            && this.conn.set_initial_window_size(wnd).is_ok()
+        {
+            *this.pending_window = None;
+            poll = Pin::new(&mut this.conn).poll(cx);
+        }
         // Any bytes count as read activity for keep-alive, including control
         // frames the connection handles itself.
         if this.conn.take_read_activity() {
