@@ -193,14 +193,17 @@ impl Config {
         keep_alive_while_idle: bool,
         payload: Option<[u8; 8]>,
     ) -> Self {
+        // Cap like Tokio's sleep (about 30 years) so deadline arithmetic cannot overflow.
+        const MAX_DELAY: Duration = Duration::from_secs(86_400 * 365 * 30);
+
         Config {
             bdp_initial_window: if adaptive_window {
                 Some(initial_window_size)
             } else {
                 None
             },
-            keep_alive_interval,
-            keep_alive_timeout,
+            keep_alive_interval: keep_alive_interval.map(|interval| interval.min(MAX_DELAY)),
+            keep_alive_timeout: keep_alive_timeout.min(MAX_DELAY),
             keep_alive_while_idle,
             payload,
         }
