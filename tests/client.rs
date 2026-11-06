@@ -3816,6 +3816,50 @@ mod conn {
 
     #[cfg(feature = "http2")]
     #[tokio::test]
+    async fn http2_keep_alive_saturates_oversized_durations() {
+        use hyper::service::service_fn;
+
+        let (client_io, server_io, _addr) = setup_duplex_test_server();
+        tokio::spawn(async move {
+            hyper::server::conn::http2::Builder::new(TokioExecutor)
+                .timer(TokioTimer)
+                .serve_connection(
+                    TokioIo::new(server_io),
+                    service_fn(|_| async {
+                        Ok::<_, hyper::Error>(http::Response::new(Empty::<Bytes>::new()))
+                    }),
+                )
+                .await
+                .expect("serve_connection");
+        });
+
+        let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+            .timer(rt::TokioTimer::new())
+            .options(
+                Http2Options::builder()
+                    .keep_alive_interval(Duration::MAX)
+                    .keep_alive_timeout(Duration::MAX)
+                    .keep_alive_while_idle(true)
+                    .build(),
+            )
+            .handshake(TokioIo::new(TokioIo::new(client_io)))
+            .await
+            .expect("http handshake");
+        let conn = tokio::spawn(conn);
+
+        let response = client
+            .try_send_request(http::Request::new(Empty::<Bytes>::new()))
+            .await
+            .expect("send_request");
+        assert_eq!(response.status(), http::StatusCode::OK);
+
+        // The connection task must still be alive rather than have panicked on overflow.
+        conn.abort();
+        assert!(conn.await.unwrap_err().is_cancelled());
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
     async fn http2_responds_before_consuming_request_body_no_trailers() {
         // Test that a early-response from server works correctly (request body wasn't fully
         // consumed). https://github.com/hyperium/hyper/issues/2872

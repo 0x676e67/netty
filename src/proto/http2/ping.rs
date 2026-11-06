@@ -181,6 +181,9 @@ pub(super) enum Ponged {
 #[derive(Debug)]
 pub(super) struct KeepAliveTimedOut;
 
+/// Longest keep-alive delay, matching Tokio's cap for oversized sleeps (about 30 years).
+const MAX_DELAY: Duration = Duration::from_secs(86_400 * 365 * 30);
+
 // ===== impl Config =====
 
 impl Config {
@@ -199,8 +202,9 @@ impl Config {
             } else {
                 None
             },
-            keep_alive_interval,
-            keep_alive_timeout,
+            // Cap like Tokio's sleep so deadline arithmetic cannot overflow.
+            keep_alive_interval: keep_alive_interval.map(|interval| interval.min(MAX_DELAY)),
+            keep_alive_timeout: keep_alive_timeout.min(MAX_DELAY),
             keep_alive_while_idle,
             payload,
         }
