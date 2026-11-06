@@ -298,6 +298,11 @@ where
     {
         trace!("client handshake HTTP/2");
 
+        // Keep-alive sleeps between PINGs, which needs a timer.
+        if self.opts.keep_alive_interval.is_some() && matches!(self.timer, Time::Empty) {
+            return Err(Error::new_user_keep_alive_without_timer());
+        }
+
         // Crate the HTTP/2 client with the provided options.
         let mut builder = http2::client::Builder::default();
         builder

@@ -4624,6 +4624,18 @@ mod conn {
     #[tokio::test]
     async fn http2_keep_alive_counts_any_read() {
         tokio::time::timeout(Duration::from_secs(10), async {
+            // Keep-alive without a timer fails the handshake.
+            let (client_io, _server_io, _) = setup_duplex_test_server();
+            let handshake = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .options(
+                    Http2Options::builder()
+                        .keep_alive_interval(Duration::from_millis(500))
+                        .build(),
+                )
+                .handshake::<_, Empty<Bytes>>(TokioIo::new(TokioIo::new(client_io)))
+                .await;
+            assert!(handshake.is_err(), "keep-alive without a timer");
+
             let (client_io, server_io, _) = setup_duplex_test_server();
 
             let server = tokio::spawn(async move {
@@ -4652,9 +4664,24 @@ mod conn {
                 assert_eq!(acks, 10);
                 assert_eq!(payload, [0; 8]);
 
-                // Without an ACK, the client closes with GOAWAY(0, INTERNAL_ERROR).
-                let (kind, _, _, payload) = read_frame(&mut rd).await;
-                assert_eq!(kind, FRAME_GOAWAY);
+                // Reads keep the connection open past the timeout while that
+                // PING is unanswered.
+                for _ in 0..10 {
+                    write_frame(&mut wr, FRAME_PING, 0, 0, &[9; 8]).await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+
+                // Then, with no ACK or other reads, the client closes with
+                // GOAWAY(0, INTERNAL_ERROR).
+                let mut acks = 0;
+                let payload = loop {
+                    match read_frame(&mut rd).await {
+                        (FRAME_PING, 0x1, _, _) => acks += 1,
+                        (FRAME_GOAWAY, _, _, payload) => break payload,
+                        _ => {}
+                    }
+                };
+                assert_eq!(acks, 10);
                 assert_eq!(payload, [0, 0, 0, 0, 0, 0, 0, 2]);
             });
 

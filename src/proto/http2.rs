@@ -326,7 +326,7 @@ pub struct Http2Options {
     /// The interval for HTTP/2 keep-alive ping frames.
     pub keep_alive_interval: Option<Duration>,
 
-    /// The timeout for receiving an acknowledgement of the keep-alive ping.
+    /// How long an unanswered keep-alive PING may go without reads before the connection closes.
     pub keep_alive_timeout: Duration,
 
     /// Whether HTTP/2 keep-alive should apply while the connection is idle.
@@ -543,7 +543,8 @@ impl Http2OptionsBuilder {
     /// connection alive.
     ///
     /// A PING is sent once nothing has been read from the connection for this
-    /// interval. Pass `None` to disable HTTP2 keep-alive.
+    /// interval. It needs a [`timer`](crate::conn::http2::Builder::timer): the
+    /// handshake fails without one. Pass `None` to disable HTTP2 keep-alive.
     ///
     /// Default is currently disabled.
     #[inline]
@@ -552,11 +553,13 @@ impl Http2OptionsBuilder {
         self
     }
 
-    /// Sets a timeout for receiving an acknowledgement of the keep-alive ping.
+    /// Closes the connection once a keep-alive PING is unanswered and nothing
+    /// has been read for `timeout`, counted from when the PING is sent or the
+    /// last read, whichever is later.
     ///
-    /// If the ping is not acknowledged within the timeout, the connection will
-    /// be closed, with a GOAWAY of `INTERNAL_ERROR` if it can be written right
-    /// away. Does nothing if `keep_alive_interval` is disabled.
+    /// The connection then closes with a GOAWAY of `INTERNAL_ERROR` if it can
+    /// be written right away. Does nothing if `keep_alive_interval` is
+    /// disabled.
     ///
     /// Default is 20 seconds.
     #[inline]

@@ -97,8 +97,8 @@ pub(crate) struct Config {
     bdp_initial_window: Option<WindowSize>,
     /// If nothing is read in this amount of time, a PING frame is sent.
     keep_alive_interval: Option<Duration>,
-    /// After sending a keepalive PING, the connection will be closed if
-    /// a pong is not received in this amount of time.
+    /// After sending a keepalive PING, the connection will be closed once
+    /// nothing, the pong included, is read in this amount of time.
     keep_alive_timeout: Duration,
     /// If true, sends pings even when there are no active streams.
     keep_alive_while_idle: bool,
@@ -157,8 +157,8 @@ struct Bdp {
 struct KeepAlive {
     /// If nothing is read in this amount of time, a PING frame is sent.
     interval: Duration,
-    /// After sending a keepalive PING, the connection will be closed if
-    /// a pong is not received in this amount of time.
+    /// After sending a keepalive PING, the connection will be closed once
+    /// nothing, the pong included, is read in this amount of time.
     timeout: Duration,
     /// If true, sends pings even when there are no active streams.
     while_idle: bool,
@@ -331,7 +331,7 @@ impl Future for Ponger {
             }
             Poll::Pending => {
                 if let Some(ref mut ka) = this.keep_alive
-                    && let Err(KeepAliveTimedOut) = ka.maybe_timeout(cx)
+                    && let Err(KeepAliveTimedOut) = ka.maybe_timeout(cx, &locked)
                 {
                     this.keep_alive = None;
                     locked.is_keep_alive_timed_out = true;
@@ -514,10 +514,22 @@ impl KeepAlive {
         }
     }
 
-    fn maybe_timeout(&mut self, cx: &mut task::Context<'_>) -> Result<(), KeepAliveTimedOut> {
+    fn maybe_timeout(
+        &mut self,
+        cx: &mut task::Context<'_>,
+        shared: &Shared,
+    ) -> Result<(), KeepAliveTimedOut> {
         match self.state {
             KeepAliveState::PingSent => {
                 if Pin::new(&mut self.sleep).poll(cx).is_pending() {
+                    return Ok(());
+                }
+                // Reads while the PING is unanswered show the connection is
+                // alive, so the timeout counts from the last one.
+                let deadline = shared.last_read_at() + self.timeout;
+                if deadline > self.timer.now() {
+                    self.timer.reset(&mut self.sleep, deadline);
+                    cx.waker().wake_by_ref(); // poll the new deadline
                     return Ok(());
                 }
                 trace!("keep-alive timeout ({:?}) reached", self.timeout);
