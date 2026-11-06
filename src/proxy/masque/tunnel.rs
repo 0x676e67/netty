@@ -3,19 +3,18 @@
 use std::{
     fmt, io, mem,
     pin::Pin,
-    task::{Context, Poll, Waker, ready},
+    sync::Arc,
+    task::{Context, Poll, Wake, Waker, ready},
 };
 
 use bytes::{Buf, Bytes, BytesMut};
+use futures_util::task::AtomicWaker;
 use tokio::io::{AsyncWrite, ReadHalf, WriteHalf};
 #[cfg(feature = "http2")]
 use {
     crate::proto::http2::upgrade::StreamReset,
     http2::Reason,
-    std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    std::sync::atomic::{AtomicBool, Ordering},
 };
 
 use super::{MAX_UDP_PAYLOAD, MasqueError, SendError, capsule};
@@ -35,7 +34,8 @@ const READ_CHUNK: usize = 8 * 1024;
 ///
 /// Payloads travel as HTTP Datagrams when the HTTP/3 connection negotiated them, and otherwise
 /// as DATAGRAM capsules on the request stream; received capsules are always accepted. Use the
-/// tunnel from one task, or [`split`](Self::split) it to send and receive from two.
+/// tunnel from one task, or [`split`](Self::split) it to send and receive from two. A tunnel
+/// shared behind a lock wakes one task sending and one receiving.
 ///
 /// Dropping the tunnel, or both its halves, aborts the request stream unless both sides have
 /// ended it, which closes the tunnel at the proxy and may discard capsules not yet delivered; to
@@ -58,6 +58,9 @@ pub struct UdpSender {
     #[cfg(feature = "http2")]
     http2: Option<Arc<Http2Stream>>,
     control: WriteHalf<Upgraded>,
+    /// Polls `control` for writes and wakes every task registered in `wakers`.
+    waker: Waker,
+    wakers: Arc<WriteWakers>,
     native: Option<Sender>,
     write_buf: BytesMut,
     /// Whether capsule bytes were written since the last flush.
@@ -106,6 +109,17 @@ struct Http2Stream {
     closed: AtomicBool,
 }
 
+/// The tasks waiting to write buffered capsules: the sender's, and one receiving through
+/// [`UdpTunnel::poll_recv`].
+///
+/// The request stream keeps a single write waker, so each task polling it with its own would
+/// take the other's wakeup; both poll with one waker that wakes them all instead.
+#[derive(Default)]
+struct WriteWakers {
+    send: AtomicWaker,
+    recv: AtomicWaker,
+}
+
 /// A receive failure, kept so later polls report it again.
 #[derive(Clone)]
 enum RecvError {
@@ -119,9 +133,12 @@ impl UdpTunnel {
     pub(super) fn new(control: Upgraded, native: Option<(Sender, Receiver)>) -> Self {
         let (read, write) = tokio::io::split(control);
         let (sender, receiver) = native.unzip();
+        let wakers = Arc::new(WriteWakers::default());
         UdpTunnel {
             sender: UdpSender {
                 control: write,
+                waker: Waker::from(wakers.clone()),
+                wakers,
                 native: sender,
                 write_buf: BytesMut::new(),
                 unflushed: false,
@@ -181,7 +198,8 @@ impl UdpTunnel {
     /// See [`UdpReceiver::poll_recv`]; also writes buffered capsules, so a task that only
     /// receives still sends them.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, MasqueError>> {
-        let _ = self.sender.poll_write_buf(cx);
+        self.sender.wakers.recv.register(cx.waker());
+        let _ = self.sender.poll_write_buf();
         self.receiver.poll_recv(cx)
     }
 
@@ -271,7 +289,8 @@ impl UdpSender {
             return Err(SendError::Full);
         }
         capsule::encode_datagram(payload, &mut self.write_buf);
-        let _ = self.poll_write_buf(&mut Context::from_waker(Waker::noop()));
+        // Polls without a task of its own, so the tasks waiting to write keep their wakeup.
+        let _ = self.poll_write_buf();
         if self.write_closed {
             return Err(SendError::Closed);
         }
@@ -297,7 +316,8 @@ impl UdpSender {
                 Err(_) => return Poll::Ready(Err(SendError::Closed)),
             }
         }
-        let _ = self.poll_write_buf(cx);
+        self.wakers.send.register(cx.waker());
+        let _ = self.poll_write_buf();
         if self.write_closed {
             Poll::Ready(Err(SendError::Closed))
         } else if self.write_buf.len() < WRITE_LIMIT {
@@ -311,7 +331,8 @@ impl UdpSender {
     ///
     /// Returns the first write error once.
     pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        ready!(self.poll_write_buf(cx));
+        self.wakers.send.register(cx.waker());
+        ready!(self.poll_write_buf());
         Poll::Ready(self.write_error.take().map_or(Ok(()), Err))
     }
 
@@ -324,7 +345,8 @@ impl UdpSender {
     /// at once after that or after a close.
     pub fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.closing = true;
-        ready!(self.poll_write_buf(cx));
+        self.wakers.send.register(cx.waker());
+        ready!(self.poll_write_buf());
         if !self.write_closed {
             let shutdown = ready!(Pin::new(&mut self.control).poll_shutdown(cx));
             self.write_closed = true;
@@ -335,11 +357,13 @@ impl UdpSender {
 
     /// Writes buffered capsules, then flushes the request stream if anything was written.
     ///
+    /// Polls with the shared write waker, so a caller registers in `wakers` first to be woken.
     /// A write error stops sending and keeps the error for `poll_flush` or `poll_close`.
-    fn poll_write_buf(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+    fn poll_write_buf(&mut self) -> Poll<()> {
         if self.write_closed {
             return Poll::Ready(());
         }
+        let cx = &mut Context::from_waker(&self.waker);
         let result = loop {
             if self.write_buf.is_empty() {
                 // Skipping idle flushes spares HTTP/3 a flush round trip on every receive.
@@ -514,6 +538,19 @@ impl Drop for Http2Stream {
         if !*self.closed.get_mut() {
             self.reset.reset(Reason::CANCEL);
         }
+    }
+}
+
+// ===== impl WriteWakers =====
+
+impl Wake for WriteWakers {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.send.wake();
+        self.recv.wake();
     }
 }
 
@@ -706,6 +743,62 @@ mod tests {
         assert_eq!(flushed.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
         poll_fn(|cx| tunnel.poll_close(cx)).await.unwrap();
         assert!(matches!(poll_fn(|cx| tunnel.poll_recv(cx)).await, Ok(None)));
+    }
+
+    #[test]
+    fn write_wakeups_reach_the_sending_and_receiving_task() {
+        /// A request stream that takes no bytes and, like HTTP/2 and HTTP/3 streams, keeps only
+        /// the last write waker.
+        #[derive(Clone, Default)]
+        struct Stalled(Arc<std::sync::Mutex<Option<Waker>>>);
+
+        impl AsyncRead for Stalled {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                _: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Pending
+            }
+        }
+
+        impl AsyncWrite for Stalled {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                _: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                *self.0.lock().unwrap() = Some(cx.waker().clone());
+                Poll::Pending
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let stream = Stalled::default();
+        let mut tunnel = UdpTunnel::new(Upgraded::new(stream.clone(), Bytes::new()), None);
+        let wake = || stream.0.lock().unwrap().take().unwrap().wake();
+        let (mut send, mut recv) = (tokio_test::task::spawn(()), tokio_test::task::spawn(()));
+
+        // A send that only buffers leaves the receiving task waiting to write it.
+        tunnel.try_send(b"ping").unwrap();
+        assert!(recv.enter(|cx, _| tunnel.poll_recv(cx)).is_pending());
+        tunnel.try_send(b"pong").unwrap();
+        wake();
+        assert!(recv.is_woken(), "a send took the receiving task's wakeup");
+
+        // Receiving leaves the send task waiting for room.
+        while tunnel.try_send(&[7; 8000]).is_ok() {}
+        assert!(send.enter(|cx, _| tunnel.poll_send_ready(cx)).is_pending());
+        assert!(recv.enter(|cx, _| tunnel.poll_recv(cx)).is_pending());
+        wake();
+        assert!(send.is_woken(), "receiving took the send task's wakeup");
     }
 
     #[tokio::test]
