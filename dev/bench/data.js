@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793954351939,
+  "lastUpdate": 1793962258789,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -17171,6 +17171,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 5266115,
             "range": "± 55759.70",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "distinct": true,
+          "id": "d2f797b7c244f792f549fc6f37071f642253b06f",
+          "message": "chore(deps): track http2 with the error GOAWAY reason kept on idle close",
+          "timestamp": "2026-11-06T10:48:03Z",
+          "tree_id": "dca0538d587498f010fd5de010ef634bd78d98c2",
+          "url": "https://github.com/0x676e67/netty/commit/d2f797b7c244f792f549fc6f37071f642253b06f"
+        },
+        "date": 1793962257634,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 49599,
+            "range": "± 1110.72",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3605275,
+            "range": "± 310128.14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 18093,
+            "range": "± 259.75",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 18859,
+            "range": "± 357.79",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 22529,
+            "range": "± 296.95",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 74162,
+            "range": "± 2213.47",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 40998173,
+            "range": "± 22140.65",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 58527,
+            "range": "± 1183.39",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 23045387,
+            "range": "± 8350428.88",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 6426562,
+            "range": "± 18339156.91",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 6102611,
+            "range": "± 47639.46",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 85990018,
+            "range": "± 41099884.44",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 44822307,
+            "range": "± 289736.68",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 4576464,
+            "range": "± 571217.19",
             "unit": "ns/iter"
           }
         ]
