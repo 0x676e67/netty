@@ -449,28 +449,36 @@ impl<B> ConnectGate<B> {
         self.parked.pop_front().and_then(|mut parked| parked.take())
     }
 
-    /// Returns parked requests unsent, with the keep-alive timeout or else the
-    /// connection failure as their cause.
-    fn release(&mut self, err: &::http2::Error, timed_out: bool) {
+    /// Returns parked requests unsent, each with an error from `error`.
+    fn release(&mut self, error: impl Fn() -> Error) {
         for mut parked in self.parked.drain(..) {
             let Some((req, cb)) = parked.take() else {
                 continue;
             };
-            // `http2::Error` is not `Clone`; rebuild the protocol reason or I/O kind.
-            let error = match (err.reason(), err.get_io()) {
-                _ if timed_out => ping::KeepAliveTimedOut.crate_error(),
-                (Some(reason), _) => Error::new_canceled().with(::http2::Error::from(reason)),
-                (None, Some(io)) => {
-                    Error::new_canceled().with(std::io::Error::new(io.kind(), io.to_string()))
-                }
-                (None, None) => Error::new_canceled().with(err.to_string()),
-            };
             cb.send(Err(TrySendError {
-                error,
+                error: error(),
                 message: Some(req),
             }));
         }
     }
+}
+
+/// A canceled request's error caused by the connection failing with `err`.
+fn canceled_by(err: &::http2::Error) -> Error {
+    // `http2::Error` is not `Clone`; rebuild the protocol reason or I/O kind.
+    match (err.reason(), err.get_io()) {
+        (Some(reason), _) => Error::new_canceled().with(::http2::Error::from(reason)),
+        (None, Some(io)) => {
+            Error::new_canceled().with(std::io::Error::new(io.kind(), io.to_string()))
+        }
+        (None, None) => Error::new_canceled().with(err.to_string()),
+    }
+}
+
+/// A canceled request's error caused by the keep-alive timeout, which also
+/// reports [`is_timeout`](Error::is_timeout).
+fn canceled_by_timeout() -> Error {
+    Error::new_canceled().with(ping::KeepAliveTimedOut)
 }
 
 /// Rejects extended CONNECT to a server that did not enable it.
@@ -969,7 +977,11 @@ where
                         self.poll_pipe(f, cx);
                     }
                     let timed_out = self.ping.ensure_not_timed_out();
-                    self.gate.release(&err, timed_out.is_err());
+                    if timed_out.is_err() {
+                        self.gate.release(canceled_by_timeout);
+                    } else {
+                        self.gate.release(|| canceled_by(&err));
+                    }
                     timed_out?;
                     return if err.reason() == Some(::http2::Reason::NO_ERROR) {
                         trace!("connection gracefully shutdown");
@@ -1086,6 +1098,12 @@ where
                     Ok(never) => match never {},
                     Err(_conn_is_eof) => {
                         trace!("connection task is closed, closing dispatch task");
+                        // The connection may have closed on a keep-alive timeout
+                        // since `poll_ready`, which the dispatch task reports too.
+                        if let Err(err) = self.ping.ensure_not_timed_out() {
+                            self.gate.release(canceled_by_timeout);
+                            return Poll::Ready(Err(err));
+                        }
                         return Poll::Ready(Ok(Dispatched::Shutdown));
                     }
                 },

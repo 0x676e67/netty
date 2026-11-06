@@ -354,10 +354,12 @@ impl Ponger {
         let Some(ref mut ka) = self.keep_alive else {
             return Poll::Pending;
         };
-        let mut locked = self.shared.lock().panic_if_poisoned();
-        ready!(ka.poll_timeout(cx, &locked));
+        ready!(ka.poll_timeout(cx, &self.shared));
         self.keep_alive = None;
-        locked.is_keep_alive_timed_out = true;
+        self.shared
+            .lock()
+            .panic_if_poisoned()
+            .is_keep_alive_timed_out = true;
         Poll::Ready(KeepAliveTimedOut)
     }
 
@@ -414,8 +416,8 @@ impl Bdp {
             return None;
         }
 
-        // A round trip too short for the timer's clock says nothing about the
-        // bandwidth, and would make it infinite.
+        // A round trip below the timer's resolution says nothing about the
+        // bandwidth; as a first sample it would make it infinite.
         let rtt = seconds(rtt);
         if rtt == 0.0 {
             self.stabilize_delay();
@@ -533,7 +535,7 @@ impl KeepAlive {
         }
     }
 
-    fn poll_timeout(&mut self, cx: &mut task::Context<'_>, shared: &Shared) -> Poll<()> {
+    fn poll_timeout(&mut self, cx: &mut task::Context<'_>, shared: &Mutex<Shared>) -> Poll<()> {
         let KeepAliveState::PingSent(mut deadline) = self.state else {
             return Poll::Pending;
         };
@@ -541,7 +543,7 @@ impl KeepAlive {
             // Reads while the PING is unanswered show the connection is alive,
             // so the timeout counts from the last one. Each extension needs a
             // new read, whatever clocks the timer uses.
-            let next = shared.last_read_at() + self.timeout;
+            let next = shared.lock().panic_if_poisoned().last_read_at() + self.timeout;
             if next <= deadline {
                 trace!("keep-alive timeout ({:?}) reached", self.timeout);
                 return Poll::Ready(());
