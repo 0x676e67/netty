@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793945376844,
+  "lastUpdate": 1793945389145,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -16847,6 +16847,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4335822,
             "range": "± 89342.22",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1d7d65e62e43fb1f7e1a47015a02d60f91a0c431",
+          "message": "fix(masque): keep capsule write wakeups for tasks sharing a tunnel (#199)",
+          "timestamp": "2026-11-06T14:07:28+08:00",
+          "tree_id": "82d8052f6765a356ef363e8337adb33a1391225c",
+          "url": "https://github.com/0x676e67/netty/commit/1d7d65e62e43fb1f7e1a47015a02d60f91a0c431"
+        },
+        "date": 1793945388287,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 37790,
+            "range": "± 583.62",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 4273932,
+            "range": "± 658720.45",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 12222,
+            "range": "± 250.59",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 13295,
+            "range": "± 395.52",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 19404,
+            "range": "± 292.28",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 60450,
+            "range": "± 1377.82",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 41002880,
+            "range": "± 142364.41",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 60479,
+            "range": "± 1718.78",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 4622439,
+            "range": "± 76648.59",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 29879546,
+            "range": "± 16207440.91",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 4340537,
+            "range": "± 760304.67",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 36060887,
+            "range": "± 760390.34",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 34241131,
+            "range": "± 364824.85",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 3513047,
+            "range": "± 106192.32",
             "unit": "ns/iter"
           }
         ]
