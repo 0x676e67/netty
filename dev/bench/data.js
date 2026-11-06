@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793947835580,
+  "lastUpdate": 1793954351939,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -17063,6 +17063,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4414838,
             "range": "± 53311.73",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "cd9325597432c65912d3e882120f7f2b2143add0",
+          "message": "fix(http2): keep a BDP window waiting for the SETTINGS ACK (#201)",
+          "timestamp": "2026-11-06T16:36:26+08:00",
+          "tree_id": "00deb6bdeed1d69168a0372137b859b5c168ebd0",
+          "url": "https://github.com/0x676e67/netty/commit/cd9325597432c65912d3e882120f7f2b2143add0"
+        },
+        "date": 1793954351343,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 70666,
+            "range": "± 1829.59",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3998997,
+            "range": "± 177474.50",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 21914,
+            "range": "± 331.58",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 23448,
+            "range": "± 451.86",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 33569,
+            "range": "± 1237.16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 103773,
+            "range": "± 1970.70",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 41000115,
+            "range": "± 11651.17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 78944,
+            "range": "± 3082.50",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 31967148,
+            "range": "± 8489631.91",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 33997260,
+            "range": "± 8128760.64",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 7510183,
+            "range": "± 159863.47",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 91995581,
+            "range": "± 41157986.36",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 49973335,
+            "range": "± 959864.67",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 5266115,
+            "range": "± 55759.70",
             "unit": "ns/iter"
           }
         ]
