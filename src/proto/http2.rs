@@ -374,7 +374,8 @@ pub struct Http2Options {
     /// Defaults to `Some(1024)`; `None` disables the limit.
     pub max_local_error_reset_streams: Option<usize>,
 
-    /// Whether to enable push promises.
+    /// Whether the server may push, sent as `SETTINGS_ENABLE_PUSH`. `None`
+    /// sends nothing, which leaves push enabled.
     pub enable_push: Option<bool>,
 
     /// The header table size for HPACK compression.
@@ -405,7 +406,7 @@ impl Http2OptionsBuilder {
     ///
     /// Passing `None` will do nothing.
     ///
-    /// If not set, crate::core: will use a default.
+    /// Default is 2 MiB.
     ///
     /// [spec]: https://httpwg.org/specs/rfc9113.html#SETTINGS_INITIAL_WINDOW_SIZE
     #[inline]
@@ -421,7 +422,7 @@ impl Http2OptionsBuilder {
     ///
     /// Passing `None` will do nothing.
     ///
-    /// If not set, crate::core: will use a default.
+    /// Default is 5 MiB.
     #[inline]
     pub fn initial_connection_window_size(mut self, sz: impl Into<Option<u32>>) -> Self {
         if let Some(sz) = sz.into() {
@@ -438,7 +439,7 @@ impl Http2OptionsBuilder {
     ///
     /// Passing `None` will do nothing.
     ///
-    /// If not set, crate::core: will use a default.
+    /// Default is 100.
     ///
     /// [connection preface]: https://httpwg.org/specs/rfc9113.html#preface
     #[inline]
@@ -487,9 +488,10 @@ impl Http2OptionsBuilder {
         self
     }
 
-    /// Sets the max size of received header frames.
+    /// Sets `SETTINGS_MAX_HEADER_LIST_SIZE`, the limit on received header lists.
     ///
-    /// Default is currently 16KB, but can change.
+    /// Default is unset: nothing is sent and `http2` accepts header lists up to
+    /// 16 MiB. `Http2Options::default()` uses 16 KiB.
     #[inline]
     pub fn max_header_list_size(mut self, max: u32) -> Self {
         self.opts.max_header_list_size = Some(max);
@@ -502,7 +504,7 @@ impl Http2OptionsBuilder {
     /// table used to encode header blocks, in octets. The encoder may select any value
     /// equal to or less than the header table size specified by the sender.
     ///
-    /// The default value of crate `h2` is 4,096.
+    /// Default is unset, which leaves the protocol default of 4,096.
     #[inline]
     pub fn header_table_size(mut self, size: impl Into<Option<u32>>) -> Self {
         if let Some(size) = size.into() {
@@ -523,17 +525,17 @@ impl Http2OptionsBuilder {
     /// 0. If `max` is set to 0, then the remote will not be permitted to
     /// initiate streams.
     ///
-    /// Note that streams in the reserved state, i.e., push promises that have
-    /// been reserved but the stream has not started, do not count against this
-    /// setting.
+    /// Although the HTTP/2 specification excludes streams in the reserved state
+    /// from this limit, `http2` counts reserved push streams against it, so on a
+    /// client this limits pushes.
     ///
     /// Also note that if the remote *does* exceed the value set here, it is not
-    /// a protocol level error. Instead, the `h2` library will immediately reset
-    /// the stream.
+    /// a protocol level error. Instead, `http2` will immediately reset the
+    /// stream.
     ///
     /// See [Section 5.1.2] in the HTTP/2 spec for more details.
     ///
-    /// [Section 5.1.2]: https://httpwg.org/specs/rfc7540.html#rfc.section.5.1.2
+    /// [Section 5.1.2]: https://www.rfc-editor.org/rfc/rfc9113.html#section-5.1.2
     #[inline]
     pub fn max_concurrent_streams(mut self, max: impl Into<Option<u32>>) -> Self {
         if let Some(max) = max.into() {
@@ -631,9 +633,13 @@ impl Http2OptionsBuilder {
         self
     }
 
-    /// Enables and disables the push feature for HTTP2.
+    /// Sets whether the server may push responses, sent as `SETTINGS_ENABLE_PUSH`.
     ///
-    /// Passing `None` will do nothing.
+    /// Default is unset: no setting is sent, which leaves push enabled
+    /// ([RFC 9113 §6.5.2]). Pushed responses are not exposed, so they are
+    /// discarded with their request's stream.
+    ///
+    /// [RFC 9113 §6.5.2]: https://www.rfc-editor.org/rfc/rfc9113.html#section-6.5.2
     #[inline]
     pub fn enable_push(mut self, opt: bool) -> Self {
         self.opts.enable_push = Some(opt);
@@ -660,9 +666,7 @@ impl Http2OptionsBuilder {
     /// See the documentation of [`http2::client::Builder::max_concurrent_reset_streams`] for more
     /// details.
     ///
-    /// The default value is determined by the `h2` crate.
-    ///
-    /// [`http2::client::Builder::max_concurrent_reset_streams`]: https://docs.rs/h2/client/struct.Builder.html#method.max_concurrent_reset_streams
+    /// Default is 50.
     #[inline]
     pub fn max_concurrent_reset_streams(mut self, max: usize) -> Self {
         self.opts.max_concurrent_reset_streams = Some(max);
@@ -681,14 +685,10 @@ impl Http2OptionsBuilder {
 
     /// Set the maximum write buffer size for each HTTP/2 stream.
     ///
-    /// Default is currently 1MB, but may change.
-    ///
-    /// # Panics
-    ///
-    /// The value must be no larger than `u32::MAX`.
+    /// Default is currently 1MB, but may change. A `max` above `u32::MAX` is
+    /// treated as `u32::MAX`.
     #[inline]
     pub fn max_send_buf_size(mut self, max: usize) -> Self {
-        assert!(max <= u32::MAX as usize);
         self.opts.max_send_buffer_size = max;
         self
     }

@@ -13,7 +13,7 @@ use bytes::BytesMut;
 use http::{HeaderMap, Method};
 use httparse::ParserConfig;
 
-use self::{conn::Conn, decode::Decoder, encode::Encoder, io::MINIMUM_MAX_BUFFER_SIZE};
+use self::{conn::Conn, decode::Decoder, encode::Encoder};
 use super::{BodyLength, MessageHead};
 use crate::{
     body::DecodedLength,
@@ -132,7 +132,9 @@ pub struct Http1Options {
 }
 
 impl Http1OptionsBuilder {
-    /// Set the `http09_responses` field.
+    /// Sets whether HTTP/0.9 responses are accepted.
+    ///
+    /// Default is false.
     #[inline]
     pub fn http09_responses(mut self, enabled: bool) -> Self {
         self.opts.h09_responses = enabled;
@@ -146,10 +148,10 @@ impl Http1OptionsBuilder {
     /// but may also improve performance when an IO transport doesn't
     /// support vectored writes well, such as most TLS implementations.
     ///
-    /// Setting this to true will force crate::core: to use queued strategy
+    /// Setting this to true will force netty to use queued strategy
     /// which may eliminate unnecessary cloning on some TLS backends
     ///
-    /// Default is `auto`. In this mode crate::core: will try to guess which
+    /// Default is `auto`. In this mode netty will try to guess which
     /// mode to use
     #[inline]
     pub fn writev(mut self, writev: Option<bool>) -> Self {
@@ -162,12 +164,11 @@ impl Http1OptionsBuilder {
     /// When a response is received, the parser will reserve a buffer to store headers for optimal
     /// performance.
     ///
-    /// If client receives more headers than the buffer size, the error "message header too large"
+    /// If client receives more headers than the buffer size, the error "message head is too large"
     /// is returned.
     ///
-    /// Note that headers is allocated on the stack by default, which has higher performance. After
-    /// setting this value, headers will be allocated in heap memory, that is, heap memory
-    /// allocation will occur for each response, and there will be a performance drop of about 5%.
+    /// Up to 100 headers are kept on the stack. A larger value allocates the buffer on the heap for
+    /// each response, which costs about 5% in performance.
     ///
     /// Default is 100.
     #[inline]
@@ -184,9 +185,9 @@ impl Http1OptionsBuilder {
     /// If not configured, then the [`max_buf_size`](Http1OptionsBuilder::max_buf_size) will
     /// naturally be reached and applied.
     ///
-    /// This value is also used as the maximum size limit for chunked trailers.
+    /// This value also limits chunked trailers, which are limited to 16 KiB when it is unset.
     ///
-    /// Default is `None`.
+    /// Default is unset.
     #[inline]
     pub fn max_header_size(mut self, val: usize) -> Self {
         self.opts.h1_max_header_size = Some(val);
@@ -209,19 +210,12 @@ impl Http1OptionsBuilder {
     ///
     /// Default is ~400kb.
     ///
-    /// Note that setting this option unsets the `read_exact_buf_size` option.
+    /// Note that setting this option unsets the
+    /// [`read_buf_exact_size`](Http1OptionsBuilder::read_buf_exact_size) option.
     ///
-    /// # Panics
-    ///
-    /// The minimum value allowed is 8192. This method panics if the passed `max` is less than the
-    /// minimum.
+    /// A `max` below 8192 is treated as 8192.
     #[inline]
     pub fn max_buf_size(mut self, max: usize) -> Self {
-        assert!(
-            max >= MINIMUM_MAX_BUFFER_SIZE,
-            "the max_buf_size cannot be smaller than the minimum that h1 specifies."
-        );
-
         self.opts.h1_max_buf_size = Some(max);
         self.opts.h1_read_buf_exact_size = None;
         self

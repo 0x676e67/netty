@@ -1129,21 +1129,17 @@ where
                     return Poll::Ready(Ok(Dispatched::Shutdown));
                 }
 
-                Poll::Pending => match ready!(Pin::new(&mut self.conn_eof).poll(cx)) {
-                    // As of Rust 1.82, this pattern is no longer needed, and emits a warning.
-                    // But we cannot remove it as long as MSRV is less than that.
-                    Ok(never) => match never {},
-                    Err(_conn_is_eof) => {
-                        trace!("connection task is closed, closing dispatch task");
-                        // The connection may have closed on a keep-alive timeout
-                        // since `poll_ready`, which the dispatch task reports too.
-                        if let Err(err) = self.ping.ensure_not_timed_out() {
-                            self.gate.release(canceled_by_timeout);
-                            return Poll::Ready(Err(err));
-                        }
-                        return Poll::Ready(Ok(Dispatched::Shutdown));
+                Poll::Pending => {
+                    let Err(_conn_is_eof) = ready!(Pin::new(&mut self.conn_eof).poll(cx));
+                    trace!("connection task is closed, closing dispatch task");
+                    // The connection may have closed on a keep-alive timeout
+                    // since `poll_ready`, which the dispatch task reports too.
+                    if let Err(err) = self.ping.ensure_not_timed_out() {
+                        self.gate.release(canceled_by_timeout);
+                        return Poll::Ready(Err(err));
                     }
-                },
+                    return Poll::Ready(Ok(Dispatched::Shutdown));
+                }
             }
         }
     }

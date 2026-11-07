@@ -1,16 +1,15 @@
 //! Streaming bodies for Requests and Responses
 //!
-//! Both clients and servers use streaming bodies for requests and responses, instead of fully
-//! buffering them. This approach avoids unnecessary memory usage and enables back-pressure by only
-//! reading when needed.
+//! netty streams request and response bodies instead of fully buffering them. This approach avoids
+//! unnecessary memory usage and enables back-pressure by only reading when needed.
 //!
 //! There are two main components:
 //!
 //! - **[`http_body::Body`] trait**: Describes all possible body types. Any type implementing this
 //!   trait can be used as a body, allowing applications to have fine-grained control over
 //!   streaming.
-//! - **[`Incoming`] concrete type**: An implementation of `Body` provided by this module, used as a
-//!   receive stream (for server requests and client responses).
+//! - **[`Incoming`] concrete type**: An implementation of `Body` provided by this module, used as
+//!   the receive stream for response bodies.
 //!
 //! Additional implementations are available in [`http-body-util`][], such as `Full` or `Empty`
 //! bodies.
