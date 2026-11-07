@@ -1,7 +1,7 @@
 //! Error and Result module.
 use std::{error::Error as StdError, fmt};
 
-/// Result type often returned from methods that can have crate::core: `Error`s.
+/// Result type often returned from methods that can have netty `Error`s.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 pub type BoxError = Box<dyn StdError + Send + Sync>;

@@ -1,6 +1,6 @@
 //! HTTP Upgrades
 //!
-//! This module deals with managing [HTTP Upgrades][mdn] in crate::core:. Since
+//! This module deals with managing [HTTP Upgrades][mdn] in netty. Since
 //! several concepts in HTTP allow for first talking HTTP, and then converting
 //! to a different protocol, this module conflates them into a single API.
 //! Those include:
@@ -47,9 +47,6 @@ use crate::lock::LockResultExt;
 /// This type holds a trait object internally of the original IO that
 /// was used to speak HTTP before the upgrade. It can be used directly
 /// as a [`AsyncRead`] or [`AsyncWrite`] for convenience.
-///
-/// Alternatively, if the exact type is known, this can be deconstructed
-/// into its parts.
 pub struct Upgraded {
     io: Rewind<Box<dyn Io + Send>>,
 }

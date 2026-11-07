@@ -76,10 +76,7 @@ where
 
     #[inline]
     pub(crate) fn set_max_buf_size(&mut self, max: usize) {
-        assert!(
-            max >= MINIMUM_MAX_BUFFER_SIZE,
-            "The max_buf_size cannot be smaller than {MINIMUM_MAX_BUFFER_SIZE}.",
-        );
+        let max = max.max(MINIMUM_MAX_BUFFER_SIZE);
         self.read_buf_strategy = ReadStrategy::with_max(max);
         self.write_buf.max_buf_size = max;
     }
