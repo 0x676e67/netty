@@ -11,7 +11,7 @@ use http_body_util::combinators::BoxBody;
 
 use super::{DecodedLength, chan};
 #[cfg(feature = "http2")]
-use crate::proto::http2::ping;
+use crate::proto::http2::{client::Active, ping};
 use crate::{Error, Result};
 
 /// A stream of [`Bytes`], used when receiving bodies from the network.
@@ -31,6 +31,8 @@ enum Kind {
     #[cfg(feature = "http2")]
     H2 {
         ping: ping::Recorder,
+        /// Released once the body is read to its end.
+        active: Active,
         recv: http2::RecvStream,
         content_length: DecodedLength,
         data_done: bool,
@@ -87,16 +89,21 @@ impl Incoming {
         recv: http2::RecvStream,
         mut content_length: DecodedLength,
         ping: ping::Recorder,
+        mut active: Active,
     ) -> Self {
-        // If the stream is already EOS, then the "unknown length" is clearly
+        // If the stream is already EOS, the body is done, and an "unknown length" is clearly
         // actually ZERO.
-        if !content_length.is_exact() && recv.is_end_stream() {
-            content_length = DecodedLength::ZERO;
+        if recv.is_end_stream() {
+            active.release();
+            if !content_length.is_exact() {
+                content_length = DecodedLength::ZERO;
+            }
         }
 
         Incoming {
             kind: Kind::H2 {
                 ping,
+                active,
                 recv,
                 content_length,
                 data_done: false,
@@ -128,6 +135,7 @@ impl Body for Incoming {
             #[cfg(feature = "http2")]
             Kind::H2 {
                 ref ping,
+                ref mut active,
                 ref mut recv,
                 ref mut content_length,
                 ref mut data_done,
@@ -141,6 +149,7 @@ impl Body for Incoming {
                             return Poll::Ready(Some(Ok(Frame::data(bytes))));
                         }
                         Some(Err(e)) => {
+                            active.release();
                             if let Some(http2::Reason::NO_ERROR) = e.reason() {
                                 // As mentioned in RFC 7540 Section 8.1, a RST_STREAM with NO_ERROR
                                 // indicates an early response, and should cause the body reading
@@ -161,8 +170,10 @@ impl Body for Incoming {
                     }
                 }
 
-                // after data, check trailers
-                match ready!(recv.poll_trailers(cx)) {
+                // after data, check trailers; the stream ends either way
+                let trailers = ready!(recv.poll_trailers(cx));
+                active.release();
+                match trailers {
                     Ok(t) => Poll::Ready(Ok(t.map(Frame::trailers)).transpose()),
                     Err(e) => {
                         if let Some(http2::Reason::NO_ERROR) = e.reason() {
@@ -305,7 +316,8 @@ mod tests {
         // the size by too much.
 
         let body_size = mem::size_of::<Incoming>();
-        let body_expected_size = mem::size_of::<u64>() * 5;
+        // The HTTP/2 body: ping recorder, exchange guard, stream (two words), length and flag.
+        let body_expected_size = mem::size_of::<u64>() * 6;
         assert!(
             body_size <= body_expected_size,
             "Body size = {body_size} <= {body_expected_size}",

@@ -37,15 +37,16 @@ use http2::{Reason, RecvStream, SendStream};
 use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use super::{SendBuf, ping::Recorder};
+use super::{SendBuf, client::Active, ping::Recorder};
 use crate::lock::LockResultExt;
 
-/// Splits an upgraded CONNECT stream into its IO and send task. `extensions`, if given,
-/// receives a [`StreamReset`] for the stream.
+/// Splits an upgraded CONNECT stream into its IO and send task, each counting the exchange as
+/// `active` until it ends. `extensions`, if given, receives a [`StreamReset`] for the stream.
 pub(super) fn pair<B>(
     send_stream: SendStream<SendBuf<B>>,
     recv_stream: RecvStream,
     ping: Recorder,
+    active: Active,
     extensions: Option<&mut http::Extensions>,
 ) -> (H2Upgraded, UpgradedSendStreamTask<B>) {
     let (tx, rx) = mpsc::channel(1);
@@ -57,6 +58,7 @@ pub(super) fn pair<B>(
             send_stream: UpgradedSendStreamBridge { tx, error_rx },
             recv_stream: Some(recv_stream),
             ping,
+            _active: active.clone(),
             buf: Bytes::new(),
             reset: slot,
         },
@@ -67,6 +69,7 @@ pub(super) fn pair<B>(
             error_tx: Some(error_tx),
             reset,
             ended: false,
+            active,
         },
     )
 }
@@ -74,6 +77,7 @@ pub(super) fn pair<B>(
 /// The application-facing CONNECT stream; a separate task owns its HTTP/2 sender.
 pub(super) struct H2Upgraded {
     ping: Recorder,
+    _active: Active,
     send_stream: UpgradedSendStreamBridge,
     /// `None` once a [`StreamReset`] stopped receiving.
     recv_stream: Option<RecvStream>,
@@ -102,6 +106,7 @@ pin_project! {
         reset: ResetRx,
         // Whether END_STREAM went out.
         ended: bool,
+        active: Active,
     }
 }
 
@@ -242,16 +247,14 @@ where
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.as_mut().tick(cx) {
-            Poll::Ready(Ok(())) => Poll::Ready(()),
-            Poll::Ready(Err(err)) => {
-                if let Some(tx) = self.error_tx.take() {
-                    let _oh_well = tx.send(err);
-                }
-                Poll::Ready(())
-            }
-            Poll::Pending => Poll::Pending,
+        let result = ready!(self.as_mut().tick(cx));
+        self.active.release();
+        if let Err(err) = result
+            && let Some(tx) = self.error_tx.take()
+        {
+            let _oh_well = tx.send(err);
         }
+        Poll::Ready(())
     }
 }
 

@@ -449,6 +449,79 @@ async fn streaming_post_trailers_and_last_sender_drop() {
 }
 
 #[tokio::test]
+async fn is_idle_tracks_response_bodies_and_tunnels() {
+    async fn until_idle(tx: &SendRequest<ClientBody>) {
+        while !tx.is_idle() {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    bounded(async {
+        let Pair {
+            mut tx,
+            driver,
+            mut server,
+            _endpoints,
+            ..
+        } = pair(Http3Options::default()).await;
+        let server_task = tokio::spawn(async move {
+            while let Ok(Some(resolver)) = server.accept().await {
+                tokio::spawn(async move {
+                    let (request, mut stream) = resolver.resolve_request().await.unwrap();
+                    stream.send_response(Response::new(())).await.unwrap();
+                    if request.method() == http::Method::CONNECT {
+                        // The tunnel ends once the client finishes its side.
+                        while stream.recv_data().await.unwrap().is_some() {}
+                    } else {
+                        stream
+                            .send_data(Bytes::from_static(b"hello"))
+                            .await
+                            .unwrap();
+                    }
+                    stream.finish().await.unwrap();
+                });
+            }
+        });
+        assert!(tx.is_idle());
+
+        // A response body counts from the request until it is read to its end; the
+        // acknowledgment of the request FIN may still finish after that.
+        let response = tx.try_send_request(
+            Request::get("https://localhost/")
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        );
+        assert!(!tx.is_idle());
+        let mut body = response.await.unwrap().into_body();
+        assert!(!tx.is_idle());
+        while let Some(frame) = body.frame().await {
+            frame.unwrap();
+        }
+        until_idle(&tx).await;
+        drop(body);
+
+        // A tunnel counts until its IO is dropped and both directions end.
+        let mut response = tx
+            .try_send_request(
+                Request::connect("localhost:443")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let tunnel = netty::upgrade::on(&mut response).await.unwrap();
+        assert!(!tx.is_idle());
+        drop(tunnel);
+        until_idle(&tx).await;
+
+        drop(tx);
+        driver.await.unwrap();
+        server_task.await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn invalid_authority_returns_request_without_closing_connection() {
     bounded(async {
         let Pair {

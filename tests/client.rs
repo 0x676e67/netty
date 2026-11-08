@@ -4415,6 +4415,91 @@ mod conn {
             .expect("server");
     }
 
+    #[cfg(feature = "http2")]
+    #[tokio::test]
+    async fn http2_is_idle_tracks_live_exchanges() {
+        type Upload =
+            StreamBody<mpsc::Receiver<Result<Frame<Bytes>, Box<dyn Error + Send + Sync>>>>;
+
+        async fn until_idle(client: &conn::http2::SendRequest<Upload>) {
+            while !client.is_idle() {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        fn closed() -> Upload {
+            StreamBody::new(mpsc::channel(0).1)
+        }
+
+        let (client_io, server_io, _) = setup_duplex_test_server();
+        let server = tokio::spawn(async move {
+            let mut h2 = h2::server::handshake(server_io).await.unwrap();
+            while let Some(Ok((req, mut respond))) = h2.accept().await {
+                tokio::spawn(async move {
+                    let method = req.method().clone();
+                    let mut body = req.into_body();
+                    // A POST response completes before its upload does.
+                    let mut send = respond
+                        .send_response(Response::new(()), method == Method::POST)
+                        .unwrap();
+                    if method == Method::GET {
+                        send.send_data(Bytes::from_static(b"hello"), true).unwrap();
+                    }
+                    while let Some(chunk) = body.data().await {
+                        let _ = body.flow_control().release_capacity(chunk.unwrap().len());
+                    }
+                    // A tunnel ends once the client ends its side.
+                    if method == Method::CONNECT {
+                        send.send_data(Bytes::new(), true).unwrap();
+                    }
+                });
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async move {
+            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .handshake::<_, Upload>(client_io)
+                .await
+                .unwrap();
+            let conn = tokio::spawn(conn);
+            assert!(client.is_idle());
+
+            // A response body counts from the request until it is read to its end.
+            let response = client.try_send_request(Request::get("/").body(closed()).unwrap());
+            assert!(!client.is_idle());
+            let mut body = response.await.unwrap().into_body();
+            assert!(!client.is_idle());
+            while let Some(frame) = body.frame().await {
+                frame.unwrap();
+            }
+            assert!(client.is_idle());
+            drop(body);
+
+            // A request body pipe counts until the upload ends, though the response is complete.
+            let (upload, rx) = mpsc::channel(0);
+            let request = Request::post("/").body(StreamBody::new(rx)).unwrap();
+            drop(client.try_send_request(request).await.unwrap());
+            assert!(!client.is_idle());
+            drop(upload);
+            until_idle(&client).await;
+
+            // A tunnel counts until its IO is dropped and its send side has ended.
+            let request = Request::connect("localhost").body(closed()).unwrap();
+            let response = client.try_send_request(request).await.unwrap();
+            let tunnel = netty::upgrade::on(response).await.unwrap();
+            assert!(!client.is_idle());
+            drop(tunnel);
+            until_idle(&client).await;
+
+            // The count holds no connection handle: the last sender still closes it.
+            drop(client);
+            conn.await.unwrap().unwrap();
+            server.await.unwrap();
+        })
+        .await
+        .expect("exchanges end and the connection closes");
+    }
+
     #[tokio::test]
     async fn test_body_panics() {
         let (client_io, server_io, _) = setup_duplex_test_server();

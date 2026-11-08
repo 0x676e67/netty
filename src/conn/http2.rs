@@ -4,7 +4,10 @@ use std::{
     future::Future,
     marker::PhantomData,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     task::{Context, Poll, ready},
 };
 
@@ -19,7 +22,7 @@ use crate::{
     error::{BoxError, Error},
     proto::{
         self,
-        http2::{Http2Options, ping},
+        http2::{Http2Options, client::Active, ping},
     },
     rt::{Time, Timer, bounds::Http2ClientConnExec},
 };
@@ -28,6 +31,7 @@ use crate::{
 pub struct SendRequest<B> {
     dispatch: dispatch::UnboundedSender<Request<B>, Response<Incoming>>,
     peer: Arc<proto::http2::client::PeerSettings>,
+    active: Arc<AtomicUsize>,
 }
 
 impl<B> Clone for SendRequest<B> {
@@ -36,6 +40,7 @@ impl<B> Clone for SendRequest<B> {
         SendRequest {
             dispatch: self.dispatch.clone(),
             peer: self.peer.clone(),
+            active: self.active.clone(),
         }
     }
 }
@@ -120,6 +125,14 @@ impl<B> SendRequest<B> {
         self.dispatch.is_closed()
     }
 
+    /// Returns whether no exchange is live on the connection: no request awaiting its response,
+    /// response body not yet read to its end or dropped, request body still sending, or CONNECT
+    /// tunnel still open. A snapshot for pool idle policy; any handle may start a request next.
+    #[inline]
+    pub fn is_idle(&self) -> bool {
+        self.active.load(Ordering::Acquire) == 0
+    }
+
     /// Returns whether the server enabled [extended CONNECT][1].
     ///
     /// Returns `None` until the server's [`SETTINGS_ENABLE_CONNECT_PROTOCOL`][2] arrives,
@@ -162,8 +175,11 @@ where
         &mut self,
         req: Request<B>,
     ) -> impl Future<Output = Result<Response<Incoming>, TrySendError<Request<B>>>> + use<B> {
+        // Counted before it is queued; the driver counts what outlives the response head.
+        let active = Active::new(&self.active);
         let sent = self.dispatch.try_send(req);
         async move {
+            let _active = active;
             match sent {
                 Ok(rx) => match rx.await {
                     Ok(Ok(res)) => Ok(res),
@@ -395,6 +411,7 @@ where
             SendRequest {
                 dispatch: tx.unbound(),
                 peer: h2.peer_settings(),
+                active: h2.active(),
             },
             Connection {
                 inner: (PhantomData, h2),

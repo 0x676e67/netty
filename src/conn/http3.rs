@@ -190,6 +190,13 @@ impl<B> SendRequest<B> {
         self.shared.is_draining()
     }
 
+    /// Returns whether no exchange is live on the connection: no request awaiting its response,
+    /// response body not yet read to its end or dropped, request body still sending, or CONNECT
+    /// tunnel still open. A snapshot for pool idle policy; any handle may start a request next.
+    pub fn is_idle(&self) -> bool {
+        self.shared.is_idle()
+    }
+
     /// Returns whether the server enabled [extended CONNECT][1].
     ///
     /// Returns `None` until the server's SETTINGS arrive, and keeps returning `None`
