@@ -730,7 +730,7 @@ dependencies = [
 [[package]]
 name = "http3"
 version = "0.2.0"
-source = "git+https://github.com/0x676e67/http3?rev=96443870515f1e3e3189771c3442576db18226ed#96443870515f1e3e3189771c3442576db18226ed"
+source = "git+https://github.com/0x676e67/http3?rev=5bd394f3dfb8bc63591627a229c34c02caadc3af#5bd394f3dfb8bc63591627a229c34c02caadc3af"
 dependencies = [
  "bytes",
  "fastrand",

@@ -2085,40 +2085,61 @@ async fn goaway_rejects_new_requests_but_drains_existing_response() {
 }
 
 #[tokio::test]
-async fn canceling_handshake_waiting_for_control_stream_closes_quic() {
+async fn handshake_does_not_wait_for_uni_stream_credit() {
+    // A peer withholding the unidirectional credit it must grant (RFC 9114 §6.2) only delays the
+    // control and QPACK streams: the handshake returns at once, requests are still answered, and
+    // dropping the handle still closes QUIC.
+    // https://www.rfc-editor.org/rfc/rfc9114.html#section-6.2
     bounded(async {
         let (_, mut server_config, client_config) = tls::config();
         let mut transport = quinn::TransportConfig::default();
         transport.max_concurrent_uni_streams(0_u32.into());
-        server_config.transport_config(std::sync::Arc::new(transport));
-        let server_endpoint =
-            quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
-        let client_endpoint = quic::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-        client_endpoint.set_default_client_config(client_config);
-        let client = client_endpoint
-            .connect(server_endpoint.local_addr().unwrap(), "localhost")
+        server_config.transport_config(Arc::new(transport));
+        let (client, server_quic, _endpoints) = quic_pair(server_config, client_config).await;
+        let (mut tx, driver) = futures_util::FutureExt::now_or_never(
+            Builder::new(Exec).handshake::<_, ClientBody>(crate::native::Connection::new(client)),
+        )
+        .expect("the handshake waited for the peer")
+        .unwrap();
+        let mut server: Server = h3::server::builder()
+            .build(h3_quinn::Connection::new(server_quic.clone()))
+            .await
             .unwrap();
-        let (client, server) = tokio::join!(client, async {
-            server_endpoint.accept().await.unwrap().await.unwrap()
+        let server_task = tokio::spawn(async move {
+            let resolver = server.accept().await.unwrap().unwrap();
+            let (_, mut stream) = resolver.resolve_request().await.unwrap();
+            stream.send_response(Response::new(())).await.unwrap();
+            stream.send_data(Bytes::from_static(b"ok")).await.unwrap();
+            stream.finish().await.unwrap();
+            // Dropping the server would close QUIC itself.
+            server
         });
-        // Keep an independent handle alive: dropping the last QUIC handle alone
-        // must not be what makes the remote close observable.
-        let client = client.unwrap();
-        let mut handshake = Box::pin(
-            Builder::new(Exec)
-                .handshake::<_, ClientBody>(crate::native::Connection::new(client.clone())),
+        let response = tx
+            .try_send_request(
+                Request::get("https://localhost/")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "ok"
         );
-        assert!(futures_util::poll!(&mut handshake).is_pending());
-        drop(handshake);
-        match server.closed().await {
-            quinn::ConnectionError::ApplicationClosed(error) => {
+        let server = server_task.await.unwrap();
+        // The sender still holds QUIC handles, so only the dropped handle can close it.
+        drop(driver);
+        match server_quic.closed().await {
+            quinn::ConnectionError::ApplicationClosed(close) => {
                 assert_eq!(
-                    error.error_code.into_inner(),
+                    close.error_code.into_inner(),
                     http3::error::Code::H3_NO_ERROR.value()
                 );
+                assert_eq!(close.reason, "client connection dropped");
             }
-            error => panic!("unexpected handshake cancellation: {error}"),
+            error => panic!("unexpected close: {error}"),
         }
+        drop((tx, server));
     })
     .await;
 }

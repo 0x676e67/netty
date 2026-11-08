@@ -148,8 +148,8 @@ incremental = false
 
 [patch.crates-io]
 # Remove once an http3 release includes the connection-wide pseudo-header order, the
-# SETTINGS value checks and RFC 9218 PRIORITY_UPDATE.
-http3 = { git = "https://github.com/0x676e67/http3", rev = "96443870515f1e3e3189771c3442576db18226ed" }
+# SETTINGS value checks and the client's critical streams opened by the connection driver.
+http3 = { git = "https://github.com/0x676e67/http3", rev = "5bd394f3dfb8bc63591627a229c34c02caadc3af" }
 # Remove once an http2 release includes `Connection::extended_connect_protocol`, ignores
 # content-length on 1xx responses and on 2xx responses to CONNECT, adds the preface PING and
 # its timeout, custom PING payloads, read activity, client GOAWAY,
