@@ -177,6 +177,15 @@ where
                             continue;
                         }
 
+                        // The last chunk is already in memory, and http2 buffers it until flow
+                        // control lets it out, so it need not wait for stream capacity first.
+                        if is_eos {
+                            me.body_tx
+                                .send_data(SendBuf::Buf(chunk), true)
+                                .map_err(Error::new_body_write)?;
+                            return Poll::Ready(Ok(()));
+                        }
+
                         // Reserve a minimal claim on the connection-level
                         // flow-control window rather than the whole chunk. The
                         // chunk is already in hand, so this still cannot pin

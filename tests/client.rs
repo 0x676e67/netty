@@ -3596,6 +3596,60 @@ mod conn {
         .expect("dispatched response should finish after dropping the connection");
     }
 
+    #[cfg(feature = "http2")]
+    #[tokio::test]
+    async fn http2_full_body_requests_spawn_no_tasks() {
+        /// Spawns on tokio and counts the futures it spawns.
+        #[derive(Clone)]
+        struct Counting(Arc<AtomicUsize>);
+
+        impl<F> netty::rt::Executor<F> for Counting
+        where
+            F: Future<Output = ()> + Send + 'static,
+        {
+            fn execute(&self, fut: F) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                tokio::spawn(fut);
+            }
+        }
+
+        let (client_io, server_io, _) = setup_duplex_test_server();
+        let server = tokio::spawn(async move {
+            hyper::server::conn::http2::Builder::new(TokioExecutor)
+                .serve_connection(
+                    TokioIo::new(server_io),
+                    hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async {
+                        Ok::<_, std::convert::Infallible>(Response::new(request.into_body()))
+                    }),
+                )
+                .await
+        });
+        let spawned = Arc::new(AtomicUsize::new(0));
+        let (mut client, connection) = conn::http2::Builder::new(Counting(spawned.clone()))
+            .handshake::<_, Full<Bytes>>(client_io)
+            .await
+            .unwrap();
+        tokio::spawn(connection);
+        let per_connection = spawned.load(Ordering::Relaxed);
+
+        // Each new stream waits to open, which once spawned a body and a response task.
+        let responses = (0..8)
+            .map(|_| {
+                client.try_send_request(
+                    Request::post("https://localhost/")
+                        .body(Full::new(Bytes::from_static(b"hello")))
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for response in future::join_all(responses).await {
+            let body = concat(response.unwrap().into_body()).await.unwrap();
+            assert_eq!(body.as_ref(), b"hello");
+        }
+        assert_eq!(spawned.load(Ordering::Relaxed), per_connection);
+        server.abort();
+    }
+
     // This test can intermittently time out while waiting for the connection to close.
     // See [hyper#3896](https://github.com/hyperium/hyper/issues/3896).
     #[cfg(feature = "http2")]
