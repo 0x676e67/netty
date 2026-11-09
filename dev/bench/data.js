@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794007055191,
+  "lastUpdate": 1794195489037,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -17495,6 +17495,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4463094,
             "range": "± 108367.41",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9a30c0feea0fca65f884ce2ec2b16055941e934a",
+          "message": "fix(http): clamp buffer sizes and correct stale option docs (#204)",
+          "timestamp": "2026-11-09T11:35:37+08:00",
+          "tree_id": "8460ddfa8e7840131198f818d371ff8b6273c7ba",
+          "url": "https://github.com/0x676e67/netty/commit/9a30c0feea0fca65f884ce2ec2b16055941e934a"
+        },
+        "date": 1794195488531,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 54605,
+            "range": "± 6575.81",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3712640,
+            "range": "± 532857.65",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 18163,
+            "range": "± 339.40",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 18736,
+            "range": "± 232.54",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 22559,
+            "range": "± 592.72",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 73211,
+            "range": "± 1212.87",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 40999905,
+            "range": "± 25112.77",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 57930,
+            "range": "± 733.73",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 28173186,
+            "range": "± 8356779.77",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 6694072,
+            "range": "± 41596024.52",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 6252614,
+            "range": "± 491604.69",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 85396959,
+            "range": "± 41614098.03",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 44496777,
+            "range": "± 651363.87",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 4554653,
+            "range": "± 89090.33",
             "unit": "ns/iter"
           }
         ]
