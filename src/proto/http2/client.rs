@@ -1,12 +1,13 @@
+mod responses;
+
 use std::{
     collections::VecDeque,
     convert::Infallible,
     future::Future,
     marker::PhantomData,
-    mem,
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
     task::{Context, Poll, ready},
@@ -21,7 +22,7 @@ use futures_channel::{
 };
 use futures_util::{
     future::{Either, FusedFuture},
-    stream::{FusedStream, FuturesUnordered, Stream},
+    stream::{FusedStream, Stream},
     task::AtomicWaker,
 };
 use http::{Method, Request, Response};
@@ -34,6 +35,7 @@ use http2::{
 use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use self::responses::{ResponseTx, Responses};
 use super::{
     PipeToSendStream, SendBuf, ping,
     ping::{Ponger, Recorder},
@@ -45,7 +47,6 @@ use crate::{
     dispatch::{self, Callback, Envelope, TrySendError},
     error::BoxError,
     ext::OnPreserveHeader,
-    lock::LockResultExt,
     proto::{Dispatched, headers},
     rt::{
         Sleep, Time, Timer,
@@ -117,14 +118,14 @@ where
         is_terminated: false,
     };
 
-    let responses = Arc::new(ResponseQueue::new());
+    let (response_tx, responses) = responses::channel();
     exec.execute_h2_future(H2ClientFuture::Task {
         task: Box::pin(ConnTask::new(
             conn,
             conn_drop_rx,
             cancel_tx,
             peer.clone(),
-            responses.clone(),
+            responses,
         )),
     });
 
@@ -137,7 +138,7 @@ where
         h2_tx,
         req_rx,
         fut_ctx: None,
-        responses,
+        response_tx,
         marker: PhantomData,
     })
 }
@@ -512,90 +513,6 @@ impl<B> Drop for ConnectGate<B> {
     }
 }
 
-/// Responses of dispatched requests, handed by the dispatcher to the connection task.
-///
-/// The connection's I/O completes them, so the connection task drives them instead of one
-/// spawned task per request. Once that task ends, the queue closes and returns responses.
-struct ResponseQueue<R> {
-    // `None` once the connection task takes no more responses.
-    queued: Mutex<Option<Vec<R>>>,
-    waker: AtomicWaker,
-}
-
-/// The connection task's side of a [`ResponseQueue`]: the responses it drives.
-struct ConnResponses<R> {
-    queue: Arc<ResponseQueue<R>>,
-    in_flight: FuturesUnordered<R>,
-    // Swapped with the queue, so taking responses reuses its allocation.
-    spare: Vec<R>,
-}
-
-// ===== impl ResponseQueue =====
-
-impl<R> ResponseQueue<R> {
-    fn new() -> Self {
-        Self {
-            queued: Mutex::new(Some(Vec::new())),
-            waker: AtomicWaker::new(),
-        }
-    }
-
-    /// Queues `response` for the connection task, or returns it once that task has ended.
-    fn push(&self, response: R) -> Option<R> {
-        match self.queued.lock().ignore_poison().as_mut() {
-            Some(queued) => queued.push(response),
-            None => return Some(response),
-        }
-        self.waker.wake();
-        None
-    }
-
-    /// Stops taking responses and drops those queued.
-    fn close(&self) {
-        let queued = self.queued.lock().ignore_poison().take();
-        drop(queued);
-    }
-}
-
-// ===== impl ConnResponses =====
-
-impl<R> ConnResponses<R>
-where
-    R: Future<Output = ()>,
-{
-    fn new(queue: Arc<ResponseQueue<R>>) -> Self {
-        Self {
-            queue,
-            in_flight: FuturesUnordered::new(),
-            spare: Vec::new(),
-        }
-    }
-
-    /// Takes the queued responses, closing the queue if `close`, and polls every response.
-    /// Returns whether none are left.
-    fn poll(&mut self, cx: &mut Context<'_>, close: bool) -> bool {
-        self.queue.waker.register(cx.waker());
-        {
-            let mut queued = self.queue.queued.lock().ignore_poison();
-            if close {
-                self.spare.extend(queued.take().into_iter().flatten());
-            } else if let Some(queued) = queued.as_mut() {
-                mem::swap(queued, &mut self.spare);
-            }
-        }
-        self.in_flight.extend(self.spare.drain(..));
-        while let Poll::Ready(Some(())) = Pin::new(&mut self.in_flight).poll_next(cx) {}
-        self.in_flight.is_empty()
-    }
-}
-
-impl<R> Drop for ConnResponses<R> {
-    fn drop(&mut self) {
-        // Responses dispatched later go to tasks of their own.
-        self.queue.close();
-    }
-}
-
 /// A canceled request's error caused by the connection failing with `err`.
 fn canceled_by(err: &::http2::Error) -> Error {
     // `http2::Error` is not `Clone`; rebuild the protocol reason or I/O kind.
@@ -640,7 +557,9 @@ pin_project! {
         #[pin]
         conn: Option<ConnMapErr<T, B>>,
         peer: Arc<PeerSettings>,
-        responses: ConnResponses<SendWhen<B, E>>,
+        // Responses of dispatched requests, completed by the connection's reads.
+        #[pin]
+        responses: Responses<SendWhen<B, E>>,
     }
 }
 
@@ -656,14 +575,14 @@ where
         drop_rx: Receiver<Infallible>,
         cancel_tx: oneshot::Sender<Infallible>,
         peer: Arc<PeerSettings>,
-        responses: Arc<ResponseQueue<SendWhen<B, E>>>,
+        responses: Responses<SendWhen<B, E>>,
     ) -> Self {
         Self {
             drop_rx,
             cancel_tx: Some(cancel_tx),
             conn: Some(conn),
             peer,
-            responses: ConnResponses::new(responses),
+            responses,
         }
     }
 }
@@ -698,16 +617,11 @@ where
             }
         }
 
-        // The connection's I/O completes dispatched responses; once it has finished, this task
-        // ends with the last of them.
-        let ended = this.conn.is_none();
-        let delivered = this.responses.poll(cx, ended);
-        if ended {
-            return if delivered {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            };
+        // Once the connection has finished, this task ends when the dispatcher is gone and the
+        // last response is delivered.
+        let responses = this.responses.poll(cx);
+        if this.conn.is_none() {
+            return responses;
         }
 
         if !this.drop_rx.is_terminated() && Pin::new(&mut this.drop_rx).poll_next(cx).is_ready() {
@@ -737,10 +651,6 @@ pin_project! {
             #[pin]
             pipe: PipeMap<B>,
         },
-        Send {
-            #[pin]
-            send_when: SendWhen<B, E>,
-        },
         Task {
             task: Pin<Box<ConnTask<T, B, E>>>,
         },
@@ -761,7 +671,6 @@ where
 
         match this {
             H2ClientFutureProject::Pipe { pipe } => pipe.poll(cx),
-            H2ClientFutureProject::Send { send_when } => send_when.poll(cx),
             H2ClientFutureProject::Task { task } => task.as_mut().poll(cx),
         }
     }
@@ -796,7 +705,7 @@ where
     h2_tx: SendRequest<SendBuf<B::Data>>,
     req_rx: ClientRx<B>,
     fut_ctx: Option<FutCtx<B>>,
-    responses: Arc<ResponseQueue<SendWhen<B, E>>>,
+    response_tx: ResponseTx<SendWhen<B, E>>,
     marker: PhantomData<T>,
 }
 
@@ -902,7 +811,8 @@ where
             Some(f.body_tx)
         };
 
-        let send_when = SendWhen {
+        // The connection task drives the response with the connection's reads.
+        self.response_tx.send(SendWhen {
             when: ResponseFutMap {
                 fut: f.fut,
                 ping: Some(ping),
@@ -912,13 +822,7 @@ where
                 exec: self.executor.clone(),
             },
             call_back: Some(f.cb),
-        };
-        // The connection task drives the response with the connection's I/O; once that task
-        // has ended, the response takes a task of its own.
-        if let Some(send_when) = self.responses.push(send_when) {
-            self.executor
-                .execute_h2_future(H2ClientFuture::Send { send_when });
-        }
+        });
     }
 }
 
