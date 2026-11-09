@@ -74,8 +74,6 @@ where
     B::Error: Into<BoxError>,
 {
     /// Return the inner IO object, and additional information.
-    ///
-    /// Only works for HTTP/1 connections. HTTP/2 connections will panic.
     #[inline]
     pub fn into_parts(self) -> Parts<T> {
         let (io, read_buf, _) = self.inner.into_inner();
@@ -206,9 +204,8 @@ where
     /// but it is not desired to actually shutdown the IO object. Instead you
     /// would take it back using `into_parts`.
     ///
-    /// Use [`poll_fn`](https://docs.rs/futures/0.1.25/futures/future/fn.poll_fn.html)
-    /// and [`try_ready!`](https://docs.rs/futures/0.1.25/futures/macro.try_ready.html)
-    /// to work with this function; or use the `without_shutdown` wrapper.
+    /// Use [`std::future::poll_fn`] to work with this function, or use the
+    /// [`without_shutdown`](Self::without_shutdown) wrapper.
     pub fn poll_without_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<crate::Result<()>> {
         self.inner.poll_without_shutdown(cx)
     }

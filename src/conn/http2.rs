@@ -316,7 +316,7 @@ where
             .initial_max_send_streams(self.opts.initial_max_send_streams)
             .initial_window_size(self.opts.initial_window_size)
             .initial_connection_window_size(self.opts.initial_conn_window_size)
-            .max_send_buffer_size(self.opts.max_send_buffer_size)
+            .max_send_buffer_size(self.opts.max_send_buffer_size.min(u32::MAX as usize))
             .max_local_error_reset_streams(self.opts.max_local_error_reset_streams);
         if let Some(id) = self.opts.initial_stream_id {
             builder.initial_stream_id(id);

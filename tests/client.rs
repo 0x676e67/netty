@@ -2555,7 +2555,8 @@ mod conn {
                         .await
                 });
                 let (mut client, connection) = conn::http1::Builder::default()
-                    .options(Http1Options::builder().max_buf_size(8192).build())
+                    // Below the 8192-byte minimum, which applies instead.
+                    .options(Http1Options::builder().max_buf_size(0).build())
                     .handshake::<_, Empty<Bytes>>(SplitRead {
                         io: client_io,
                         first: true,
@@ -3854,7 +3855,7 @@ mod conn {
 
     #[cfg(feature = "http2")]
     #[tokio::test]
-    async fn http2_keep_alive_saturates_oversized_durations() {
+    async fn http2_saturates_oversized_options() {
         use hyper::service::service_fn;
 
         let (client_io, server_io, _addr) = setup_duplex_test_server();
@@ -3878,6 +3879,7 @@ mod conn {
                     .keep_alive_interval(Duration::MAX)
                     .keep_alive_timeout(Duration::MAX)
                     .keep_alive_while_idle(true)
+                    .max_send_buf_size(usize::MAX)
                     .build(),
             )
             .handshake(TokioIo::new(TokioIo::new(client_io)))
