@@ -376,6 +376,9 @@ where
             builder.max_send_header_frame_size(max);
         }
         builder.one_frame_per_write(self.opts.one_frame_per_write);
+        if let Some(max) = self.opts.max_write_buffer_size {
+            builder.max_write_buffer_size(max);
+        }
 
         // Create the ping configuration for the connection.
         let ping_config = ping::Config::new(

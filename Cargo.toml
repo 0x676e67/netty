@@ -156,5 +156,5 @@ http3 = { git = "https://github.com/0x676e67/http3", rev = "96443870515f1e3e3189
 # `Builder::headers_priority`, the DATA and header frame caps and one frame per write, keeps
 # reading while control frames or a GOAWAY wait to be written, limits only consecutive empty
 # DATA frames, keeps an error GOAWAY reason when closing on idle, and adds
-# `Connection::has_streams`.
-http2 = { git = "https://github.com/0x676e67/http2", rev = "ce505e52ce9c25fb055412cb39b1caaa7a1f70a8" }
+# `Connection::has_streams` and `Builder::max_write_buffer_size`.
+http2 = { git = "https://github.com/0x676e67/http2", rev = "7ccc35e3ed806adc1e61e9bc4eea4ac9f461cb66" }

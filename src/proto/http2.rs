@@ -370,6 +370,10 @@ pub struct Http2Options {
     /// Whether each frame after the initial write takes a write of its own.
     pub one_frame_per_write: bool,
 
+    /// The bytes of frames gathered for one write while DATA frames are coalesced.
+    /// `None` uses the default from `http2`.
+    pub max_write_buffer_size: Option<usize>,
+
     /// The maximum number of concurrent streams initiated by the remote peer.
     pub max_concurrent_streams: Option<u32>,
 
@@ -758,6 +762,22 @@ impl Http2OptionsBuilder {
         self
     }
 
+    /// Sets how many bytes of frames are gathered for one write.
+    ///
+    /// DATA frames that fit are copied into the write buffer, so frames of many
+    /// streams share a write, and with TLS fewer records. This does not apply with
+    /// [`max_send_data_frame_size`](Self::max_send_data_frame_size) or
+    /// [`one_frame_per_write`](Self::one_frame_per_write), and values under 16 KiB
+    /// are treated as 16 KiB. See [`http2::client::Builder::max_write_buffer_size`].
+    /// Pass `None` for the default.
+    ///
+    /// Default is 64 KiB.
+    #[inline]
+    pub fn max_write_buffer_size(mut self, max: impl Into<Option<usize>>) -> Self {
+        self.opts.max_write_buffer_size = max.into();
+        self
+    }
+
     /// Configures the maximum number of pending reset streams allowed before a GOAWAY will be sent.
     ///
     /// See <https://github.com/hyperium/hyper/issues/2877> for more information.
@@ -896,6 +916,7 @@ impl Default for Http2Options {
             max_send_data_frame_size: None,
             max_send_header_frame_size: None,
             one_frame_per_write: false,
+            max_write_buffer_size: None,
             max_pending_accept_reset_streams: None,
             max_local_error_reset_streams: Some(1024),
             header_table_size: None,
