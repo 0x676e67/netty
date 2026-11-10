@@ -558,6 +558,8 @@ pub enum Part {
     Responses,
 }
 
+// ===== impl Part =====
+
 impl Part {
     /// The parts in the order a pass polls them.
     ///

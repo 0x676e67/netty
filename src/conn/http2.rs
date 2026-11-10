@@ -53,7 +53,7 @@ impl<B> Clone for SendRequest<B> {
 ///
 /// For graceful shutdown, finish outstanding requests and response bodies, drop all
 /// [`SendRequest`] handles, and let the executor keep driving the background tasks.
-#[must_use = "futures do nothing unless polled"]
+#[must_use = "dropping this future stops request dispatch"]
 pub struct Connection<T, B, E>
 where
     T: AsyncRead + AsyncWrite + Unpin,
