@@ -1,10 +1,11 @@
-mod responses;
+mod task_waker;
 
 use std::{
     collections::VecDeque,
     convert::Infallible,
     future::Future,
     marker::PhantomData,
+    mem,
     pin::Pin,
     sync::{
         Arc,
@@ -22,7 +23,7 @@ use futures_channel::{
 };
 use futures_util::{
     future::{Either, FusedFuture},
-    stream::{FusedStream, Stream},
+    stream::{FusedStream, FuturesUnordered, Stream},
     task::AtomicWaker,
 };
 use http::{Method, Request, Response};
@@ -35,7 +36,7 @@ use http2::{
 use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use self::responses::{ResponseTx, Responses};
+use self::task_waker::TaskWaker;
 use super::{
     PipeToSendStream, SendBuf, ping,
     ping::{Ponger, Recorder},
@@ -62,10 +63,6 @@ type ClientRx<B> = dispatch::Receiver<Request<B>, Response<Incoming>>;
 ///// other handles to it have been dropped, so that it can shutdown.
 type ConnDropRef = mpsc::Sender<Infallible>;
 
-///// A oneshot channel watches the `Connection` task, and when it completes,
-///// the "dispatch" task will be notified and can shutdown sooner.
-type ConnEof = oneshot::Receiver<Infallible>;
-
 pub(crate) async fn handshake<T, B, E>(
     io: T,
     req_rx: ClientRx<B>,
@@ -91,7 +88,6 @@ where
     // in h2 where dropping all SendRequests won't notify a
     // parked Connection.
     let (conn_drop_ref, conn_drop_rx) = mpsc::channel(1);
-    let (cancel_tx, conn_eof) = oneshot::channel();
 
     let preface_ping = match &timer {
         Time::Timer(timer) => Some(PrefacePingTimer::new(timer.clone())),
@@ -118,27 +114,31 @@ where
         is_terminated: false,
     };
 
-    let (response_tx, responses) = responses::channel();
+    let (stop_tx, stop) = oneshot::channel();
+    let (done, done_rx) = oneshot::channel();
+    let dispatch = Dispatch {
+        ping,
+        conn_drop_ref: conn_drop_ref.clone(),
+        executor: exec.clone(),
+        spawn_pipe: |exec, pipe| exec.execute_h2_future(H2ClientFuture::Pipe { pipe }),
+        gate: ConnectGate::new(peer.clone()),
+        h2_tx: h2_tx.clone(),
+        req_rx,
+        fut_ctx: None,
+        sent: false,
+        stop,
+        done,
+    };
     exec.execute_h2_future(H2ClientFuture::Task {
-        task: Box::pin(ConnTask::new(
-            conn,
-            conn_drop_rx,
-            cancel_tx,
-            peer.clone(),
-            responses,
-        )),
+        task: Box::pin(ConnTask::new(conn, conn_drop_rx, peer.clone(), dispatch)),
     });
 
     Ok(ClientTask {
-        ping,
-        conn_drop_ref,
-        conn_eof,
-        executor: exec,
-        gate: ConnectGate::new(peer),
+        _conn_drop_ref: conn_drop_ref,
+        _stop: stop_tx,
+        done: done_rx,
+        peer,
         h2_tx,
-        req_rx,
-        fut_ctx: None,
-        response_tx,
         marker: PhantomData,
     })
 }
@@ -541,6 +541,10 @@ fn refused<B>(req: Request<B>) -> TrySendError<Request<B>> {
 }
 
 pin_project! {
+    /// Drives the connection, its request dispatch and the responses of dispatched requests.
+    ///
+    /// One task does it all, so a request wakes this task only and its response its caller
+    /// only, without a hop between tasks that the scheduler may move to another worker.
     pub struct ConnTask<T, B, E>
     where
         B: Body,
@@ -551,88 +555,134 @@ pin_project! {
     {
         #[pin]
         drop_rx: Receiver<Infallible>,
-        #[pin]
-        cancel_tx: Option<oneshot::Sender<Infallible>>,
         // `None` once finished, dropped so its streams resolve.
         #[pin]
         conn: Option<ConnMapErr<T, B>>,
         peer: Arc<PeerSettings>,
+        // `None` once dispatch ended and reported how.
+        dispatch: Option<Dispatch<B, E>>,
         // Responses of dispatched requests, completed by the connection's reads.
-        #[pin]
-        responses: Responses<SendWhen<B, E>>,
+        responses: FuturesUnordered<SendWhen<B, E>>,
+        waker: Arc<TaskWaker>,
+        // Whether the last pass yielded before writing new requests.
+        yielded: bool,
     }
+}
+
+/// How a pass of the connection task ends.
+enum Step {
+    /// New requests wait one turn for more before the connection writes them.
+    Yield,
+    Done,
 }
 
 impl<T, B, E> ConnTask<T, B, E>
 where
     B: Body + 'static,
-    E: Http2UpgradedExec<B::Data>,
     T: AsyncRead + AsyncWrite + Unpin,
 {
     #[inline]
     fn new(
         conn: ConnMapErr<T, B>,
         drop_rx: Receiver<Infallible>,
-        cancel_tx: oneshot::Sender<Infallible>,
         peer: Arc<PeerSettings>,
-        responses: Responses<SendWhen<B, E>>,
+        dispatch: Dispatch<B, E>,
     ) -> Self {
         Self {
             drop_rx,
-            cancel_tx: Some(cancel_tx),
             conn: Some(conn),
             peer,
-            responses,
+            dispatch: Some(dispatch),
+            responses: FuturesUnordered::new(),
+            waker: TaskWaker::new(),
+            yielded: false,
         }
     }
 }
 
 impl<T, B, E> Future for ConnTask<T, B, E>
 where
-    B: Body + 'static,
-    E: Http2UpgradedExec<B::Data>,
+    B: Body + Unpin + 'static,
+    B::Data: Send,
+    B::Error: Into<BoxError>,
+    E: Http2UpgradedExec<B::Data> + Clone,
     T: AsyncRead + AsyncWrite + Unpin,
 {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
-
-        if let Some(mut conn) = this.conn.as_mut().as_pin_mut() {
-            let finished = conn.as_mut().poll(cx).is_ready();
-
-            // The driver applies the server's SETTINGS while polled, possibly in its final poll;
-            // this task is the only writer, so only changes are published.
-            if let Some(enabled) = conn.extended_connect_protocol()
-                && this.peer.extended_connect() != Some(enabled)
-            {
-                this.peer.publish(enabled);
+        let waker = this.waker.clone();
+        let step = waker.poll(cx, |cx| {
+            // Dispatch first, so the connection writes new requests in this pass.
+            let in_flight = this.responses.len();
+            let mut sent = false;
+            if let Some(dispatch) = this.dispatch.as_mut() {
+                match dispatch.poll(cx, this.responses, this.conn.is_none()) {
+                    Poll::Ready(dispatched) => {
+                        if let Some(dispatch) = this.dispatch.take() {
+                            dispatch.finish(dispatched);
+                        }
+                    }
+                    Poll::Pending => sent = mem::take(&mut dispatch.sent),
+                }
             }
 
-            if finished {
-                // ok or err, the `conn` has finished. Dropping it ends its streams, as when
-                // this task ended with it, so their responses report how it ended.
-                this.conn.set(None);
-                drop(this.cancel_tx.take());
+            // With other responses in flight, their callers may send more requests soon:
+            // yield once so one write takes them all.
+            if sent && in_flight > 0 && !mem::replace(this.yielded, true) {
+                return Poll::Ready(Step::Yield);
             }
-        }
+            *this.yielded = false;
 
-        // Once the connection has finished, this task ends when the dispatcher is gone and the
-        // last response is delivered.
-        let responses = this.responses.poll(cx);
-        if this.conn.is_none() {
-            return responses;
-        }
+            // http2 does not wake the connection when its last handle drops; the senders that
+            // go with the handles do.
+            if !this.drop_rx.is_terminated() {
+                let _ = this.drop_rx.as_mut().poll_next(cx);
+            }
 
-        if !this.drop_rx.is_terminated() && Pin::new(&mut this.drop_rx).poll_next(cx).is_ready() {
-            // mpsc has been dropped, hopefully polling
-            // the connection some more should start shutdown
-            // and then close.
-            trace!("send_request dropped, starting conn shutdown");
-            drop(this.cancel_tx.take().expect("ConnTask Future polled twice"));
-        }
+            if let Some(mut conn) = this.conn.as_mut().as_pin_mut() {
+                let finished = conn.as_mut().poll(cx).is_ready();
 
-        Poll::Pending
+                // The driver applies the server's SETTINGS while polled, possibly in its final
+                // poll; this task is the only writer, so only changes are published.
+                if let Some(enabled) = conn.extended_connect_protocol()
+                    && this.peer.extended_connect() != Some(enabled)
+                {
+                    this.peer.publish(enabled);
+                }
+
+                if finished {
+                    // ok or err, the `conn` has finished. Dropping it ends its streams, so their
+                    // responses report how it ended, and dispatch ends with it.
+                    this.conn.set(None);
+                    if let Some(dispatch) = this.dispatch.as_mut()
+                        && let Poll::Ready(dispatched) = dispatch.poll(cx, this.responses, true)
+                        && let Some(dispatch) = this.dispatch.take()
+                    {
+                        dispatch.finish(dispatched);
+                    }
+                }
+            }
+
+            while let Poll::Ready(Some(())) = Pin::new(&mut *this.responses).poll_next(cx) {}
+
+            // Once the connection has finished, this task ends with dispatch and the last
+            // response.
+            if this.conn.is_none() && this.dispatch.is_none() && this.responses.is_empty() {
+                return Poll::Ready(Step::Done);
+            }
+            Poll::Pending
+        });
+
+        match step {
+            Poll::Ready(Step::Done) => Poll::Ready(()),
+            Poll::Ready(Step::Yield) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -659,9 +709,10 @@ pin_project! {
 
 impl<B, T, E> Future for H2ClientFuture<B, T, E>
 where
-    B: Body + 'static,
+    B: Body + Unpin + 'static,
+    B::Data: Send,
     B::Error: Into<BoxError>,
-    E: Http2UpgradedExec<B::Data>,
+    E: Http2UpgradedExec<B::Data> + Clone,
     T: AsyncRead + AsyncWrite + Unpin,
 {
     type Output = ();
@@ -691,22 +742,44 @@ where
 
 impl<B: Body> Unpin for FutCtx<B> {}
 
+/// The dispatcher's handle: settles once the connection task stops dispatching, and dropping it
+/// stops dispatch.
 pub(crate) struct ClientTask<B, E, T>
 where
     B: Body + 'static,
     E: Unpin,
 {
+    // Wakes the connection task once dropped with the last handle, which http2 does not.
+    _conn_drop_ref: ConnDropRef,
+    // Dropped with this future, which stops dispatch.
+    _stop: oneshot::Sender<Infallible>,
+    done: oneshot::Receiver<Result<Dispatched>>,
+    peer: Arc<PeerSettings>,
+    h2_tx: SendRequest<SendBuf<B::Data>>,
+    marker: PhantomData<fn() -> (E, T)>,
+}
+
+/// Hands requests to the connection, in the connection task.
+struct Dispatch<B, E>
+where
+    B: Body + 'static,
+{
     ping: ping::Recorder,
     conn_drop_ref: ConnDropRef,
-    conn_eof: ConnEof,
     executor: E,
+    // Spawns a request body pipe; set where the executor is known to spawn it.
+    spawn_pipe: fn(&mut E, PipeMap<B>),
     /// Extended CONNECT requests waiting on the server's SETTINGS.
     gate: ConnectGate<B>,
     h2_tx: SendRequest<SendBuf<B::Data>>,
     req_rx: ClientRx<B>,
     fut_ctx: Option<FutCtx<B>>,
-    response_tx: ResponseTx<SendWhen<B, E>>,
-    marker: PhantomData<T>,
+    // Whether a request went to the connection since the connection task last checked.
+    sent: bool,
+    // Closed once the `Connection` future is dropped, which stops dispatch.
+    stop: oneshot::Receiver<Infallible>,
+    // Reports to the `Connection` future how dispatch ended.
+    done: oneshot::Sender<Result<Dispatched>>,
 }
 
 pin_project! {
@@ -766,15 +839,19 @@ where
     }
 }
 
-impl<B, E, T> ClientTask<B, E, T>
+impl<B, E> Dispatch<B, E>
 where
     B: Body + 'static + Unpin,
     B::Data: Send,
-    E: Http2ClientConnExec<B, T> + Unpin,
     B::Error: Into<BoxError>,
-    T: AsyncRead + AsyncWrite + Unpin,
+    E: Http2UpgradedExec<B::Data> + Clone,
 {
-    fn poll_pipe(&mut self, f: FutCtx<B>, cx: &mut Context<'_>) {
+    fn poll_pipe(
+        &mut self,
+        f: FutCtx<B>,
+        cx: &mut Context<'_>,
+        responses: &mut FuturesUnordered<SendWhen<B, E>>,
+    ) {
         let ping = self.ping.clone();
 
         // A one-shot channel so that send_task can tell pipe_task to
@@ -800,8 +877,7 @@ where
                             cancel_rx: Some(cancel_rx),
                         };
                         // Clear send task
-                        self.executor
-                            .execute_h2_future(H2ClientFuture::Pipe { pipe });
+                        (self.spawn_pipe)(&mut self.executor, pipe);
                     }
                 }
             }
@@ -811,8 +887,8 @@ where
             Some(f.body_tx)
         };
 
-        // The connection task drives the response with the connection's reads.
-        self.response_tx.send(SendWhen {
+        // The connection's reads complete the response, in this task.
+        responses.push(SendWhen {
             when: ResponseFutMap {
                 fut: f.fut,
                 ping: Some(ping),
@@ -829,16 +905,14 @@ where
 impl<B, E, T> ClientTask<B, E, T>
 where
     B: Body + 'static,
-    E: Http2ClientConnExec<B, T> + Unpin,
-    B::Error: Into<BoxError>,
-    T: AsyncRead + AsyncWrite + Unpin,
+    E: Unpin,
 {
     pub(crate) fn is_extended_connect_protocol_enabled(&self) -> bool {
-        self.gate.peer.extended_connect() == Some(true)
+        self.peer.extended_connect() == Some(true)
     }
 
     pub(crate) fn peer_settings(&self) -> Arc<PeerSettings> {
-        self.gate.peer.clone()
+        self.peer.clone()
     }
 
     pub(crate) fn current_max_send_streams(&self) -> usize {
@@ -1018,15 +1092,45 @@ where
 
 impl<B, E, T> Future for ClientTask<B, E, T>
 where
-    B: Body + 'static + Unpin,
-    B::Data: Send,
-    B::Error: Into<BoxError>,
-    E: Http2ClientConnExec<B, T> + Unpin,
-    T: AsyncRead + AsyncWrite + Unpin,
+    B: Body + 'static,
+    E: Unpin,
 {
     type Output = Result<Dispatched>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // The connection task ends without a report only if its executor drops it.
+        let done = ready!(Pin::new(&mut self.done).poll(cx));
+        Poll::Ready(done.unwrap_or(Ok(Dispatched::Shutdown)))
+    }
+}
+
+impl<B, E> Dispatch<B, E>
+where
+    B: Body + 'static + Unpin,
+    B::Data: Send,
+    B::Error: Into<BoxError>,
+    E: Http2UpgradedExec<B::Data> + Clone,
+{
+    /// Reports how dispatch ended to the `Connection` future, if it is still there.
+    fn finish(self, dispatched: Result<Dispatched>) {
+        let _ = self.done.send(dispatched);
+    }
+
+    /// Hands queued requests to the connection until none is left or dispatch ends.
+    ///
+    /// Dispatch ends once every sender or the `Connection` future is gone, the connection
+    /// fails, or `conn_finished` with no request queued.
+    fn poll(
+        &mut self,
+        cx: &mut Context<'_>,
+        responses: &mut FuturesUnordered<SendWhen<B, E>>,
+        conn_finished: bool,
+    ) -> Poll<Result<Dispatched>> {
+        // A dropped `Connection` future stops dispatch, as dropping its dispatcher did.
+        if Pin::new(&mut self.stop).poll(cx).is_ready() {
+            return Poll::Ready(Ok(Dispatched::Shutdown));
+        }
+
         loop {
             // Refusals need no stream capacity, so they must not wait behind open backpressure.
             self.gate.poll_settle(cx);
@@ -1037,7 +1141,7 @@ where
                     // `poll_ready` reports connection errors before pending-open state, so
                     // the parked stream may already be on the wire. Let h2 resolve it.
                     if let Some(f) = self.fut_ctx.take() {
-                        self.poll_pipe(f, cx);
+                        self.poll_pipe(f, cx, responses);
                     }
                     let timed_out = self.ping.ensure_not_timed_out();
                     if timed_out.is_err() {
@@ -1058,7 +1162,7 @@ where
             // If we were waiting on pending open
             // continue where we left off.
             if let Some(f) = self.fut_ctx.take() {
-                self.poll_pipe(f, cx);
+                self.poll_pipe(f, cx, responses);
                 continue;
             }
 
@@ -1127,6 +1231,7 @@ where
                         }
                     };
 
+                    self.sent = true;
                     let f = FutCtx {
                         is_connect,
                         connect_udp,
@@ -1146,7 +1251,7 @@ where
                         self.fut_ctx = Some(f);
                         return Poll::Pending;
                     }
-                    self.poll_pipe(f, cx);
+                    self.poll_pipe(f, cx, responses);
                     continue;
                 }
 
@@ -1156,7 +1261,9 @@ where
                 }
 
                 Poll::Pending => {
-                    let Err(_conn_is_eof) = ready!(Pin::new(&mut self.conn_eof).poll(cx));
+                    if !conn_finished {
+                        return Poll::Pending;
+                    }
                     trace!("connection task is closed, closing dispatch task");
                     // The connection may have closed on a keep-alive timeout
                     // since `poll_ready`, which the dispatch task reports too.
