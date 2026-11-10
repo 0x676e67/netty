@@ -1,4 +1,4 @@
-mod task_waker;
+mod passes;
 
 use std::{
     collections::VecDeque,
@@ -32,7 +32,7 @@ use http2::{
 use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use self::task_waker::TaskWaker;
+use self::passes::{Parts, Passes};
 use super::{
     PipeToSendStream, SendBuf, ping,
     ping::{Ponger, Recorder},
@@ -137,8 +137,9 @@ where
         fut_ctx: None,
         done: Some(done),
     };
+    let task = ConnTask::new(conn, conn_drop_rx, peer.clone(), dispatch);
     exec.execute_h2_future(H2ClientFuture::Task {
-        task: Box::pin(ConnTask::new(conn, conn_drop_rx, peer.clone(), dispatch)),
+        task: Box::pin(Passes::new(task, Part::ALL)),
     });
 
     Ok(ClientTask {
@@ -546,15 +547,23 @@ fn refused<B>(req: Request<B>) -> TrySendError<Request<B>> {
     }
 }
 
-/// A part of the connection task, in the order a pass polls them.
-///
-/// Dispatch wakes the connection to write a request, and the connection's reads wake the
-/// responses they complete, so one pass takes a request or a response all the way.
+/// A part of the connection task.
 #[derive(Clone, Copy)]
-enum Part {
+pub enum Part {
+    /// Hands queued requests to the connection.
     Dispatch,
+    /// Drives the connection.
     Conn,
+    /// Completes the responses of dispatched requests.
     Responses,
+}
+
+impl Part {
+    /// The parts in the order a pass polls them.
+    ///
+    /// Dispatch wakes the connection to write a request, and the connection's reads wake the
+    /// responses they complete, so one pass takes a request or a response all the way.
+    const ALL: [Self; 3] = [Self::Dispatch, Self::Conn, Self::Responses];
 }
 
 pin_project! {
@@ -581,7 +590,6 @@ pin_project! {
         dispatch: Option<Dispatch<B, E>>,
         // Responses of dispatched requests, completed by the connection's reads.
         responses: FuturesUnordered<SendWhen<B, E>>,
-        waker: Arc<TaskWaker<Part, 3>>,
         // Whether the last pass yielded before writing new requests.
         yielded: bool,
     }
@@ -607,7 +615,6 @@ where
             peer,
             dispatch: Some(dispatch),
             responses: FuturesUnordered::new(),
-            waker: TaskWaker::new([Part::Dispatch, Part::Conn, Part::Responses]),
             yielded: false,
         }
     }
@@ -697,7 +704,7 @@ where
     }
 }
 
-impl<T, B, E> Future for ConnTask<T, B, E>
+impl<T, B, E> Parts for ConnTask<T, B, E>
 where
     B: Body + Unpin + 'static,
     B::Data: Send,
@@ -705,25 +712,18 @@ where
     E: Http2UpgradedExec<B::Data> + Clone,
     T: AsyncRead + AsyncWrite + Unpin,
 {
+    type Part = Part;
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll_part(self: Pin<&mut Self>, part: Part, cx: &mut Context<'_>) -> Poll<ControlFlow<()>> {
         let mut this = self.project();
-        let waker = this.waker.clone();
-        let turn = |part, cx: &mut Context<'_>| match part {
+        match part {
             Part::Dispatch => Self::poll_dispatch(&mut this, cx),
             Part::Conn => {
                 Self::poll_conn(&mut this, cx);
                 Poll::Pending
             }
             Part::Responses => Self::poll_responses(&mut this, cx),
-        };
-        match ready!(waker.poll(cx, turn)) {
-            ControlFlow::Break(()) => Poll::Ready(()),
-            ControlFlow::Continue(()) => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
         }
     }
 }
@@ -744,7 +744,7 @@ pin_project! {
             pipe: PipeMap<B>,
         },
         Task {
-            task: Pin<Box<ConnTask<T, B, E>>>,
+            task: Pin<Box<Passes<ConnTask<T, B, E>, Part>>>,
         },
     }
 }
