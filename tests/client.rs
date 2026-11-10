@@ -3650,6 +3650,51 @@ mod conn {
         server.abort();
     }
 
+    #[cfg(feature = "http2")]
+    #[tokio::test]
+    async fn http2_dispatches_until_connection_drops() {
+        let (client_io, server_io, _) = setup_duplex_test_server();
+        let server = tokio::spawn(async move {
+            hyper::server::conn::http2::Builder::new(TokioExecutor)
+                .serve_connection(
+                    TokioIo::new(server_io),
+                    hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async {
+                        Ok::<_, std::convert::Infallible>(Response::new(request.into_body()))
+                    }),
+                )
+                .await
+        });
+        let (mut client, connection) = conn::http2::Builder::new(rt::TokioExecutor::new())
+            .handshake::<_, Full<Bytes>>(client_io)
+            .await
+            .unwrap();
+        let request = || {
+            Request::post("https://localhost/")
+                .body(Full::new(Bytes::from_static(b"hello")))
+                .unwrap()
+        };
+
+        // The connection task dispatches, so a request completes while `connection` is
+        // never polled.
+        let response = client.try_send_request(request()).await.unwrap();
+        assert_eq!(
+            concat(response.into_body()).await.unwrap().as_ref(),
+            b"hello"
+        );
+
+        // Dropping it stops dispatch, which closes the sender.
+        drop(connection);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !client.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dispatch should stop once the connection is dropped");
+        assert!(client.try_send_request(request()).await.is_err());
+        server.abort();
+    }
+
     // This test can intermittently time out while waiting for the connection to close.
     // See [hyper#3896](https://github.com/hyperium/hyper/issues/3896).
     #[cfg(feature = "http2")]

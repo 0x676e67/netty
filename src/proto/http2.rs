@@ -770,9 +770,10 @@ impl Http2OptionsBuilder {
     /// DATA frames that fit are copied into the write buffer, so frames of many
     /// streams share a write, and with TLS fewer records. This does not apply with
     /// [`max_send_data_frame_size`](Self::max_send_data_frame_size) or
-    /// [`one_frame_per_write`](Self::one_frame_per_write), and values under 16 KiB
-    /// are treated as 16 KiB. See [`http2::client::Builder::max_write_buffer_size`].
-    /// Pass `None` for the default.
+    /// [`one_frame_per_write`](Self::one_frame_per_write). Values are clamped to
+    /// 16 KiB through 16 MiB, and the buffer returns to 16 KiB once the connection has
+    /// no streams. See [`http2::client::Builder::max_write_buffer_size`]. Pass `None`
+    /// for the default.
     ///
     /// Default is 64 KiB.
     #[inline]

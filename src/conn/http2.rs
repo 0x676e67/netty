@@ -61,7 +61,7 @@ where
     E: Http2ClientConnExec<B, T> + Unpin,
     B::Error: Into<BoxError>,
 {
-    inner: (PhantomData<T>, proto::http2::client::ClientTask<B, E, T>),
+    inner: (PhantomData<(T, E)>, proto::http2::client::DispatchHandle<B>),
 }
 
 /// A builder to configure an HTTP connection.
@@ -287,8 +287,8 @@ where
 
     /// Constructs a connection with the configured options and IO.
     ///
-    /// Note, if [`Connection`] is not `await`-ed, [`SendRequest`] will
-    /// do nothing.
+    /// A task spawned on the executor dispatches requests and drives the connection;
+    /// [`Connection`] settles once dispatch ends, and dropping it stops dispatch.
     ///
     /// # Errors
     ///
