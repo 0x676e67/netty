@@ -35,7 +35,9 @@ const SPEC_WINDOW_SIZE: u32 = 65_535;
 // for performance.
 const DEFAULT_CONN_WINDOW: u32 = 1024 * 1024 * 5; // 5mb
 const DEFAULT_STREAM_WINDOW: u32 = 1024 * 1024 * 2; // 2mb
-const DEFAULT_MAX_FRAME_SIZE: u32 = 1024 * 16; // 16kb
+// Fewer DATA frames per download; larger ones make received frames allocate past glibc's
+// trim threshold.
+const DEFAULT_MAX_FRAME_SIZE: u32 = 1024 * 64; // 64kb
 const DEFAULT_MAX_SEND_BUF_SIZE: usize = 1024 * 1024; // 1mb
 const DEFAULT_MAX_HEADER_LIST_SIZE: u32 = 1024 * 16; // 16kb
 
@@ -490,9 +492,10 @@ impl Http2OptionsBuilder {
         self
     }
 
-    /// Sets the maximum frame size to use for HTTP2.
+    /// Sets `SETTINGS_MAX_FRAME_SIZE`, the largest frame payload the peer may send.
     ///
-    /// Default is currently 16KB, but can change.
+    /// Default is unset: nothing is sent and the peer sends frames of up to 16 KiB.
+    /// `Http2Options::default()` uses 64 KiB.
     #[inline]
     pub fn max_frame_size(mut self, sz: impl Into<Option<u32>>) -> Self {
         if let Some(sz) = sz.into() {
