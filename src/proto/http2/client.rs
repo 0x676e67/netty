@@ -16,11 +16,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_channel::{
-    mpsc,
-    mpsc::{Receiver, Sender},
-    oneshot,
-};
+use futures_channel::{mpsc, oneshot};
 use futures_util::{
     future::{Either, FusedFuture},
     stream::{FusedStream, FuturesUnordered, Stream},
@@ -62,6 +58,27 @@ type ClientRx<B> = dispatch::Receiver<Request<B>, Response<Incoming>>;
 ///// An mpsc channel is used to help notify the `Connection` task when *all*
 ///// other handles to it have been dropped, so that it can shutdown.
 type ConnDropRef = mpsc::Sender<Infallible>;
+
+/// Ends once every [`ConnDropRef`] is dropped.
+type ConnDropRx = mpsc::Receiver<Infallible>;
+
+/// Dropped with the `Connection` future, which stops dispatch.
+type StopTx = oneshot::Sender<Infallible>;
+
+/// Closes once the `Connection` future is dropped.
+type StopRx = oneshot::Receiver<Infallible>;
+
+/// Reports to the `Connection` future how dispatch ended.
+type DoneTx = oneshot::Sender<Result<Dispatched>>;
+
+/// Settles with how dispatch ended.
+type DoneRx = oneshot::Receiver<Result<Dispatched>>;
+
+/// Tells a spawned body pipe to reset its stream when the caller cancels the request.
+type PipeCancelTx = oneshot::Sender<()>;
+
+/// Settles once the caller cancels the request, or closes once it no longer can.
+type PipeCancelRx = oneshot::Receiver<()>;
 
 pub(crate) async fn handshake<T, B, E>(
     io: T,
@@ -539,11 +556,11 @@ fn refused<B>(req: Request<B>) -> TrySendError<Request<B>> {
 }
 
 pin_project! {
-    #[project = ConnTaskProj]
     /// Drives the connection, its request dispatch and the responses of dispatched requests.
     ///
     /// One task does it all, so a request wakes this task only and its response its caller
     /// only, without a hop between tasks that the scheduler may move to another worker.
+    #[project = ConnTaskProj]
     pub struct ConnTask<T, B, E>
     where
         B: Body,
@@ -553,7 +570,7 @@ pin_project! {
         T: Unpin,
     {
         #[pin]
-        drop_rx: Receiver<Infallible>,
+        drop_rx: ConnDropRx,
         // `None` once finished, dropped so its streams resolve.
         #[pin]
         conn: Option<ConnMapErr<T, B>>,
@@ -578,7 +595,7 @@ where
     #[inline]
     fn new(
         conn: ConnMapErr<T, B>,
-        drop_rx: Receiver<Infallible>,
+        drop_rx: ConnDropRx,
         peer: Arc<PeerSettings>,
         dispatch: Dispatch<B, E>,
     ) -> Self {
@@ -754,8 +771,8 @@ where
     // Wakes the connection task once dropped with the last handle, which http2 does not.
     _conn_drop_ref: ConnDropRef,
     // Dropped with this future, which stops dispatch.
-    _stop: oneshot::Sender<Infallible>,
-    done: oneshot::Receiver<Result<Dispatched>>,
+    _stop: StopTx,
+    done: DoneRx,
     peer: Arc<PeerSettings>,
     h2_tx: SendRequest<SendBuf<B::Data>>,
 }
@@ -776,9 +793,9 @@ where
     req_rx: ClientRx<B>,
     fut_ctx: Option<FutCtx<B>>,
     // Closed once the `Connection` future is dropped, which stops dispatch.
-    stop: oneshot::Receiver<Infallible>,
+    stop: StopRx,
     // Reports to the `Connection` future how dispatch ended.
-    done: oneshot::Sender<Result<Dispatched>>,
+    done: DoneTx,
 }
 
 pin_project! {
@@ -789,8 +806,8 @@ pin_project! {
         #[pin]
         pipe: PipeToSendStream<S>,
         #[pin]
-        conn_drop_ref: Option<Sender<Infallible>>,
-        cancel_rx: Option<oneshot::Receiver<()>>,
+        conn_drop_ref: Option<ConnDropRef>,
+        cancel_rx: Option<PipeCancelRx>,
     }
 }
 
@@ -905,7 +922,7 @@ pin_project! {
         ping: Option<Recorder>,
         #[pin]
         send_stream: Option<Option<SendStream<SendBuf<<B as Body>::Data>>>>,
-        cancel_tx: Option<oneshot::Sender<()>>,
+        cancel_tx: Option<PipeCancelTx>,
         connect_udp: bool,
         exec: E,
     }
