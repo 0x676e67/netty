@@ -70,7 +70,7 @@ pub(crate) async fn handshake<T, B, E>(
     ping_config: ping::Config,
     mut exec: E,
     timer: Time,
-) -> Result<DispatchHandle<B>>
+) -> Result<ClientTask<B>>
 where
     T: AsyncRead + AsyncWrite + Unpin,
     B: Body + 'static,
@@ -132,7 +132,7 @@ where
         task: Box::pin(ConnTask::new(conn, conn_drop_rx, peer.clone(), dispatch)),
     });
 
-    Ok(DispatchHandle {
+    Ok(ClientTask {
         _conn_drop_ref: conn_drop_ref,
         _stop: stop_tx,
         done: done_rx,
@@ -747,7 +747,7 @@ impl<B: Body> Unpin for FutCtx<B> {}
 
 /// The `Connection` future's end of dispatch: settles once the connection task stops
 /// dispatching, and dropping it stops dispatch.
-pub(crate) struct DispatchHandle<B>
+pub(crate) struct ClientTask<B>
 where
     B: Body + 'static,
 {
@@ -1004,9 +1004,9 @@ where
     }
 }
 
-// ===== impl DispatchHandle =====
+// ===== impl ClientTask =====
 
-impl<B> DispatchHandle<B>
+impl<B> ClientTask<B>
 where
     B: Body + 'static,
 {
@@ -1027,7 +1027,7 @@ where
     }
 }
 
-impl<B> Future for DispatchHandle<B>
+impl<B> Future for ClientTask<B>
 where
     B: Body + 'static,
 {

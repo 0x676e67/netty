@@ -61,7 +61,7 @@ where
     E: Http2ClientConnExec<B, T> + Unpin,
     B::Error: Into<BoxError>,
 {
-    inner: (PhantomData<(T, E)>, proto::http2::client::DispatchHandle<B>),
+    inner: (PhantomData<(T, E)>, proto::http2::client::ClientTask<B>),
 }
 
 /// A builder to configure an HTTP connection.
