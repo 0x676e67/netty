@@ -40,10 +40,10 @@ impl<B> Clone for SendRequest<B> {
     }
 }
 
-/// A future that processes all HTTP state for the IO object.
+/// A future that settles once request dispatch on the IO object ends.
 ///
-/// In most cases, this should just be spawned into an executor, so that it
-/// can process incoming and outgoing messages, notice hangups, and the like.
+/// A task spawned on the executor processes the HTTP state; this future stops it
+/// from dispatching when dropped, so in most cases it should just be spawned too.
 ///
 /// # Drop behavior
 ///

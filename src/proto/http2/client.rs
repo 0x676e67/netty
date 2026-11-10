@@ -55,8 +55,8 @@ use crate::{
 /// Receiver for HTTP/2 client requests
 type ClientRx<B> = dispatch::Receiver<Request<B>, Response<Incoming>>;
 
-///// An mpsc channel is used to help notify the `Connection` task when *all*
-///// other handles to it have been dropped, so that it can shutdown.
+/// Held by each handle to the connection, so the connection task is woken to shut
+/// down once all are dropped.
 type ConnDropRef = mpsc::Sender<Infallible>;
 
 /// Ends once every [`ConnDropRef`] is dropped.
@@ -77,7 +77,7 @@ type DoneRx = oneshot::Receiver<Result<Dispatched>>;
 /// Tells a spawned body pipe to reset its stream when the caller cancels the request.
 type PipeCancelTx = oneshot::Sender<()>;
 
-/// Settles once the caller cancels the request, or closes once it no longer can.
+/// Settles once the caller cancels the request, or closes once its response settled.
 type PipeCancelRx = oneshot::Receiver<()>;
 
 pub(crate) async fn handshake<T, B, E>(
@@ -621,8 +621,8 @@ where
 {
     /// Polls dispatch, the connection and the responses once.
     ///
-    /// Breaks once all three are done, or continues after a yield that lets more requests
-    /// join new ones before the connection writes them.
+    /// Breaks once all three are done, and continues when the task should yield so more
+    /// requests can join new ones before the connection writes them.
     fn pass(this: &mut ConnTaskProj<'_, T, B, E>, cx: &mut Context<'_>) -> Poll<ControlFlow<()>> {
         // Dispatch first, so the connection writes new requests in this pass. Each request
         // handed over adds a response.
@@ -770,7 +770,6 @@ where
 {
     // Wakes the connection task once dropped with the last handle, which http2 does not.
     _conn_drop_ref: ConnDropRef,
-    // Dropped with this future, which stops dispatch.
     _stop: StopTx,
     done: DoneRx,
     peer: Arc<PeerSettings>,
@@ -792,9 +791,7 @@ where
     h2_tx: SendRequest<SendBuf<B::Data>>,
     req_rx: ClientRx<B>,
     fut_ctx: Option<FutCtx<B>>,
-    // Closed once the `Connection` future is dropped, which stops dispatch.
     stop: StopRx,
-    // Reports to the `Connection` future how dispatch ended.
     done: DoneTx,
 }
 
@@ -1091,16 +1088,15 @@ where
     ) {
         let ping = self.ping.clone();
 
-        // A one-shot channel so that send_task can tell pipe_task to
-        // reset the stream when the client cancels the request.
+        // Lets the response tell a spawned body pipe to reset the stream when the client
+        // cancels the request.
         let mut pipe_cancel_tx = None;
 
         let send_stream = if !f.is_connect {
             if !f.eos {
                 let mut pipe = PipeToSendStream::new(f.body, f.body_tx);
 
-                // eagerly see if the body pipe is ready and
-                // can thus skip allocating in the executor
+                // A body that is already done needs no task of its own.
                 match Pin::new(&mut pipe).poll(cx) {
                     Poll::Ready(_) => (),
                     Poll::Pending => {
@@ -1113,7 +1109,7 @@ where
                             conn_drop_ref: Some(conn_drop_ref),
                             cancel_rx: Some(cancel_rx),
                         };
-                        // Clear send task
+                        // The rest of the body is piped on a task of its own.
                         (self.spawn_pipe)(&mut self.executor, pipe);
                     }
                 }
@@ -1147,7 +1143,7 @@ where
         cx: &mut Context<'_>,
         responses: &mut FuturesUnordered<SendWhen<B, E>>,
     ) -> Poll<Result<Dispatched>> {
-        // A dropped `Connection` future stops dispatch, as dropping its dispatcher did.
+        // A dropped `Connection` future stops dispatch.
         if Pin::new(&mut self.stop).poll(cx).is_ready() {
             return Poll::Ready(Ok(Dispatched::Shutdown));
         }
