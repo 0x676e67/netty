@@ -62,16 +62,10 @@ type ConnDropRef = mpsc::Sender<Infallible>;
 /// Ends once every [`ConnDropRef`] is dropped.
 type ConnDropRx = mpsc::Receiver<Infallible>;
 
-/// Dropped with the `Connection` future, which stops dispatch.
-type StopTx = oneshot::Sender<Infallible>;
-
-/// Closes once the `Connection` future is dropped.
-type StopRx = oneshot::Receiver<Infallible>;
-
-/// Reports to the `Connection` future how dispatch ended.
+/// Reports to the `Connection` future how dispatch ended, and sees it dropped.
 type DoneTx = oneshot::Sender<Result<Dispatched>>;
 
-/// Settles with how dispatch ended.
+/// Settles with how dispatch ended. Dropped with the `Connection` future, which stops dispatch.
 type DoneRx = oneshot::Receiver<Result<Dispatched>>;
 
 /// Tells a spawned body pipe to reset its stream when the caller cancels the request.
@@ -131,7 +125,6 @@ where
         is_terminated: false,
     };
 
-    let (stop_tx, stop) = oneshot::channel();
     let (done, done_rx) = oneshot::channel();
     let dispatch = Dispatch {
         ping,
@@ -142,7 +135,6 @@ where
         h2_tx: h2_tx.clone(),
         req_rx,
         fut_ctx: None,
-        stop,
         done: Some(done),
     };
     exec.execute_h2_future(H2ClientFuture::Task {
@@ -151,7 +143,6 @@ where
 
     Ok(ClientTask {
         _conn_drop_ref: conn_drop_ref,
-        _stop: stop_tx,
         done: done_rx,
         peer,
         h2_tx,
@@ -801,7 +792,6 @@ where
 {
     // Wakes the connection task once dropped with the last handle, which http2 does not.
     _conn_drop_ref: ConnDropRef,
-    _stop: StopTx,
     done: DoneRx,
     peer: Arc<PeerSettings>,
     h2_tx: SendRequest<SendBuf<B::Data>>,
@@ -825,7 +815,6 @@ where
     h2_tx: SendRequest<SendBuf<B::Data>>,
     req_rx: ClientRx<B>,
     fut_ctx: Option<FutCtx<B>>,
-    stop: StopRx,
     // `None` once dispatch reported how it ended.
     done: Option<DoneTx>,
 }
@@ -1332,16 +1321,16 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        // A dropped `Connection` future stops dispatch. `stop` registers the waker only when
+        // A dropped `Connection` future stops dispatch. `done` registers the waker only when
         // dispatch would wait, so each request costs just an atomic load.
-        let step = if this.stop.try_recv().is_err() {
+        let step = if this.done.as_ref().is_none_or(DoneTx::is_canceled) {
             ControlFlow::Break(Ok(Dispatched::Shutdown))
         } else {
             match this.poll_request(cx) {
                 Poll::Ready(step) => step,
-                Poll::Pending => match Pin::new(&mut this.stop).poll(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(_) => ControlFlow::Break(Ok(Dispatched::Shutdown)),
+                Poll::Pending => match this.done.as_mut().map(|done| done.poll_canceled(cx)) {
+                    Some(Poll::Pending) => return Poll::Pending,
+                    _ => ControlFlow::Break(Ok(Dispatched::Shutdown)),
                 },
             }
         };
