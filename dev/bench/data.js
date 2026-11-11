@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794195489037,
+  "lastUpdate": 1794390399798,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -17603,6 +17603,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4554653,
             "range": "± 89090.33",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3a1c92895df2718b71c78730b85670aab0f2d806",
+          "message": "perf(http2): drive client connections in a single task (#205)\n\n* perf(http2): dispatch client requests without per-request tasks\n\n* refactor(http2): hand responses to the connection task over a channel\n\n* feat(http2): expose the write buffer size\n\n* perf(http2): advertise a 64 KiB max frame size by default\n\n* perf(http2): drive dispatch and responses in the connection task\n\n* refactor(http2): tidy the connection task and dispatch handle\n\n* refactor(http2): restore the ClientTask name\n\n* refactor(http2): name the client channel types\n\n* docs(http2): refresh the client task docs\n\n* refactor(http2): dispatch requests as a stream of responses\n\n* perf(http2): wake the connection task's parts separately\n\n* refactor(http2): stop dispatch through the done channel\n\n* refactor(http2): poll the connection task's parts through a wrapper future\n\n* docs(http2): update the connection must_use note and impl markers\n\n* test(http2): check the connection task does not wake itself\n\n* chore(deps): require http2 0.5.20",
+          "timestamp": "2026-11-11T17:44:36+08:00",
+          "tree_id": "6a40ba9186b5c061efcff151a7b252855619def8",
+          "url": "https://github.com/0x676e67/netty/commit/3a1c92895df2718b71c78730b85670aab0f2d806"
+        },
+        "date": 1794390399014,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 45114,
+            "range": "± 970.69",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3052661,
+            "range": "± 909975.12",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 16918,
+            "range": "± 602.52",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 17584,
+            "range": "± 358.38",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 19573,
+            "range": "± 346.49",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 57021,
+            "range": "± 988.43",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 20168,
+            "range": "± 311.43",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 50271,
+            "range": "± 1491.72",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 13059907,
+            "range": "± 16028774.27",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 4682759,
+            "range": "± 157556.26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 4698008,
+            "range": "± 399310.11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 31961459,
+            "range": "± 8519366.26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 37046299,
+            "range": "± 4023365.74",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 3786787,
+            "range": "± 287176.74",
             "unit": "ns/iter"
           }
         ]
