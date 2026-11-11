@@ -3596,6 +3596,203 @@ mod conn {
         .expect("dispatched response should finish after dropping the connection");
     }
 
+    #[cfg(feature = "http2")]
+    #[tokio::test]
+    async fn http2_full_body_requests_spawn_no_tasks() {
+        /// Spawns on tokio and counts the futures it spawns.
+        #[derive(Clone)]
+        struct Counting(Arc<AtomicUsize>);
+
+        impl<F> netty::rt::Executor<F> for Counting
+        where
+            F: Future<Output = ()> + Send + 'static,
+        {
+            fn execute(&self, fut: F) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                tokio::spawn(fut);
+            }
+        }
+
+        let (client_io, server_io, _) = setup_duplex_test_server();
+        let server = tokio::spawn(async move {
+            hyper::server::conn::http2::Builder::new(TokioExecutor)
+                .serve_connection(
+                    TokioIo::new(server_io),
+                    hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async {
+                        Ok::<_, std::convert::Infallible>(Response::new(request.into_body()))
+                    }),
+                )
+                .await
+        });
+        let spawned = Arc::new(AtomicUsize::new(0));
+        let (mut client, connection) = conn::http2::Builder::new(Counting(spawned.clone()))
+            .handshake::<_, Full<Bytes>>(client_io)
+            .await
+            .unwrap();
+        tokio::spawn(connection);
+        let per_connection = spawned.load(Ordering::Relaxed);
+
+        // Each new stream waits to open, which once spawned a body and a response task.
+        let responses = (0..8)
+            .map(|_| {
+                client.try_send_request(
+                    Request::post("https://localhost/")
+                        .body(Full::new(Bytes::from_static(b"hello")))
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for response in future::join_all(responses).await {
+            let body = concat(response.unwrap().into_body()).await.unwrap();
+            assert_eq!(body.as_ref(), b"hello");
+        }
+        assert_eq!(spawned.load(Ordering::Relaxed), per_connection);
+        server.abort();
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
+    async fn http2_dispatches_until_connection_drops() {
+        let (client_io, server_io, _) = setup_duplex_test_server();
+        let server = tokio::spawn(async move {
+            hyper::server::conn::http2::Builder::new(TokioExecutor)
+                .serve_connection(
+                    TokioIo::new(server_io),
+                    hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async {
+                        Ok::<_, std::convert::Infallible>(Response::new(request.into_body()))
+                    }),
+                )
+                .await
+        });
+        let (mut client, connection) = conn::http2::Builder::new(rt::TokioExecutor::new())
+            .handshake::<_, Full<Bytes>>(client_io)
+            .await
+            .unwrap();
+        let request = || {
+            Request::post("https://localhost/")
+                .body(Full::new(Bytes::from_static(b"hello")))
+                .unwrap()
+        };
+
+        // The connection task dispatches, so a request completes while `connection` is
+        // never polled.
+        let response = client.try_send_request(request()).await.unwrap();
+        assert_eq!(
+            concat(response.into_body()).await.unwrap().as_ref(),
+            b"hello"
+        );
+
+        // Dropping it stops dispatch, which closes the sender.
+        drop(connection);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !client.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dispatch should stop once the connection is dropped");
+        assert!(client.try_send_request(request()).await.is_err());
+        server.abort();
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
+    async fn http2_connection_task_does_not_wake_itself() {
+        use std::task::{Wake, Waker};
+
+        /// Counts the wakeups a future gives its own task while that task polls it.
+        struct SelfWakes<F> {
+            fut: Pin<Box<F>>,
+            count: Arc<AtomicUsize>,
+        }
+
+        /// The task's waker, as the polled future sees it.
+        struct Polled {
+            task: Waker,
+            polling: AtomicBool,
+            count: Arc<AtomicUsize>,
+        }
+
+        impl Wake for Polled {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                if self.polling.load(Ordering::Relaxed) {
+                    self.count.fetch_add(1, Ordering::Relaxed);
+                }
+                self.task.wake_by_ref();
+            }
+        }
+
+        impl<F: Future> Future for SelfWakes<F> {
+            type Output = F::Output;
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                let polled = Arc::new(Polled {
+                    task: cx.waker().clone(),
+                    polling: AtomicBool::new(true),
+                    count: self.count.clone(),
+                });
+                let waker = Waker::from(polled.clone());
+                let poll = self.fut.as_mut().poll(&mut Context::from_waker(&waker));
+                polled.polling.store(false, Ordering::Relaxed);
+                poll
+            }
+        }
+
+        /// Spawns on tokio, watching each future for wakeups of its own task.
+        #[derive(Clone)]
+        struct Watching(Arc<AtomicUsize>);
+
+        impl<F> netty::rt::Executor<F> for Watching
+        where
+            F: Future<Output = ()> + Send + 'static,
+        {
+            fn execute(&self, fut: F) {
+                tokio::spawn(SelfWakes {
+                    fut: Box::pin(fut),
+                    count: self.0.clone(),
+                });
+            }
+        }
+
+        let (client_io, server_io, _) = setup_duplex_test_server();
+        let server = tokio::spawn(async move {
+            hyper::server::conn::http2::Builder::new(TokioExecutor)
+                .serve_connection(
+                    TokioIo::new(server_io),
+                    hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async {
+                        Ok::<_, std::convert::Infallible>(Response::new(request.into_body()))
+                    }),
+                )
+                .await
+        });
+        let self_wakes = Arc::new(AtomicUsize::new(0));
+        let (mut client, connection) = conn::http2::Builder::new(Watching(self_wakes.clone()))
+            .handshake::<_, Full<Bytes>>(client_io)
+            .await
+            .unwrap();
+        tokio::spawn(connection);
+
+        // A request wakes the connection to write it, and a read wakes the response it
+        // completes. The connection task takes both in the poll it is in, as waking itself
+        // would send it back through the executor's run queue.
+        for _ in 0..16 {
+            let request = Request::post("https://localhost/")
+                .body(Full::new(Bytes::from_static(b"hello")))
+                .unwrap();
+            let response = client.try_send_request(request).await.unwrap();
+            assert_eq!(
+                concat(response.into_body()).await.unwrap().as_ref(),
+                b"hello"
+            );
+        }
+        assert_eq!(self_wakes.load(Ordering::Relaxed), 0);
+        server.abort();
+    }
+
     // This test can intermittently time out while waiting for the connection to close.
     // See [hyper#3896](https://github.com/hyperium/hyper/issues/3896).
     #[cfg(feature = "http2")]

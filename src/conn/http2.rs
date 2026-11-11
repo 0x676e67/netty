@@ -40,10 +40,10 @@ impl<B> Clone for SendRequest<B> {
     }
 }
 
-/// A future that processes all HTTP state for the IO object.
+/// A future that settles once request dispatch on the IO object ends.
 ///
-/// In most cases, this should just be spawned into an executor, so that it
-/// can process incoming and outgoing messages, notice hangups, and the like.
+/// A task spawned on the executor processes the HTTP state; this future stops it
+/// from dispatching when dropped, so in most cases it should just be spawned too.
 ///
 /// # Drop behavior
 ///
@@ -53,7 +53,7 @@ impl<B> Clone for SendRequest<B> {
 ///
 /// For graceful shutdown, finish outstanding requests and response bodies, drop all
 /// [`SendRequest`] handles, and let the executor keep driving the background tasks.
-#[must_use = "futures do nothing unless polled"]
+#[must_use = "dropping this future stops request dispatch"]
 pub struct Connection<T, B, E>
 where
     T: AsyncRead + AsyncWrite + Unpin,
@@ -61,7 +61,7 @@ where
     E: Http2ClientConnExec<B, T> + Unpin,
     B::Error: Into<BoxError>,
 {
-    inner: (PhantomData<T>, proto::http2::client::ClientTask<B, E, T>),
+    inner: (PhantomData<(T, E)>, proto::http2::client::ClientTask<B>),
 }
 
 /// A builder to configure an HTTP connection.
@@ -287,8 +287,8 @@ where
 
     /// Constructs a connection with the configured options and IO.
     ///
-    /// Note, if [`Connection`] is not `await`-ed, [`SendRequest`] will
-    /// do nothing.
+    /// A task spawned on the executor dispatches requests and drives the connection;
+    /// [`Connection`] settles once dispatch ends, and dropping it stops dispatch.
     ///
     /// # Errors
     ///
@@ -376,6 +376,9 @@ where
             builder.max_send_header_frame_size(max);
         }
         builder.one_frame_per_write(self.opts.one_frame_per_write);
+        if let Some(max) = self.opts.max_write_buffer_size {
+            builder.max_write_buffer_size(max);
+        }
 
         // Create the ping configuration for the connection.
         let ping_config = ping::Config::new(

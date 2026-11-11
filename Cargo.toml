@@ -58,7 +58,7 @@ tokio-util = { version = "0.7.18", default-features = false, features = ["io"] }
 
 # Optional deps...
 
-http2 = { version = "0.5.16", features = ["unstable"], optional = true }
+http2 = { version = "0.5.20", features = ["unstable"], optional = true }
 futures-channel = { version = "0.3.32", optional = true }
 http3 = { version = "0.2.0", features = ["unstable"], optional = true }
 http3-datagram = { version = "0.2.0", optional = true }
@@ -156,5 +156,5 @@ http3 = { git = "https://github.com/0x676e67/http3", rev = "96443870515f1e3e3189
 # `Builder::headers_priority`, the DATA and header frame caps and one frame per write, keeps
 # reading while control frames or a GOAWAY wait to be written, limits only consecutive empty
 # DATA frames, keeps an error GOAWAY reason when closing on idle, and adds
-# `Connection::has_streams`.
-http2 = { git = "https://github.com/0x676e67/http2", rev = "ce505e52ce9c25fb055412cb39b1caaa7a1f70a8" }
+# `Connection::has_streams` and `Builder::max_write_buffer_size`.
+http2 = { git = "https://github.com/0x676e67/http2", rev = "3219d38910c22105ea7fc5464696f26589432e9c" }
