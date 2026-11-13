@@ -235,6 +235,13 @@ impl Http1Transaction for Client {
                 headers.append(name, value);
             }
 
+            // Transfer-Encoding overrides Content-Length (RFC 9112 §6.3).
+            // https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3
+            // Do not expose the ignored length to the caller.
+            if headers.contains_key(header::TRANSFER_ENCODING) {
+                headers.remove(header::CONTENT_LENGTH);
+            }
+
             let mut extensions = http::Extensions::default();
 
             if let Some(reason) = reason {
@@ -802,6 +809,35 @@ mod tests {
                     "content-length: {values:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_parse_response_transfer_encoding_removes_content_length() {
+        let length = "content-length: 0";
+        let encoding = "transfer-encoding: chunked";
+
+        for [first, second] in [[length, encoding], [encoding, length]] {
+            let response = format!("HTTP/1.1 200 OK\r\n{first}\r\n{second}\r\n\r\n");
+            let mut bytes = BytesMut::from(response.as_str());
+            let msg = Client::parse(
+                &mut bytes,
+                ParseContext {
+                    cached_headers: &mut None,
+                    req_method: &mut Some(Method::GET),
+                    h1_parser_config: &Default::default(),
+                    h1_max_headers: None,
+                    h1_max_header_size: None,
+                    h09_responses: false,
+                    on_informational: &mut None,
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+            assert_eq!(msg.decode, DecodedLength::CHUNKED);
+            assert!(!msg.head.headers.contains_key(header::CONTENT_LENGTH));
+            assert!(msg.head.headers.contains_key(header::TRANSFER_ENCODING));
         }
     }
 
