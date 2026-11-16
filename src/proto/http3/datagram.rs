@@ -659,10 +659,10 @@ mod tests {
         registry.next().unwrap();
         assert!(first_wakes.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
         assert!(second_wakes.0.load(std::sync::atomic::Ordering::Relaxed) > 0);
-        assert!(matches!(
+        std::assert_matches!(
             first.poll_send(&mut cx1, &Bytes::from_static(b"first")),
             Poll::Ready(Ok(()))
-        ));
+        );
         // Reusing the second sender may first consume the broadcast notification.
         assert!(
             second

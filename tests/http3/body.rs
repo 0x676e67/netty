@@ -449,7 +449,7 @@ async fn upload_failure_cancels_unread_response_and_releases_request() {
                     Request::get("https://localhost/healthy")
                         .body(
                             Full::new(Bytes::new())
-                                .map_err(|never| -> std::io::Error { match never {} })
+                                .map_err(|never| -> std::io::Error { never })
                                 .boxed(),
                         )
                         .unwrap(),
