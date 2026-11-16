@@ -978,63 +978,62 @@ where
         let send_stream = this.send_stream.take().expect("Future polled twice");
 
         match result {
-            Ok(res) => {
-                // A CONNECT-UDP success that breaks the Capsule Protocol is malformed, a stream
-                // error of type PROTOCOL_ERROR.
-                // https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
-                // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.1.1
+            // A CONNECT-UDP success that breaks the Capsule Protocol is malformed, a stream
+            // error of type PROTOCOL_ERROR.
+            // https://www.rfc-editor.org/rfc/rfc9297.html#section-3.2
+            // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.1.1
+            Ok(res)
                 if *this.connect_udp
                     && res.status().is_success()
-                    && headers::breaks_capsule_protocol(res.status(), res.headers())
-                {
-                    if let Some(mut send_stream) = send_stream {
-                        send_stream.send_reset(http2::Reason::PROTOCOL_ERROR);
-                    }
-                    return Poll::Ready(Err((
-                        Error::new_h2(http2::Reason::PROTOCOL_ERROR.into()),
-                        None::<Request<B>>,
-                    )));
+                    && headers::breaks_capsule_protocol(res.status(), res.headers()) =>
+            {
+                if let Some(mut send_stream) = send_stream {
+                    send_stream.send_reset(http2::Reason::PROTOCOL_ERROR);
                 }
-
-                // Any 2xx opens the tunnel, and its content-length is ignored: the response has
-                // no content, and what follows is tunneled data.
-                // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.5
-                // https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
+                Poll::Ready(Err((
+                    Error::new_h2(http2::Reason::PROTOCOL_ERROR.into()),
+                    None::<Request<B>>,
+                )))
+            }
+            // Any 2xx opens the tunnel, and its content-length is ignored: the response has
+            // no content, and what follows is tunneled data.
+            // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.5
+            // https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
+            Ok(res)
                 if res.status().is_success()
-                    && let Some(send_stream) = send_stream
-                {
-                    let (parts, recv_stream) = res.into_parts();
-                    let mut res = Response::from_parts(parts, Incoming::empty());
+                    && let Some(send_stream) = send_stream =>
+            {
+                let (parts, recv_stream) = res.into_parts();
+                let mut res = Response::from_parts(parts, Incoming::empty());
 
-                    let (pending, on_upgrade) = upgrade::pending();
-                    let (io, task) = super::upgrade::pair(
-                        send_stream,
-                        recv_stream,
-                        ping,
-                        // Only MASQUE resets the stream.
-                        (cfg!(feature = "masque") && *this.connect_udp)
-                            .then_some(res.extensions_mut()),
-                    );
-                    this.exec.execute_upgrade(task);
-                    let upgraded = Upgraded::new(io, Bytes::new());
+                let (pending, on_upgrade) = upgrade::pending();
+                let (io, task) = super::upgrade::pair(
+                    send_stream,
+                    recv_stream,
+                    ping,
+                    // Only MASQUE resets the stream.
+                    (cfg!(feature = "masque") && *this.connect_udp).then_some(res.extensions_mut()),
+                );
+                this.exec.execute_upgrade(task);
+                let upgraded = Upgraded::new(io, Bytes::new());
 
-                    pending.fulfill(upgraded);
-                    res.extensions_mut().insert(on_upgrade);
+                pending.fulfill(upgraded);
+                res.extensions_mut().insert(on_upgrade);
 
-                    Poll::Ready(Ok(res))
-                } else {
-                    // A refused CONNECT tunnels nothing, so its request half ends here and the
-                    // stream closes with the response rather than when the body drops.
-                    if let Some(mut send_stream) = send_stream {
-                        let _ = send_stream.send_data(SendBuf::None, true);
-                    }
-                    let content_length = headers::content_length_parse_all(res.headers());
-                    let res = res.map(|stream| {
-                        let ping = ping.for_stream(&stream);
-                        Incoming::h2(stream, content_length.into(), ping)
-                    });
-                    Poll::Ready(Ok(res))
+                Poll::Ready(Ok(res))
+            }
+            Ok(res) => {
+                // A refused CONNECT tunnels nothing, so its request half ends here and the
+                // stream closes with the response rather than when the body drops.
+                if let Some(mut send_stream) = send_stream {
+                    let _ = send_stream.send_data(SendBuf::None, true);
                 }
+                let content_length = headers::content_length_parse_all(res.headers());
+                let res = res.map(|stream| {
+                    let ping = ping.for_stream(&stream);
+                    Incoming::h2(stream, content_length.into(), ping)
+                });
+                Poll::Ready(Ok(res))
             }
             Err(err) => {
                 ping.ensure_not_timed_out().map_err(|e| (e, None))?;

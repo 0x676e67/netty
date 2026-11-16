@@ -616,7 +616,7 @@ async fn dropped_response_body_cancels_a_pending_receive() {
                 let chunk = Bytes::from(vec![1; 64 * 1024]);
                 loop {
                     if let Err(error) = stream.send_data(chunk.clone()).await {
-                        assert!(matches!(error, h3::error::StreamError::RemoteTerminate { code, .. } if code == h3::error::Code::H3_REQUEST_CANCELLED));
+                        std::assert_matches!(error, h3::error::StreamError::RemoteTerminate { code, .. } if code == h3::error::Code::H3_REQUEST_CANCELLED);
                         observed.send(()).unwrap();
                         break;
                     }

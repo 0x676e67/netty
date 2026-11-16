@@ -397,9 +397,9 @@ async fn upload_failure_cancels_unread_response_and_releases_request() {
                             if code == h3::error::Code::H3_REQUEST_CANCELLED));
                     loop {
                         if let Err(error) = send.send_data(Bytes::from(vec![1; 64 * 1024])).await {
-                            assert!(matches!(error,
+                            std::assert_matches!(error,
                                 h3::error::StreamError::RemoteTerminate { code, .. }
-                                    if code == h3::error::Code::H3_REQUEST_CANCELLED));
+                                    if code == h3::error::Code::H3_REQUEST_CANCELLED);
                             break;
                         }
                     }
@@ -518,9 +518,9 @@ async fn dropping_response_body_preserves_pending_upload() {
                 body_dropped.await.unwrap();
                 loop {
                     if let Err(error) = send.send_data(Bytes::from(vec![1; 64 * 1024])).await {
-                        assert!(matches!(error,
+                        std::assert_matches!(error,
                             h3::error::StreamError::RemoteTerminate { code, .. }
-                                if code == h3::error::Code::H3_REQUEST_CANCELLED));
+                                if code == h3::error::Code::H3_REQUEST_CANCELLED);
                         break;
                     }
                 }
