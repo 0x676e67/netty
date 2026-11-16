@@ -2117,6 +2117,38 @@ mod conn {
         .expect("response with repeated trailers should finish");
     }
 
+    #[tokio::test]
+    async fn http1_final_body_frame_shorter_than_content_length() {
+        let (client_io, server_io, _) = setup_duplex_test_server();
+        let server = tokio::spawn(hyper::server::conn::http1::Builder::new().serve_connection(
+            TokioIo::new(server_io),
+            hyper::service::service_fn(|req: Request<hyper::body::Incoming>| async move {
+                concat(req.into_body()).await?;
+                Ok::<_, hyper::Error>(Response::new(Empty::<Bytes>::new()))
+            }),
+        ));
+
+        let (mut client, connection) = conn::http1::Builder::default()
+            .handshake(client_io)
+            .await
+            .unwrap();
+        let connection = tokio::spawn(connection);
+
+        // Full ends the body when it yields its only frame.
+        let request = Request::post("/")
+            .header("content-length", "10")
+            .body(Full::new(Bytes::from_static(b"hello")))
+            .unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(2), client.try_send_request(request))
+            .await
+            .expect("short request body should fail without a response")
+            .expect_err("short request body should fail");
+        assert!(err.error().is_body_write_aborted(), "{err:?}");
+
+        connection.await.unwrap().unwrap();
+        let _ = server.await.unwrap();
+    }
+
     #[cfg(not(miri))]
     #[tokio::test]
     async fn http1_close_drains_pending_requests_on_reset() {

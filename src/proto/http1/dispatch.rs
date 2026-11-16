@@ -441,7 +441,7 @@ where
                                     trace!("discarding empty chunk");
                                     self.conn.end_body()?;
                                 } else {
-                                    self.conn.write_body_and_end(chunk);
+                                    self.conn.write_body_and_end(chunk)?;
                                 }
                             } else {
                                 if chunk.remaining() == 0 {
