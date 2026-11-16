@@ -371,6 +371,36 @@ where
 
 // ===== impl SendGuard =====
 
+impl<S> SendGuard<S>
+where
+    S: quic::SendStream<Bytes> + Send + 'static,
+{
+    fn pending_fin_ack(
+        mut self,
+        shared: &Shared,
+    ) -> Result<Option<BoxFuture<'static, Result<()>>>> {
+        if !self.finished {
+            return Ok(None);
+        }
+
+        // The response packet normally acknowledges HEADERS and FIN together.
+        match self
+            .stream
+            .poll_stopped(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(result) => result
+                .map(|_| None)
+                .map_err(|error| shared.error_or(Error::new_h3(error))),
+            Poll::Pending => Ok(Some(Box::pin(async move {
+                poll_fn(|cx| self.stream.poll_stopped(cx))
+                    .await
+                    .map(|_| ())
+                    .map_err(Error::new_h3)
+            }))),
+        }
+    }
+}
+
 impl<S> Drop for SendGuard<S>
 where
     S: quic::SendStream<Bytes>,
@@ -399,6 +429,24 @@ where
 
 // ===== impl RecvGuard =====
 
+impl<S: quic::RecvStream> RecvGuard<S> {
+    fn prepare_response(&mut self, headers: &mut Response<()>, head: bool) -> Result<Option<u64>> {
+        let mut length = content_length(headers.headers()).inspect_err(|_| {
+            self.code = Code::H3_MESSAGE_ERROR;
+        })?;
+        if head
+            || matches!(
+                headers.status(),
+                StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED
+            )
+        {
+            length = Some(0);
+        }
+        *headers.version_mut() = http::Version::HTTP_3;
+        Ok(length)
+    }
+}
+
 impl<S: quic::RecvStream> Drop for RecvGuard<S> {
     fn drop(&mut self) {
         if !self.finished {
@@ -420,6 +468,17 @@ impl<S: quic::RecvStream> Drop for RecvGuard<S> {
     }
 }
 
+/// Holds the request through preparation and admission so failures can return it.
+struct PreparedRequest<B> {
+    request: Request<B>,
+    length: Option<u64>,
+    connect: bool,
+    head: bool,
+    connect_udp: bool,
+    #[cfg(feature = "http3-datagram")]
+    datagram_request: bool,
+}
+
 /// Runs one request. Errors before stream opening is attempted return it;
 /// dropping the future before it resolves cancels both directions. `exec`
 /// runs body sending that outlives the response head or a CONNECT tunnel.
@@ -428,7 +487,7 @@ pub(crate) fn request<Q, B, E>(
     mut sender: SendRequest<Transport<Q::OpenStreams>, Bytes>,
     exec: E,
     shared: Arc<Shared>,
-    mut request: Request<B>,
+    request: Request<B>,
     reservation: Option<Active>,
 ) -> BoxFuture<'static, Result<Response<Incoming>, TrySendError<Request<B>>>>
 where
@@ -444,85 +503,33 @@ where
     B::Error: Into<BoxError>,
     E: Http3ClientConnExec<Q> + Send + 'static,
 {
+    let mut prepared = PreparedRequest::new(request);
     Box::pin(async move {
         let Some(reservation) = reservation else {
             return Err(rejected(
                 Error::new_canceled().with("connection closed"),
-                request,
+                prepared.request,
             ));
         };
 
-        let connect = request.method() == Method::CONNECT;
-        let head = request.method() == Method::HEAD;
-        let connect_udp =
-            connect && request.extensions().get::<Protocol>() == Some(&Protocol::CONNECT_UDP);
-
-        #[cfg(feature = "http3-datagram")]
-        let datagram_request = request.extensions().get::<DatagramRequest>().is_some();
-        #[cfg(feature = "http3-datagram")]
-        if datagram_request
-            && (shared.datagrams.is_none()
-                || !connect
-                || request.extensions().get::<Protocol>().is_none())
-        {
-            return Err(rejected(
-                Error::new_user_invalid_request(
-                    "Datagram requests require an Extended CONNECT and a Datagram-enabled connection",
-                ),
-                request,
-            ));
-        }
-
-        if connect && !request.body().is_end_stream() {
-            return Err(rejected(Error::new_user_invalid_connect(), request));
-        }
-
-        headers::strip_connection_headers(request.headers_mut(), true);
-        let length = match validate_request(&request) {
-            Ok(length) => length,
-            Err(error) => return Err(rejected(Error::new_user_invalid_request(error), request)),
-        };
-
-        if request.extensions().get::<Protocol>().is_some() {
-            shared.settings_ready.cancelled().await;
-            if !shared
-                .peer_extended_connect
-                .get()
-                .is_some_and(|enabled| *enabled)
-            {
-                let error = if shared.permits.is_closed() {
-                    shared.error()
-                } else {
-                    Error::new_user_invalid_request("peer did not enable Extended CONNECT")
-                };
-                return Err(rejected(error, request));
-            }
-        }
-
-        let length = if length.is_none() && !connect {
-            let size = request.body().size_hint().exact();
-            if let Some(size) = size
-                && (size != 0 || headers::method_has_defined_payload_semantics(request.method()))
-            {
-                headers::set_content_length_if_missing(request.headers_mut(), size);
-            }
-            size
-        } else {
-            length
-        };
-
-        if request.body().is_end_stream() && length.is_some_and(|n| n != 0) {
-            return Err(rejected(
-                Error::new_user_body("body shorter than content-length"),
-                request,
-            ));
+        if let Err(error) = prepared.prepare(&shared).await {
+            return Err(rejected(error, prepared.request));
         }
 
         let active = match reservation.admit().await {
             Ok(active) => active,
-            Err(error) => return Err(rejected(error, request)),
+            Err(error) => return Err(rejected(error, prepared.request)),
         };
 
+        let PreparedRequest {
+            request,
+            length,
+            connect,
+            head,
+            connect_udp,
+            #[cfg(feature = "http3-datagram")]
+            datagram_request,
+        } = prepared;
         let (mut parts, body) = request.into_parts();
         if let Some(header_sort) = parts.extensions.remove::<OnPreserveHeader>() {
             header_sort.call(&mut parts.headers);
@@ -675,11 +682,10 @@ where
             })?,
         };
 
-        let mut remaining = content_length(headers.headers()).map_err(|error| {
+        let remaining = recv.prepare_response(&mut headers, head).map_err(|error| {
             // A malformed response is a stream error in both directions, not a local
             // cancellation.
             // https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1.2
-            recv.code = Code::H3_MESSAGE_ERROR;
             if let Some(send) = refused.as_mut() {
                 send.code = Code::H3_MESSAGE_ERROR;
             }
@@ -688,39 +694,12 @@ where
             }
             lost(error)
         })?;
-        if head
-            || matches!(
-                headers.status(),
-                StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED
-            )
-        {
-            remaining = Some(0);
-        }
-        *headers.version_mut() = http::Version::HTTP_3;
 
         let mut pipe = pipe.map(|pipe| pipe as BoxFuture<'static, Result<()>>);
-        // The peer's response packet normally carries the acknowledgment of the
-        // packet that held HEADERS and FIN; only a late one needs a task.
-        if let Some(mut send) = finished.take()
-            && send.finished
+        if let Some(send) = finished
+            && let Some(wait) = send.pending_fin_ack(&shared).map_err(lost)?
         {
-            match send
-                .stream
-                .poll_stopped(&mut Context::from_waker(Waker::noop()))
-            {
-                Poll::Ready(Ok(_)) => {}
-                Poll::Ready(Err(error)) => {
-                    return Err(lost(shared.error_or(Error::new_h3(error))));
-                }
-                Poll::Pending => {
-                    pipe = Some(Box::pin(async move {
-                        poll_fn(|cx| send.stream.poll_stopped(cx))
-                            .await
-                            .map(|_| ())
-                            .map_err(Error::new_h3)
-                    }));
-                }
-            }
+            pipe = Some(wait);
         }
 
         #[cfg(feature = "http3-datagram")]
@@ -748,6 +727,86 @@ where
 
         Ok(headers.map(|()| Incoming::h3(BoxBody::new(body))))
     })
+}
+
+// ===== impl PreparedRequest =====
+
+impl<B: Body> PreparedRequest<B> {
+    fn new(request: Request<B>) -> Self {
+        Self {
+            request,
+            length: None,
+            connect: false,
+            head: false,
+            connect_udp: false,
+            #[cfg(feature = "http3-datagram")]
+            datagram_request: false,
+        }
+    }
+
+    async fn prepare(&mut self, shared: &Shared) -> Result<()> {
+        let request = &mut self.request;
+        self.connect = request.method() == Method::CONNECT;
+        self.head = request.method() == Method::HEAD;
+        self.connect_udp =
+            self.connect && request.extensions().get::<Protocol>() == Some(&Protocol::CONNECT_UDP);
+
+        #[cfg(feature = "http3-datagram")]
+        {
+            self.datagram_request = request.extensions().get::<DatagramRequest>().is_some();
+            if self.datagram_request
+                && (shared.datagrams.is_none()
+                    || !self.connect
+                    || request.extensions().get::<Protocol>().is_none())
+            {
+                return Err(Error::new_user_invalid_request(
+                    "Datagram requests require an Extended CONNECT and a Datagram-enabled connection",
+                ));
+            }
+        }
+
+        if self.connect && !request.body().is_end_stream() {
+            return Err(Error::new_user_invalid_connect());
+        }
+
+        headers::strip_connection_headers(request.headers_mut(), true);
+        let length = validate_request(request).map_err(Error::new_user_invalid_request)?;
+
+        if request.extensions().get::<Protocol>().is_some() {
+            shared.settings_ready.cancelled().await;
+            if !shared
+                .peer_extended_connect
+                .get()
+                .is_some_and(|enabled| *enabled)
+            {
+                let error = if shared.permits.is_closed() {
+                    shared.error()
+                } else {
+                    Error::new_user_invalid_request("peer did not enable Extended CONNECT")
+                };
+                return Err(error);
+            }
+        }
+
+        let length = if length.is_none() && !self.connect {
+            let size = request.body().size_hint().exact();
+            if let Some(size) = size
+                && (size != 0 || headers::method_has_defined_payload_semantics(request.method()))
+            {
+                headers::set_content_length_if_missing(request.headers_mut(), size);
+            }
+            size
+        } else {
+            length
+        };
+
+        if request.body().is_end_stream() && length.is_some_and(|n| n != 0) {
+            return Err(Error::new_user_body("body shorter than content-length"));
+        }
+
+        self.length = length;
+        Ok(())
+    }
 }
 
 /// Resolves when a Datagram arrives for a request without Datagram semantics.
