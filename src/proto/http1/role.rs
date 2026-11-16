@@ -192,15 +192,16 @@ impl Http1Transaction for Client {
             };
 
             let mut slice = buf.split_to(len);
+            // SAFETY: Both scratch buffers have the same length, so `record_header_indices`
+            // initialized `headers_len` entries on success. The HTTP/0.9 fallback sets it to zero.
+            #[allow(unsafe_code)]
+            let headers_indices = unsafe { headers_indices[..headers_len].assume_init_mut() };
 
             if ctx
                 .h1_parser_config
                 .obsolete_multiline_headers_in_responses_are_allowed()
             {
-                for header in &mut headers_indices[..headers_len] {
-                    // SAFETY: array is valid up to `headers_len`
-                    #[allow(unsafe_code)]
-                    let header = unsafe { header.assume_init_mut() };
+                for header in headers_indices.iter_mut() {
                     Client::obs_fold_line(&mut slice, header);
                 }
             }
@@ -213,10 +214,7 @@ impl Http1Transaction for Client {
             let mut saw_connection_close = false;
 
             headers.reserve(headers_len);
-            for header in &headers_indices[..headers_len] {
-                // SAFETY: array is valid up to `headers_len`
-                #[allow(unsafe_code)]
-                let header = unsafe { header.assume_init_ref() };
+            for header in headers_indices.iter() {
                 let name = header_name!(&slice[header.name]);
                 let value = header_value!(slice.slice(header.value));
 
