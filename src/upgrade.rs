@@ -187,11 +187,10 @@ impl Future for OnUpgrade {
         if rx.is_terminated() {
             return Poll::Ready(Err(Error::new_user_no_upgrade()));
         }
-        Pin::new(&mut *rx).poll(cx).map(|res| match res {
-            Ok(Ok(upgraded)) => Ok(upgraded),
-            Ok(Err(err)) => Err(err),
-            Err(_oneshot_canceled) => Err(Error::new_canceled().with(UpgradeExpected)),
-        })
+        Pin::new(&mut *rx)
+            .poll(cx)
+            .map_err(|_| Error::new_canceled().with(UpgradeExpected))
+            .map(Result::flatten)
     }
 }
 
