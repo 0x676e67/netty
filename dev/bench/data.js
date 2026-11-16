@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794800787533,
+  "lastUpdate": 1794801417200,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -18467,6 +18467,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4504364,
             "range": "± 385513.05",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "19b7735a8fcb40577667dfec6de9fee3864afb90",
+          "message": "refactor: simplify HTTP encoding and polling (#214)",
+          "timestamp": "2026-11-16T11:55:01+08:00",
+          "tree_id": "c1cd64e7963c2232eaeb0742d91ff0aabbe80a05",
+          "url": "https://github.com/0x676e67/netty/commit/19b7735a8fcb40577667dfec6de9fee3864afb90"
+        },
+        "date": 1794801416634,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 49702,
+            "range": "± 2983.58",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3336835,
+            "range": "± 149140.45",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 18098,
+            "range": "± 689.19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 18853,
+            "range": "± 471.13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 21524,
+            "range": "± 528.01",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 68524,
+            "range": "± 1056.59",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 22979,
+            "range": "± 594.36",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 56710,
+            "range": "± 2972.96",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 5615787,
+            "range": "± 12638379.08",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 13652639,
+            "range": "± 16350200.71",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 5347919,
+            "range": "± 125131.61",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 38916327,
+            "range": "± 8348477.85",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 43974447,
+            "range": "± 481290.76",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 4385754,
+            "range": "± 682489.31",
             "unit": "ns/iter"
           }
         ]
