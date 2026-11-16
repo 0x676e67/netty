@@ -242,16 +242,12 @@ where
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.as_mut().tick(cx) {
-            Poll::Ready(Ok(())) => Poll::Ready(()),
-            Poll::Ready(Err(err)) => {
-                if let Some(tx) = self.error_tx.take() {
-                    let _oh_well = tx.send(err);
-                }
-                Poll::Ready(())
-            }
-            Poll::Pending => Poll::Pending,
+        if let Err(err) = ready!(self.as_mut().tick(cx))
+            && let Some(tx) = self.error_tx.take()
+        {
+            let _oh_well = tx.send(err);
         }
+        Poll::Ready(())
     }
 }
 

@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     future::{Future, poll_fn},
     pin::pin,
     sync::{
@@ -32,7 +33,7 @@ impl ArcWake for ObservedWaker {
 }
 
 impl Stats {
-    pub(super) fn report(&self, context: &str, role: &str, requests: u64) {
+    pub(super) fn report(&self, context: fmt::Arguments<'_>, role: &str, requests: u64) {
         eprintln!(
             "task-profile,{context},{role},{requests},{},{},{},{}",
             self.tasks.load(Ordering::Relaxed),

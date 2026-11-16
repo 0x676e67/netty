@@ -642,10 +642,7 @@ async fn graceful_shutdown_returns_queued_requests_and_honors_external_deadline(
             );
             let mut blocked = tx.clone();
             futures_util::future::poll_fn(|cx| {
-                assert!(matches!(
-                    blocked.poll_ready(cx),
-                    std::task::Poll::Ready(Ok(()))
-                ));
+                std::assert_matches!(blocked.poll_ready(cx), std::task::Poll::Ready(Ok(())));
                 std::task::Poll::Ready(())
             })
             .await;
