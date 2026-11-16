@@ -38,7 +38,7 @@ impl<T: Buf> Buf for BufList<T> {
 
     #[inline]
     fn chunk(&self) -> &[u8] {
-        self.bufs.front().map(Buf::chunk).unwrap_or_default()
+        self.bufs.front().map_or_default(Buf::chunk)
     }
 
     #[inline]

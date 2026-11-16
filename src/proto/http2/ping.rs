@@ -195,7 +195,7 @@ impl Config {
         payload: Option<[u8; 8]>,
     ) -> Self {
         // Cap like Tokio's sleep (about 30 years) so deadline arithmetic cannot overflow.
-        const MAX_DELAY: Duration = Duration::from_secs(86_400 * 365 * 30);
+        const MAX_DELAY: Duration = Duration::from_hours(24 * 365 * 30);
 
         Config {
             bdp_initial_window: if adaptive_window {
