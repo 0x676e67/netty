@@ -11,6 +11,7 @@ mod profile;
 mod tls;
 use std::{
     future::Future,
+    mem::DropGuard,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -30,18 +31,12 @@ struct Exec {
     profile: Option<Arc<profile::Stats>>,
 }
 
-struct Active(Arc<AtomicUsize>);
-
-impl Drop for Active {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 impl<F: Future<Output = ()> + Send + 'static> Executor<F> for Exec {
     fn execute(&self, future: F) {
         self.active.fetch_add(1, Ordering::AcqRel);
-        let active = Active(self.active.clone());
+        let active = DropGuard::new(self.active.clone(), |active| {
+            active.fetch_sub(1, Ordering::AcqRel);
+        });
         if let Some(stats) = &self.profile {
             let stats = stats.clone();
             tokio::spawn(async move {

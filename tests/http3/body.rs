@@ -213,15 +213,13 @@ async fn last_sender_drop_preserves_unpolled_requests() {
             )
             .await;
             // Create requests before polling any, then release the last sender.
-            let responses: Vec<_> = (0..35)
-                .map(|index| {
-                    tx.try_send_request(
-                        Request::get(format!("https://localhost/{index}"))
-                            .body(Full::new(Bytes::new()))
-                            .unwrap(),
-                    )
-                })
-                .collect();
+            let responses = Vec::from_fn(35, |index| {
+                tx.try_send_request(
+                    Request::get(format!("https://localhost/{index}"))
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                )
+            });
             drop(tx);
             let drive = Box::pin(driver);
             let peer = tokio::spawn(async move {

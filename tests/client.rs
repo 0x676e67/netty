@@ -3633,15 +3633,13 @@ mod conn {
         let per_connection = spawned.load(Ordering::Relaxed);
 
         // Each new stream waits to open, which once spawned a body and a response task.
-        let responses = (0..8)
-            .map(|_| {
-                client.try_send_request(
-                    Request::post("https://localhost/")
-                        .body(Full::new(Bytes::from_static(b"hello")))
-                        .unwrap(),
-                )
-            })
-            .collect::<Vec<_>>();
+        let responses = Vec::from_fn(8, |_| {
+            client.try_send_request(
+                Request::post("https://localhost/")
+                    .body(Full::new(Bytes::from_static(b"hello")))
+                    .unwrap(),
+            )
+        });
         for response in future::join_all(responses).await {
             let body = concat(response.unwrap().into_body()).await.unwrap();
             assert_eq!(body.as_ref(), b"hello");
