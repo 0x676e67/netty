@@ -1739,14 +1739,18 @@ mod conn {
                     .keep_alive(false)
                     .serve_connection(
                         TokioIo::new(server_io),
-                        hyper::service::service_fn(|request| async move {
-                            assert_eq!(request.headers()["transfer-encoding"], "chunked");
-                            // The whole request must arrive, terminating chunk included.
-                            // Before the fix the body's chunk arrives but `0\r\n\r\n`
-                            // never does, so collecting the body waits forever.
-                            assert_eq!(concat(request.into_body()).await.unwrap(), "hello");
-                            Ok::<_, std::convert::Infallible>(Response::new(Empty::<Bytes>::new()))
-                        }),
+                        hyper::service::service_fn(
+                            async |request: Request<hyper::body::Incoming>| {
+                                assert_eq!(request.headers()["transfer-encoding"], "chunked");
+                                // The whole request must arrive, terminating chunk included.
+                                // Before the fix the body's chunk arrives but `0\r\n\r\n`
+                                // never does, so collecting the body waits forever.
+                                assert_eq!(concat(request.into_body()).await.unwrap(), "hello");
+                                Ok::<_, std::convert::Infallible>(Response::new(
+                                    Empty::<Bytes>::new(),
+                                ))
+                            },
+                        ),
                     )
                     .await
                     .unwrap();
@@ -1872,12 +1876,14 @@ mod conn {
                     hyper::server::conn::http1::Builder::new()
                         .serve_connection(
                             TokioIo::new(server_io),
-                            hyper::service::service_fn(|request| async move {
-                                assert!(!request.headers().contains_key("connection"));
-                                Ok::<_, std::convert::Infallible>(Response::new(Full::new(
-                                    Bytes::from_static(b"hello"),
-                                )))
-                            }),
+                            hyper::service::service_fn(
+                                async |request: Request<hyper::body::Incoming>| {
+                                    assert!(!request.headers().contains_key("connection"));
+                                    Ok::<_, std::convert::Infallible>(Response::new(Full::new(
+                                        Bytes::from_static(b"hello"),
+                                    )))
+                                },
+                            ),
                         )
                         .await
                         .unwrap();
@@ -1928,7 +1934,7 @@ mod conn {
                     .serve_connection(
                         TokioIo::new(server_io),
                         hyper::service::service_fn(
-                            |request: Request<hyper::body::Incoming>| async {
+                            async |request: Request<hyper::body::Incoming>| {
                                 let (body, trailers) =
                                     crate::concat_with_trailers(request.into_body())
                                         .await
@@ -4004,7 +4010,7 @@ mod conn {
                 .timer(TokioTimer)
                 .serve_connection(
                     sock,
-                    service_fn(|req| async move {
+                    service_fn(async |req| {
                         tokio::spawn(async move {
                             let _ = concat(req.into_body())
                                 .await
@@ -4248,7 +4254,7 @@ mod conn {
                         .serve_connection(
                             TokioIo::new(server_io),
                             hyper::service::service_fn(
-                                |request: Request<hyper::body::Incoming>| async move {
+                                async |request: Request<hyper::body::Incoming>| {
                                     let mut response =
                                         Response::new(Full::new(Bytes::from_static(b"ok")));
                                     if request.uri().path() == "/large-headers" {

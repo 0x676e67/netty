@@ -187,10 +187,7 @@ mod tests {
         assert_eq!(buf.len(), 5);
         let mut abort = buf.clone();
         abort.put_u8(0);
-        assert!(matches!(
-            decoder.decode(&mut abort),
-            Err(MasqueError::Malformed)
-        ));
+        std::assert_matches!(decoder.decode(&mut abort), Err(MasqueError::Malformed));
         buf.put_u8(1);
         assert_eq!(decoder.decode(&mut buf).unwrap(), None);
         buf.put_slice(&[0; 65535]);

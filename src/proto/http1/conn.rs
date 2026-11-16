@@ -731,22 +731,18 @@ where
     // - Client: there is nothing we can do
     // - Server: if Response hasn't been written yet, we can send a 4xx response
     fn on_parse_error(&mut self, err: Error) -> Result<()> {
-        if let Writing::Init = self.state.writing {
-            if self.has_h2_prefix() {
-                return Err(Error::new_version_h2());
-            }
-            if let Some(msg) = T::on_error(&err) {
+        match self.state.writing {
+            Writing::Init if self.has_h2_prefix() => Err(Error::new_version_h2()),
+            Writing::Init if let Some(msg) = T::on_error(&err) => {
                 // Drop the cached headers so as to not trigger a debug
                 // assert in `write_head`...
                 self.state.cached_headers.take();
                 self.write_head(msg, None);
                 self.state.error = Some(err);
-                return Ok(());
+                Ok(())
             }
+            _ => Err(err),
         }
-
-        // fallback is pass the error back up
-        Err(err)
     }
 
     pub(super) fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

@@ -254,11 +254,7 @@ where
     fn closed(&mut self, error: http3::error::ConnectionError) -> Poll<()> {
         let normal = closed_normally(&error);
         self.shared.terminate(Error::new_h3(error));
-        let result = if normal {
-            Ok(())
-        } else {
-            Err(self.shared.error())
-        };
+        let result = normal.ok_or_else(|| self.shared.error());
         self.finish(result)
     }
 

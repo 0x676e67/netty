@@ -95,10 +95,8 @@ fn validate<B>(response: &Response<B>) -> Result<(), MasqueError> {
     if !status.is_success() {
         return Err(MasqueError::Unsuccessful(status));
     }
-    if headers::breaks_capsule_protocol(status, response.headers()) {
-        return Err(MasqueError::InvalidResponse);
-    }
-    Ok(())
+    (!headers::breaks_capsule_protocol(status, response.headers()))
+        .ok_or(MasqueError::InvalidResponse)
 }
 
 /// Connector that opens CONNECT-UDP tunnels over HTTP/3.
@@ -469,14 +467,14 @@ mod tests {
 
         // A refusal is reported before the missing session.
         let mut response = Response::new(());
-        assert!(matches!(
+        std::assert_matches!(
             UdpTunnel::from_http3(&mut response),
             Err(MasqueError::InvalidResponse)
-        ));
+        );
         *response.status_mut() = StatusCode::FORBIDDEN;
-        assert!(matches!(
+        std::assert_matches!(
             UdpTunnel::from_http3(&mut response),
             Err(MasqueError::Unsuccessful(StatusCode::FORBIDDEN))
-        ));
+        );
     }
 }
