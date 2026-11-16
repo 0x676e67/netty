@@ -96,20 +96,11 @@ fn is_complete_fast(bytes: &[u8], prev_len: usize) -> bool {
     let start = prev_len.saturating_sub(3);
     let bytes = &bytes[start..];
 
-    for (i, b) in bytes.iter().copied().enumerate() {
-        if b == b'\r' {
-            if bytes[i + 1..].chunks(3).next() == Some(&b"\n\r\n"[..]) {
-                return true;
-            }
-        } else if b == b'\n'
-            && (bytes.get(i + 1) == Some(&b'\n')
-                || bytes[i + 1..].chunks(2).next() == Some(&b"\r\n"[..]))
-        {
-            return true;
-        }
-    }
-
-    false
+    // A trailing LF pair has no third byte to form a window.
+    bytes
+        .array_windows::<3>()
+        .any(|window| matches!(*window, [b'\n', b'\n', _] | [b'\n', b'\r', b'\n']))
+        || bytes.ends_with(b"\n\n")
 }
 
 pub(crate) enum Client {}
@@ -705,6 +696,34 @@ fn extend(dst: &mut Vec<u8>, data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_complete_fast_with_fragmented_terminators() {
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 4";
+        for terminator in [b"\r\n\r\n".as_slice(), b"\n\r\n", b"\n\n"] {
+            let mut response = head.to_vec();
+            response.extend_from_slice(terminator);
+            for prev_len in head.len()..response.len() {
+                assert!(
+                    !is_complete_fast(&response[..prev_len], prev_len - 1),
+                    "{terminator:?} was detected in an incomplete response at {prev_len}"
+                );
+                assert!(
+                    is_complete_fast(&response, prev_len),
+                    "{terminator:?} was missed after appending to {prev_len} bytes"
+                );
+            }
+
+            let prev_len = response.len() - 1;
+            response.extend_from_slice(b"body");
+            assert!(
+                is_complete_fast(&response, prev_len),
+                "{terminator:?} was missed before body bytes"
+            );
+        }
+        assert!(!is_complete_fast(b"\n", 0));
+        assert!(is_complete_fast(b"\n\n", 1));
+    }
 
     #[test]
     fn test_client_request_encode_explicit_transfer_encoding_removes_content_length() {
