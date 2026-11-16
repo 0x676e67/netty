@@ -420,12 +420,12 @@ async fn measure(
         "http3"
     };
     if let Some(stats) = worker_profile {
-        let context = format!("{round},{implementation},{concurrency},{bytes}");
-        stats.report(&context, "worker", warmup.total + samples.total);
+        let context = format_args!("{round},{implementation},{concurrency},{bytes}");
+        stats.report(context, "worker", warmup.total + samples.total);
         exec.profile
             .as_ref()
             .unwrap()
-            .report(&context, "exchange", warmup.total + samples.total);
+            .report(context, "exchange", warmup.total + samples.total);
     }
     println!(
         "{round},{implementation}{},{concurrency},{bytes},{},{elapsed:.6},{:.2},{},{}",

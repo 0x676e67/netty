@@ -466,29 +466,25 @@ impl Client {
                     Some(Encoder::chunked())
                 }
             }
-            Entry::Vacant(te) => {
-                if let Some(len) = existing_con_len {
-                    Some(Encoder::length(len))
-                } else if let BodyLength::Unknown = body {
-                    // GET, HEAD, and CONNECT almost never have bodies.
-                    //
-                    // So instead of sending a "chunked" body with a 0-chunk,
-                    // assume no body here. If you *must* send a body,
-                    // set the headers explicitly.
-                    match head.subject.0 {
-                        Method::GET | Method::HEAD | Method::CONNECT => Some(Encoder::length(0)),
-                        _ => {
-                            te.insert(HeaderValue::from_static("chunked"));
-                            // A valid Content-Length would have taken precedence above.
-                            // Remove any invalid values now that we're using chunked.
-                            should_remove_con_len = true;
-                            Some(Encoder::chunked())
-                        }
+            Entry::Vacant(_) if let Some(len) = existing_con_len => Some(Encoder::length(len)),
+            Entry::Vacant(te) if matches!(body, BodyLength::Unknown) => {
+                // GET, HEAD, and CONNECT almost never have bodies.
+                //
+                // So instead of sending a "chunked" body with a 0-chunk,
+                // assume no body here. If you *must* send a body,
+                // set the headers explicitly.
+                match head.subject.0 {
+                    Method::GET | Method::HEAD | Method::CONNECT => Some(Encoder::length(0)),
+                    _ => {
+                        te.insert(HeaderValue::from_static("chunked"));
+                        // A valid Content-Length would have taken precedence above.
+                        // Remove any invalid values now that we're using chunked.
+                        should_remove_con_len = true;
+                        Some(Encoder::chunked())
                     }
-                } else {
-                    None
                 }
             }
+            Entry::Vacant(_) => None,
         };
 
         let encoder = encoder.map(|enc| {

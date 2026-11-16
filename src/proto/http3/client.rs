@@ -658,12 +658,11 @@ where
             None => {
                 let mut response = pin!(ResponseFutMap { recv: &mut recv });
                 poll_fn(|cx| {
-                    if let Some(pending) = pipe.as_mut() {
-                        match pending.as_mut().poll(cx) {
-                            Poll::Ready(Ok(())) => pipe = None,
-                            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                            Poll::Pending => {}
-                        }
+                    if let Some(pending) = pipe.as_mut()
+                        && let Poll::Ready(result) = pending.as_mut().poll(cx)
+                    {
+                        result?;
+                        pipe = None;
                     }
                     if let Poll::Ready(error) = invalid_watch.as_mut().poll(cx) {
                         return Poll::Ready(Err(error));
