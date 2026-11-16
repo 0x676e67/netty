@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794801417200,
+  "lastUpdate": 1794801598581,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -18575,6 +18575,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4385754,
             "range": "± 682489.31",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "27a96ea0eb331aa308cc12635a0a704f06533bff",
+          "message": "Merge pull request #207 from 0x676e67/fix/task-01-http1-response-content-length-4263\n\nfix(http1): drop Content-Length when a response also has Transfer-Encoding",
+          "timestamp": "2026-11-16T11:57:58+08:00",
+          "tree_id": "808b8dd7a4111433a98587adee78ba3be086a15a",
+          "url": "https://github.com/0x676e67/netty/commit/27a96ea0eb331aa308cc12635a0a704f06533bff"
+        },
+        "date": 1794801597339,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 49240,
+            "range": "± 727.50",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3329886,
+            "range": "± 385399.68",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 18094,
+            "range": "± 462.72",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 18739,
+            "range": "± 339.15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 21612,
+            "range": "± 364.56",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 70256,
+            "range": "± 3395.98",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 22861,
+            "range": "± 439.81",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 58145,
+            "range": "± 1225.36",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 5711476,
+            "range": "± 16256822.94",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 5466843,
+            "range": "± 199256.74",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 5429779,
+            "range": "± 258095.52",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 38776199,
+            "range": "± 8359942.64",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 43299284,
+            "range": "± 264936.65",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 4401100,
+            "range": "± 40823.58",
             "unit": "ns/iter"
           }
         ]
