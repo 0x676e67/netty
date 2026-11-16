@@ -1,5 +1,4 @@
 use std::{
-    convert::Infallible,
     future::Future,
     marker::Unpin,
     pin::Pin,
@@ -588,14 +587,14 @@ where
 
     type PollBody = B;
 
-    type PollError = Infallible;
+    type PollError = !;
 
     type RecvItem = proto::ResponseHead;
 
     fn poll_msg(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<(Self::PollItem, Self::PollBody), Infallible>>> {
+    ) -> Poll<Option<Result<(Self::PollItem, Self::PollBody), Self::PollError>>> {
         let mut this = self.as_mut();
         debug_assert!(!this.rx_closed);
         match this.rx.poll_recv(cx) {

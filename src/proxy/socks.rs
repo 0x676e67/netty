@@ -29,7 +29,7 @@ use tokio_socks::{
 };
 use tower_service::Service;
 
-use super::{ProxyDst, Tunneling, dst_host, dst_port};
+use super::{Tunneling, dst_host, dst_port, proxy_dst_debug};
 use crate::error::BoxError;
 
 /// Longest domain a SOCKS5 request can carry: one length octet
@@ -192,7 +192,7 @@ impl<C: fmt::Debug, R: fmt::Debug> fmt::Debug for SocksConnector<C, R> {
         f.debug_struct("SocksConnector")
             .field("inner", &self.inner)
             .field("resolver", &self.resolver)
-            .field("proxy_dst", &ProxyDst(&self.proxy_dst))
+            .field("proxy_dst", &proxy_dst_debug(&self.proxy_dst))
             .field("auth", &self.auth.as_ref().map(|_| "Sensitive"))
             .field("version", &self.version)
             .field("dns_resolve", &self.dns_resolve)
@@ -261,9 +261,7 @@ where
 
 /// Strips the brackets of an IPv6 literal.
 fn unbracket(host: &str) -> &str {
-    host.strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
-        .unwrap_or(host)
+    host.strip_circumfix('[', ']').unwrap_or(host)
 }
 
 /// Resolves `host` with the connector's resolver; SOCKS4 takes the first IPv4 address.

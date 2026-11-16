@@ -291,20 +291,20 @@ where
             return this.closed(error);
         }
 
-        if this.shared.peer_extended_connect.get().is_none() {
-            // Borrowed settings come from the received SETTINGS frame; Owned
-            // values are protocol defaults before peer negotiation completes.
-            if let Cow::Borrowed(settings) = this.driver.settings() {
-                #[cfg(feature = "http3-datagram")]
-                if let Some(datagrams) = &this.shared.datagrams {
-                    datagrams.negotiated(settings.enable_datagram());
-                }
-                let _ = this
-                    .shared
-                    .peer_extended_connect
-                    .set(settings.enable_extended_connect());
-                this.shared.settings_ready.cancel();
+        // Borrowed settings come from the received SETTINGS frame; Owned
+        // values are protocol defaults before peer negotiation completes.
+        if this.shared.peer_extended_connect.get().is_none()
+            && let Cow::Borrowed(settings) = this.driver.settings()
+        {
+            #[cfg(feature = "http3-datagram")]
+            if let Some(datagrams) = &this.shared.datagrams {
+                datagrams.negotiated(settings.enable_datagram());
             }
+            let _ = this
+                .shared
+                .peer_extended_connect
+                .set(settings.enable_extended_connect());
+            this.shared.settings_ready.cancel();
         }
 
         #[cfg(feature = "http3-datagram")]
@@ -540,7 +540,7 @@ where
             .send_request(Request::from_parts(parts, ()))
             .await
             .map_err(|error| lost(shared.error_or(Error::new_h3(error))))?;
-        if stream.id().into_inner() % 4 != 0 {
+        if !stream.id().into_inner().is_multiple_of(4) {
             return Err(lost(Error::new_h3(
                 "QUIC backend returned a non-client request stream ID",
             )));
@@ -554,11 +554,10 @@ where
         #[cfg(feature = "http3-datagram")]
         let datagrams = registration.as_ref().map(|registration| &registration.0);
 
-        #[cfg(feature = "http3-datagram")]
-        let invalid = datagrams.as_ref().map(|state| state.invalid.clone());
-
-        #[cfg(not(feature = "http3-datagram"))]
-        let invalid: Option<CancellationToken> = None;
+        let invalid = cfg_select! {
+            feature = "http3-datagram" => datagrams.map(|state| state.invalid.clone()),
+            _ => None::<CancellationToken>,
+        };
 
         let (send, recv) = stream.split();
         let mut send = SendGuard {

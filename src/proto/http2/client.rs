@@ -2,7 +2,6 @@ mod passes;
 
 use std::{
     collections::VecDeque,
-    convert::Infallible,
     future::Future,
     mem,
     ops::ControlFlow,
@@ -57,10 +56,10 @@ type ClientRx<B> = dispatch::Receiver<Request<B>, Response<Incoming>>;
 
 /// Held by each handle to the connection, so the connection task is woken to shut
 /// down once all are dropped.
-type ConnDropRef = mpsc::Sender<Infallible>;
+type ConnDropRef = mpsc::Sender<!>;
 
 /// Ends once every [`ConnDropRef`] is dropped.
-type ConnDropRx = mpsc::Receiver<Infallible>;
+type ConnDropRx = mpsc::Receiver<!>;
 
 /// Reports to the `Connection` future how dispatch ended, and sees it dropped.
 type DoneTx = oneshot::Sender<Result<Dispatched>>;

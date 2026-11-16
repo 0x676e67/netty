@@ -3121,7 +3121,7 @@ mod conn {
         assert!(!io.shutdown_called, "upgrade shouldn't shutdown AsyncWrite");
         rt.block_on(poll_fn(|ctx| {
             let ready = client.poll_ready(ctx);
-            assert!(matches!(ready, Poll::Ready(Err(_))));
+            std::assert_matches!(&ready, Poll::Ready(Err(_)));
             ready
         }))
         .unwrap_err();
@@ -3214,7 +3214,7 @@ mod conn {
 
         rt.block_on(poll_fn(|ctx| {
             let ready = client.poll_ready(ctx);
-            assert!(matches!(ready, Poll::Ready(Err(_))));
+            std::assert_matches!(&ready, Poll::Ready(Err(_)));
             ready
         }))
         .unwrap_err();
@@ -3633,15 +3633,13 @@ mod conn {
         let per_connection = spawned.load(Ordering::Relaxed);
 
         // Each new stream waits to open, which once spawned a body and a response task.
-        let responses = (0..8)
-            .map(|_| {
-                client.try_send_request(
-                    Request::post("https://localhost/")
-                        .body(Full::new(Bytes::from_static(b"hello")))
-                        .unwrap(),
-                )
-            })
-            .collect::<Vec<_>>();
+        let responses = Vec::from_fn(8, |_| {
+            client.try_send_request(
+                Request::post("https://localhost/")
+                    .body(Full::new(Bytes::from_static(b"hello")))
+                    .unwrap(),
+            )
+        });
         for response in future::join_all(responses).await {
             let body = concat(response.unwrap().into_body()).await.unwrap();
             assert_eq!(body.as_ref(), b"hello");
@@ -5290,7 +5288,10 @@ mod conn {
                 assert_ne!(n, 0, "client closed before sending request headers");
                 received.extend_from_slice(&buf[..n]);
 
-                if received.windows(4).any(|window| window == b"\r\n\r\n") {
+                if received
+                    .array_windows::<4>()
+                    .any(|window| window == b"\r\n\r\n")
+                {
                     break;
                 }
             }
