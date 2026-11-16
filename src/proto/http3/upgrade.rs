@@ -148,13 +148,13 @@ where
         }
     };
 
-    #[cfg(feature = "http3-datagram")]
-    let invalid = registration
-        .as_ref()
-        .map(|registration| registration.0.invalid.clone());
+    let invalid = cfg_select! {
+        feature = "http3-datagram" => registration
+            .as_ref()
+            .map(|registration| registration.0.invalid.clone()),
+        _ => None::<CancellationToken>,
+    };
 
-    #[cfg(not(feature = "http3-datagram"))]
-    let invalid: Option<CancellationToken> = None;
     #[cfg(not(feature = "http3-datagram"))]
     let registration = None;
     let (body, rx) = chan::channel(false);
@@ -172,16 +172,18 @@ where
 
     let (pending, on_upgrade) = pending();
     let io = Upgraded::new(io, Bytes::new());
-    #[cfg(feature = "http3-datagram")]
-    let io = if let Some(datagrams) = datagrams {
-        headers.extensions_mut().insert(Pending::new(io, datagrams));
-        None
-    } else {
-        Some(io)
+    let io = cfg_select! {
+        feature = "http3-datagram" => {
+            if let Some(datagrams) = datagrams {
+                headers.extensions_mut().insert(Pending::new(io, datagrams));
+                None
+            } else {
+                Some(io)
+            }
+        }
+        _ => Some(io),
     };
 
-    #[cfg(not(feature = "http3-datagram"))]
-    let io = Some(io);
     if io.is_some() {
         headers.extensions_mut().insert(on_upgrade);
     }

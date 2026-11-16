@@ -3,6 +3,7 @@
 //! See [RFC 9298 §2](https://www.rfc-editor.org/rfc/rfc9298#section-2) for the template rules
 //! and [RFC 6570](https://www.rfc-editor.org/rfc/rfc6570) (level 3) for expansion.
 
+use core::fmt::NumBuffer;
 use std::{fmt, net::Ipv6Addr, str::FromStr};
 
 use http::{Uri, uri::Authority};
@@ -151,7 +152,8 @@ impl Template {
         if port == 0 {
             return Err(MasqueError::InvalidTarget);
         }
-        let port = port.to_string();
+        let mut port_buf = NumBuffer::new();
+        let port = port.format_into(&mut port_buf);
 
         let mut uri = self.proxy.to_string();
         uri.pop(); // The trailing "/" from `proxy`; the template supplies the path.
@@ -161,7 +163,7 @@ impl Template {
                 Part::Expr(op, vars) => {
                     let defined = vars.iter().filter_map(|var| match var {
                         Var::Host => Some(("target_host", host)),
-                        Var::Port => Some(("target_port", port.as_str())),
+                        Var::Port => Some(("target_port", port)),
                         Var::Other => None,
                     });
                     for (i, (name, value)) in defined.enumerate() {
@@ -255,7 +257,7 @@ fn parse_host(host: &str) -> Option<&str> {
     // IPv6.
     // https://www.rfc-editor.org/rfc/rfc9298.html#section-3
     // https://www.rfc-editor.org/rfc/rfc3986.html#section-3.2.2
-    match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+    match host.strip_circumfix('[', ']') {
         Some(ip) => is_ipv6(ip).then_some(ip),
         None => (!host.is_empty() && (is_ipv6(host) || is_reg_name(host))).then_some(host),
     }

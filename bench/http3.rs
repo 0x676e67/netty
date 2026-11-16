@@ -474,7 +474,7 @@ fn main() {
                         clients.push((false, true));
                     }
                     clients.push((true, false));
-                    if round % 2 != 0 {
+                    if !round.is_multiple_of(2) {
                         clients.reverse();
                     }
                     for (proto, cloned) in clients {
