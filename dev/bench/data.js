@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794797460731,
+  "lastUpdate": 1794797462868,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -18035,6 +18035,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4511347,
             "range": "± 94812.28",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3963a44abd8048d0f98fac2e5a593834fdb2cccd",
+          "message": "chore: raise MSRV to Rust 1.100 (#211)",
+          "timestamp": "2026-11-16T10:48:50+08:00",
+          "tree_id": "d230e18ac7f6296b5bfa11cfc947a65ece6e33e1",
+          "url": "https://github.com/0x676e67/netty/commit/3963a44abd8048d0f98fac2e5a593834fdb2cccd"
+        },
+        "date": 1794797459615,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 33058,
+            "range": "± 1513.53",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3466224,
+            "range": "± 90262.35",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 9818,
+            "range": "± 171.31",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 10575,
+            "range": "± 934.57",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 14378,
+            "range": "± 1145.85",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 42688,
+            "range": "± 2273.71",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 15385,
+            "range": "± 779.50",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 56432,
+            "range": "± 3279.50",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 14089765,
+            "range": "± 4216731.75",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 3852118,
+            "range": "± 114199.20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 3803389,
+            "range": "± 130362.33",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 30667228,
+            "range": "± 525569.61",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 29068759,
+            "range": "± 623962.31",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 3042725,
+            "range": "± 123692.76",
             "unit": "ns/iter"
           }
         ]
