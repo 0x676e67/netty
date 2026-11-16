@@ -506,7 +506,10 @@ fn h2_to_io_error(e: http2::Error) -> std::io::Error {
 
 #[cfg(all(test, feature = "masque"))]
 mod tests {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::{
+        mem::DropGuard,
+        panic::{AssertUnwindSafe, catch_unwind},
+    };
 
     use super::*;
 
@@ -559,17 +562,13 @@ mod tests {
         let slot = slot.unwrap();
         assert!(slot.stop_recv.load(Ordering::Relaxed));
 
-        // Nor while a panic unwinds through that `Drop`, when a second panic would abort.
-        struct StopOnDrop<'a>(&'a StreamReset, &'a mut tokio::io::ReadHalf<Panics>);
-        impl Drop for StopOnDrop<'_> {
-            fn drop(&mut self) {
-                self.0.stop_recv(self.1);
-            }
-        }
+        // Cleanup also runs while unwinding, when a second panic would abort.
+        slot.stop_recv.store(false, Ordering::Relaxed);
         let unwound = catch_unwind(AssertUnwindSafe(|| {
-            let _stop = StopOnDrop(&reset, &mut read);
+            let _stop = DropGuard::new((&reset, &mut read), |(reset, read)| reset.stop_recv(read));
             panic!("tunnel task failed");
         }));
         assert!(unwound.is_err());
+        assert!(slot.stop_recv.load(Ordering::Relaxed));
     }
 }

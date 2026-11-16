@@ -105,6 +105,7 @@ jobs:
       - name: Check
         run: cargo check --lib
         env:
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
           RUSTFLAGS: "-D warnings"
 
   miri:

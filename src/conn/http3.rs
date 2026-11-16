@@ -35,6 +35,7 @@ pub mod datagram;
 use std::{
     future::{Future, poll_fn},
     marker::PhantomData,
+    mem::DropGuard,
     pin::Pin,
     sync::{Arc, Mutex, PoisonError, atomic::Ordering},
     task::{Context, Poll, ready},
@@ -130,12 +131,6 @@ pub struct Builder<E> {
     exec: E,
     options: Http3Options,
 }
-
-/// Closes the QUIC connection if the handshake is abandoned before the opener
-/// moves into the connection task.
-struct HandshakeGuard<O>(Option<O>)
-where
-    O: quic::OpenStreams<Bytes>;
 
 // ===== impl SendRequest =====
 
@@ -377,7 +372,13 @@ impl<E> Builder<E> {
             ));
         }
 
-        let mut handshake_guard = HandshakeGuard(Some(quic.opener()));
+        let handshake_guard = DropGuard::new(quic.opener(), |mut opener| {
+            quic::OpenStreams::close(
+                &mut opener,
+                Code::H3_NO_ERROR.value(),
+                b"HTTP/3 handshake canceled",
+            );
+        });
         let mut builder = http3::client::builder();
         builder
             .max_field_section_size(opts.max_field_section_size)
@@ -408,7 +409,7 @@ impl<E> Builder<E> {
             registry,
         );
 
-        let opener = handshake_guard.0.take().ok_or_else(Error::new_canceled)?;
+        let opener = DropGuard::dismiss(handshake_guard);
         let (done, completion) = oneshot::channel();
         let task = ConnTask::new(
             driver,
@@ -508,19 +509,6 @@ where
                 .terminate(Error::new_canceled().with("HTTP/3 connection dropped"));
             let (code, reason) = self.shared.close_reason("client connection dropped");
             quic::OpenStreams::close(&mut self.opener, code.value(), reason.as_bytes());
-        }
-    }
-}
-
-// ===== impl HandshakeGuard =====
-
-impl<O> Drop for HandshakeGuard<O>
-where
-    O: quic::OpenStreams<Bytes>,
-{
-    fn drop(&mut self) {
-        if let Some(opener) = self.0.as_mut() {
-            opener.close(Code::H3_NO_ERROR.value(), b"HTTP/3 handshake canceled");
         }
     }
 }

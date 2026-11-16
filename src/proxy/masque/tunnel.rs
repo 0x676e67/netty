@@ -471,7 +471,7 @@ impl UdpReceiver {
     fn poll_payload(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, MasqueError>> {
         // Alternate the first source, so a steady flow on one cannot hold back the other.
         let mut stream_first = self.stream_first;
-        self.stream_first = !stream_first;
+        self.stream_first.toggle();
         // Each round drops at most one payload or reads once, so a proxy flooding unknown
         // contexts or capsule types cannot keep this call from yielding.
         for _ in 0..32 {

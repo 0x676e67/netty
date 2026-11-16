@@ -3,7 +3,6 @@
 //! See [RFC 9298 §2](https://www.rfc-editor.org/rfc/rfc9298#section-2) for the template rules
 //! and [RFC 6570](https://www.rfc-editor.org/rfc/rfc6570) (level 3) for expansion.
 
-use core::fmt::NumBuffer;
 use std::{fmt, net::Ipv6Addr, str::FromStr};
 
 use http::{Uri, uri::Authority};
@@ -152,7 +151,7 @@ impl Template {
         if port == 0 {
             return Err(MasqueError::InvalidTarget);
         }
-        let mut port_buf = NumBuffer::new();
+        let mut port_buf = fmt::NumBuffer::new();
         let port = port.format_into(&mut port_buf);
 
         let mut uri = self.proxy.to_string();
