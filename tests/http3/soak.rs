@@ -1,6 +1,7 @@
 //! Explicit long-running cancellation and resource-lifetime validation.
 use std::{
     future::Future,
+    mem::DropGuard,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -17,22 +18,14 @@ use tokio::{task::JoinSet, time::timeout};
 #[derive(Clone, Default)]
 struct CountingExec(Arc<AtomicUsize>);
 
-struct Active(Arc<AtomicUsize>);
-
-// ===== impl Active =====
-
-impl Drop for Active {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 // ===== impl CountingExec =====
 
 impl<F: Future<Output = ()> + Send + 'static> Executor<F> for CountingExec {
     fn execute(&self, future: F) {
         self.0.fetch_add(1, Ordering::AcqRel);
-        let active = Active(self.0.clone());
+        let active = DropGuard::new(self.0.clone(), |active| {
+            active.fetch_sub(1, Ordering::AcqRel);
+        });
         tokio::spawn(async move {
             let _active = active;
             future.await;

@@ -944,7 +944,7 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
         }
         driver.finish(server.write_all(&malformed)).unwrap();
         let result = assert_ready!(task::spawn(poll_fn(|cx| tunnel.poll_recv(cx))).poll());
-        assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
+        std::assert_matches!(result, Err(MasqueError::Malformed));
         if !close {
             // The reset ends sending at once, before the send task applies it.
             assert_eq!(tunnel.max_payload_size(), 0);
@@ -1050,7 +1050,7 @@ fn h2_connect_udp_resets_malformed_input_with_protocol_error() {
         Some(::http2::Reason::NO_ERROR)
     );
     let result = driver.finish(poll_fn(|cx| tunnel.poll_recv(cx)));
-    assert!(matches!(result, Err(MasqueError::Malformed)), "{result:?}");
+    std::assert_matches!(result, Err(MasqueError::Malformed));
 
     // Without `UdpTunnel`, a kept response does not hold the stream open past its IO.
     let (response, server) = connect(&mut driver, Response::new(Bytes::new()));

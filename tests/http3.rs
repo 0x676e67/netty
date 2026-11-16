@@ -330,8 +330,11 @@ async fn response_header_budgets_have_distinct_failure_scopes() {
                         match stream.send_data(Bytes::from_static(b"probe")).await {
                             Ok(()) => tokio::task::yield_now().await,
                             Err(error) => {
-                                assert!(matches!(error, h3::error::StreamError::RemoteTerminate { code, .. }
-                                    if code == h3::error::Code::H3_REQUEST_CANCELLED), "{error}");
+                                std::assert_matches!(
+                                    error,
+                                    h3::error::StreamError::RemoteTerminate { code, .. }
+                                        if code == h3::error::Code::H3_REQUEST_CANCELLED
+                                );
                                 break;
                             }
                         }
@@ -2080,15 +2083,17 @@ async fn settings_order_and_configured_values_reach_upstream_server() {
                 .build();
             let builder = Builder::new(Exec).options(options);
             let transport = crate::native::Connection::new(client);
-            #[cfg(feature = "http3-datagram")]
-            let (mut tx, driver) = if native {
-                builder.handshake_with_datagrams(transport).await
-            } else {
-                builder.handshake(transport).await
+            let (mut tx, driver) = cfg_select! {
+                feature = "http3-datagram" => {
+                    if native {
+                        builder.handshake_with_datagrams(transport).await
+                    } else {
+                        builder.handshake(transport).await
+                    }
+                }
+                _ => builder.handshake(transport).await,
             }
             .unwrap();
-            #[cfg(not(feature = "http3-datagram"))]
-            let (mut tx, driver) = builder.handshake(transport).await.unwrap();
             let mut server = h3::server::builder()
                 .enable_datagram(native)
                 .build::<_, Bytes>(capture.connection(server))

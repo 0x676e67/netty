@@ -44,6 +44,13 @@ jobs:
     steps:
       - *checkout
       - *install-rust
+      - name: Apply Cargo patches to semver workspaces
+        run: |
+          # cargo-semver-checks builds netty as a dependency of a temporary workspace.
+          {
+            printf '\n'
+            awk '/^\[/ { patch = /^\[patch\.crates-io\][[:space:]]*$/ } patch' Cargo.toml
+          } >> "$CARGO_HOME/config.toml"
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:

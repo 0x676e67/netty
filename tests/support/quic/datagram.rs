@@ -33,7 +33,7 @@ impl DatagramConnection for Connection {
         }
         self.datagrams_taken = true;
         let connection = self.connection.clone();
-        let receiver = Box::pin(stream::unfold(connection.clone(), |connection| async {
+        let receiver = Box::pin(stream::unfold(connection.clone(), async |connection| {
             let data = connection.read_datagram().await;
             Some((data, connection))
         }));

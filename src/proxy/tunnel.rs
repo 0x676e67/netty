@@ -17,7 +17,7 @@ use http::{
 use tokio::io::{AsyncRead, AsyncWrite};
 use tower_service::Service;
 
-use super::{ProxyDst, Tunneling, dst_host, dst_port, read, send};
+use super::{Tunneling, dst_host, dst_port, proxy_dst_debug, read, send};
 use crate::error::BoxError;
 
 /// Maximum number of headers accepted in the proxy response.
@@ -108,7 +108,7 @@ impl<C: fmt::Debug> fmt::Debug for TunnelConnector<C> {
         f.debug_struct("TunnelConnector")
             .field("headers", &self.headers)
             .field("inner", &self.inner)
-            .field("proxy_dst", &ProxyDst(&self.proxy_dst))
+            .field("proxy_dst", &proxy_dst_debug(&self.proxy_dst))
             .finish()
     }
 }

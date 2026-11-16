@@ -1,3 +1,4 @@
+use core::range::Range;
 use std::{
     fmt::{self, Write as _},
     mem::MaybeUninit,
@@ -95,20 +96,11 @@ fn is_complete_fast(bytes: &[u8], prev_len: usize) -> bool {
     let start = prev_len.saturating_sub(3);
     let bytes = &bytes[start..];
 
-    for (i, b) in bytes.iter().copied().enumerate() {
-        if b == b'\r' {
-            if bytes[i + 1..].chunks(3).next() == Some(&b"\n\r\n"[..]) {
-                return true;
-            }
-        } else if b == b'\n'
-            && (bytes.get(i + 1) == Some(&b'\n')
-                || bytes[i + 1..].chunks(2).next() == Some(&b"\r\n"[..]))
-        {
-            return true;
-        }
-    }
-
-    false
+    // A trailing LF pair has no third byte to form a window.
+    bytes
+        .array_windows::<3>()
+        .any(|window| matches!(*window, [b'\n', b'\n', _] | [b'\n', b'\r', b'\n']))
+        || bytes.ends_with(b"\n\n")
 }
 
 pub(crate) enum Client {}
@@ -191,15 +183,16 @@ impl Http1Transaction for Client {
             };
 
             let mut slice = buf.split_to(len);
+            // SAFETY: Both scratch buffers have the same length, so `record_header_indices`
+            // initialized `headers_len` entries on success. The HTTP/0.9 fallback sets it to zero.
+            #[allow(unsafe_code)]
+            let headers_indices = unsafe { headers_indices[..headers_len].assume_init_mut() };
 
             if ctx
                 .h1_parser_config
                 .obsolete_multiline_headers_in_responses_are_allowed()
             {
-                for header in &mut headers_indices[..headers_len] {
-                    // SAFETY: array is valid up to `headers_len`
-                    #[allow(unsafe_code)]
-                    let header = unsafe { header.assume_init_mut() };
+                for header in headers_indices.iter_mut() {
                     Client::obs_fold_line(&mut slice, header);
                 }
             }
@@ -212,12 +205,9 @@ impl Http1Transaction for Client {
             let mut saw_connection_close = false;
 
             headers.reserve(headers_len);
-            for header in &headers_indices[..headers_len] {
-                // SAFETY: array is valid up to `headers_len`
-                #[allow(unsafe_code)]
-                let header = unsafe { header.assume_init_ref() };
-                let name = header_name!(&slice[header.name.0..header.name.1]);
-                let value = header_value!(slice.slice(header.value.0..header.value.1));
+            for header in headers_indices.iter() {
+                let name = header_name!(&slice[header.name]);
+                let value = header_value!(slice.slice(header.value));
 
                 if let header::CONNECTION = name {
                     // A message may carry more than one `Connection` line. Once
@@ -483,29 +473,25 @@ impl Client {
                     Some(Encoder::chunked())
                 }
             }
-            Entry::Vacant(te) => {
-                if let Some(len) = existing_con_len {
-                    Some(Encoder::length(len))
-                } else if let BodyLength::Unknown = body {
-                    // GET, HEAD, and CONNECT almost never have bodies.
-                    //
-                    // So instead of sending a "chunked" body with a 0-chunk,
-                    // assume no body here. If you *must* send a body,
-                    // set the headers explicitly.
-                    match head.subject.0 {
-                        Method::GET | Method::HEAD | Method::CONNECT => Some(Encoder::length(0)),
-                        _ => {
-                            te.insert(HeaderValue::from_static("chunked"));
-                            // A valid Content-Length would have taken precedence above.
-                            // Remove any invalid values now that we're using chunked.
-                            should_remove_con_len = true;
-                            Some(Encoder::chunked())
-                        }
+            Entry::Vacant(_) if let Some(len) = existing_con_len => Some(Encoder::length(len)),
+            Entry::Vacant(te) if matches!(body, BodyLength::Unknown) => {
+                // GET, HEAD, and CONNECT almost never have bodies.
+                //
+                // So instead of sending a "chunked" body with a 0-chunk,
+                // assume no body here. If you *must* send a body,
+                // set the headers explicitly.
+                match head.subject.0 {
+                    Method::GET | Method::HEAD | Method::CONNECT => Some(Encoder::length(0)),
+                    _ => {
+                        te.insert(HeaderValue::from_static("chunked"));
+                        // A valid Content-Length would have taken precedence above.
+                        // Remove any invalid values now that we're using chunked.
+                        should_remove_con_len = true;
+                        Some(Encoder::chunked())
                     }
-                } else {
-                    None
                 }
             }
+            Entry::Vacant(_) => None,
         };
 
         let encoder = encoder.map(|enc| {
@@ -563,7 +549,7 @@ impl Client {
         // This means strings like "\r\n\t foo" must replace the "\r\n\t " with
         // a single space.
 
-        let buf = &mut all[idx.value.0..idx.value.1];
+        let buf = &mut all[idx.value];
 
         // look for a newline, otherwise bail out
         let first_nl = match buf.iter().position(|b| *b == b'\n') {
@@ -606,7 +592,7 @@ impl Client {
             unfolded.extend_from_slice(trim(line));
         }
         buf[..unfolded.len()].copy_from_slice(&unfolded);
-        idx.value.1 = idx.value.0 + unfolded.len();
+        idx.value.end = idx.value.start + unfolded.len();
     }
 }
 
@@ -645,8 +631,8 @@ fn set_content_length(headers: &mut HeaderMap, len: u64) -> Encoder {
 
 #[derive(Clone, Copy)]
 struct HeaderIndices {
-    name: (usize, usize),
-    value: (usize, usize),
+    name: Range<usize>,
+    value: Range<usize>,
 }
 
 fn record_header_indices(
@@ -667,8 +653,14 @@ fn record_header_indices(
         let value_end = value_start + header.value.len();
 
         indices.write(HeaderIndices {
-            name: (name_start, name_end),
-            value: (value_start, value_end),
+            name: Range {
+                start: name_start,
+                end: name_end,
+            },
+            value: Range {
+                start: value_start,
+                end: value_end,
+            },
         });
     }
 
@@ -707,6 +699,34 @@ fn extend(dst: &mut Vec<u8>, data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_complete_fast_with_fragmented_terminators() {
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 4";
+        for terminator in [b"\r\n\r\n".as_slice(), b"\n\r\n", b"\n\n"] {
+            let mut response = head.to_vec();
+            response.extend_from_slice(terminator);
+            for prev_len in head.len()..response.len() {
+                assert!(
+                    !is_complete_fast(&response[..prev_len], prev_len - 1),
+                    "{terminator:?} was detected in an incomplete response at {prev_len}"
+                );
+                assert!(
+                    is_complete_fast(&response, prev_len),
+                    "{terminator:?} was missed after appending to {prev_len} bytes"
+                );
+            }
+
+            let prev_len = response.len() - 1;
+            response.extend_from_slice(b"body");
+            assert!(
+                is_complete_fast(&response, prev_len),
+                "{terminator:?} was missed before body bytes"
+            );
+        }
+        assert!(!is_complete_fast(b"\n", 0));
+        assert!(is_complete_fast(b"\n\n", 1));
+    }
 
     #[test]
     fn test_client_request_encode_explicit_transfer_encoding_removes_content_length() {
@@ -973,8 +993,8 @@ mod tests {
         parse_resp(None).unwrap().unwrap();
         parse_resp(Some(38)).unwrap().unwrap();
         parse_resp(Some(50)).unwrap().unwrap();
-        assert!(matches!(parse_resp(Some(37)), Err(Parse::TooLarge)));
-        assert!(matches!(parse_resp(Some(10)), Err(Parse::TooLarge)));
+        std::assert_matches!(parse_resp(Some(37)), Err(Parse::TooLarge));
+        std::assert_matches!(parse_resp(Some(10)), Err(Parse::TooLarge));
     }
 
     #[test]

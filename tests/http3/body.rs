@@ -213,15 +213,13 @@ async fn last_sender_drop_preserves_unpolled_requests() {
             )
             .await;
             // Create requests before polling any, then release the last sender.
-            let responses: Vec<_> = (0..35)
-                .map(|index| {
-                    tx.try_send_request(
-                        Request::get(format!("https://localhost/{index}"))
-                            .body(Full::new(Bytes::new()))
-                            .unwrap(),
-                    )
-                })
-                .collect();
+            let responses = Vec::from_fn(35, |index| {
+                tx.try_send_request(
+                    Request::get(format!("https://localhost/{index}"))
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                )
+            });
             drop(tx);
             let drive = Box::pin(driver);
             let peer = tokio::spawn(async move {
@@ -451,7 +449,7 @@ async fn upload_failure_cancels_unread_response_and_releases_request() {
                     Request::get("https://localhost/healthy")
                         .body(
                             Full::new(Bytes::new())
-                                .map_err(|never| -> std::io::Error { match never {} })
+                                .map_err(|never| -> std::io::Error { never })
                                 .boxed(),
                         )
                         .unwrap(),
@@ -644,10 +642,7 @@ async fn graceful_shutdown_returns_queued_requests_and_honors_external_deadline(
             );
             let mut blocked = tx.clone();
             futures_util::future::poll_fn(|cx| {
-                assert!(matches!(
-                    blocked.poll_ready(cx),
-                    std::task::Poll::Ready(Ok(()))
-                ));
+                std::assert_matches!(blocked.poll_ready(cx), std::task::Poll::Ready(Ok(())));
                 std::task::Poll::Ready(())
             })
             .await;

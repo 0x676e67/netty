@@ -56,10 +56,10 @@ where
         let project = self.project();
         match project.stream.poll_next(cx) {
             Poll::Ready(Some(result)) => Poll::Ready(Some(result)),
-            Poll::Ready(None) => match project.trailers.take() {
-                Some(trailers) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
-                None => Poll::Ready(None),
-            },
+            Poll::Ready(None) if let Some(trailers) = project.trailers.take() => {
+                Poll::Ready(Some(Ok(Frame::trailers(trailers))))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
     }

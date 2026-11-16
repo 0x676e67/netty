@@ -294,7 +294,7 @@ impl Opts {
         );
         let exec = rt.clone();
 
-        let req_len = self.request_body.map(|b| b.len()).unwrap_or(0) as u64;
+        let req_len = self.request_body.map_or_default(<[u8]>::len) as u64;
         let req_len = if self.request_chunks > 0 {
             req_len * self.request_chunks as u64
         } else {

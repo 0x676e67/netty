@@ -117,7 +117,7 @@ where
     // Parse HTTP response to find body start
     // HTTP response format: "HTTP/1.1 200 OK\r\n...headers...\r\n\r\n<body>"
     let body_start = all_data
-        .windows(4)
+        .array_windows::<4>()
         .position(|w| w == b"\r\n\r\n")
         .map(|pos| pos + 4)
         .unwrap_or(0);
