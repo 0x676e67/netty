@@ -3618,7 +3618,7 @@ mod conn {
             hyper::server::conn::http2::Builder::new(TokioExecutor)
                 .serve_connection(
                     TokioIo::new(server_io),
-                    hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async {
+                    hyper::service::service_fn(async |request: Request<hyper::body::Incoming>| {
                         Ok::<_, std::convert::Infallible>(Response::new(request.into_body()))
                     }),
                 )
@@ -3656,7 +3656,7 @@ mod conn {
             hyper::server::conn::http2::Builder::new(TokioExecutor)
                 .serve_connection(
                     TokioIo::new(server_io),
-                    hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async {
+                    hyper::service::service_fn(async |request: Request<hyper::body::Incoming>| {
                         Ok::<_, std::convert::Infallible>(Response::new(request.into_body()))
                     }),
                 )
@@ -3761,7 +3761,7 @@ mod conn {
             hyper::server::conn::http2::Builder::new(TokioExecutor)
                 .serve_connection(
                     TokioIo::new(server_io),
-                    hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async {
+                    hyper::service::service_fn(async |request: Request<hyper::body::Incoming>| {
                         Ok::<_, std::convert::Infallible>(Response::new(request.into_body()))
                     }),
                 )
@@ -4956,7 +4956,7 @@ mod conn {
             let mut read = 0;
             while read < 65_535 {
                 let frame = body.frame().await.expect("data").expect("frame");
-                read += frame.data_ref().map_or(0, Bytes::len);
+                read += frame.data_ref().map_or_default(Bytes::len);
             }
             read_tx.send(()).expect("server");
             let rest = body.collect().await.expect("body");
@@ -5521,7 +5521,7 @@ mod conn {
         // reserve, so stream B can never ship its data frame.
         let body_b = BodyExt::boxed(
             http_body_util::Full::new(Bytes::from_static(b"b"))
-                .map_err(|never: std::convert::Infallible| match never {}),
+                .map_err(|never: std::convert::Infallible| never),
         );
         let req_b = Request::post("http://localhost/b").body(body_b).unwrap();
         let b_fut = client.try_send_request(req_b);

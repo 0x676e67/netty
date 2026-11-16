@@ -765,15 +765,13 @@ mod tests {
     #[test]
     fn connection_byte_budget_is_reclaimed_on_close() {
         let registry = registry();
-        let requests: Vec<_> = (0..9)
-            .map(|n| {
-                registry.register(
-                    StreamId::try_from(n * 4).unwrap(),
-                    true,
-                    CancellationToken::new(),
-                )
-            })
-            .collect();
+        let requests = Vec::from_fn(9, |n| {
+            registry.register(
+                StreamId::try_from((n * 4) as u64).unwrap(),
+                true,
+                CancellationToken::new(),
+            )
+        });
         let payload = Bytes::from(vec![0; 65535]);
         for request in &requests[..8] {
             request.0.try_send(&payload).unwrap();
@@ -808,15 +806,13 @@ mod tests {
     fn dropping_datagram_receiver_reclaims_connection_budget() {
         use crate::conn::http3::datagram::{self, Pending};
         let registry = registry();
-        let requests: Vec<_> = (0..9)
-            .map(|n| {
-                registry.register(
-                    StreamId::try_from(n * 4).unwrap(),
-                    true,
-                    CancellationToken::new(),
-                )
-            })
-            .collect();
+        let requests = Vec::from_fn(9, |n| {
+            registry.register(
+                StreamId::try_from((n * 4) as u64).unwrap(),
+                true,
+                CancellationToken::new(),
+            )
+        });
         let (control, _peer) = tokio::io::duplex(1);
         let mut response = http::Response::new(());
         response.extensions_mut().insert(Pending::new(

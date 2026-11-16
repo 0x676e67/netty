@@ -296,9 +296,11 @@ async fn late_datagram_after_response_drop_preserves_upload() {
                 body_dropped.await.unwrap();
                 loop {
                     if let Err(error) = send.send_data(Bytes::from(vec![1; 64 * 1024])).await {
-                        assert!(matches!(error,
+                        std::assert_matches!(
+                            error,
                             h3::error::StreamError::RemoteTerminate { code, .. }
-                                if code == h3::error::Code::H3_REQUEST_CANCELLED));
+                                if code == h3::error::Code::H3_REQUEST_CANCELLED
+                        );
                         break;
                     }
                 }

@@ -64,8 +64,7 @@ impl OrigHeaderMap {
         let orig_header_name = orig.into_orig_header_name();
         match &orig_header_name.kind {
             name::Kind::Cased(bytes) => HeaderName::from_bytes(bytes)
-                .map(|name| self.0.append(name, orig_header_name))
-                .unwrap_or(false),
+                .map_or_default(|name| self.0.append(name, orig_header_name)),
             name::Kind::Standard(header_name) => {
                 self.0.append(header_name.clone(), orig_header_name)
             }

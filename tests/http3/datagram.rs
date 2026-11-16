@@ -386,9 +386,10 @@ async fn control_reset_wakes_datagrams_and_releases_request() {
                     .await
                     .err()
                     .expect("expected client reset");
-                assert!(
-                    matches!(error, h3::error::StreamError::RemoteTerminate { code, .. }
-                    if code == h3::error::Code::H3_REQUEST_CANCELLED)
+                std::assert_matches!(
+                    error,
+                    h3::error::StreamError::RemoteTerminate { code, .. }
+                        if code == h3::error::Code::H3_REQUEST_CANCELLED
                 );
             });
             let (_, mut stream) = server
