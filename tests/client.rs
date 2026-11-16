@@ -3121,7 +3121,7 @@ mod conn {
         assert!(!io.shutdown_called, "upgrade shouldn't shutdown AsyncWrite");
         rt.block_on(poll_fn(|ctx| {
             let ready = client.poll_ready(ctx);
-            assert!(matches!(ready, Poll::Ready(Err(_))));
+            std::assert_matches!(&ready, Poll::Ready(Err(_)));
             ready
         }))
         .unwrap_err();
@@ -3214,7 +3214,7 @@ mod conn {
 
         rt.block_on(poll_fn(|ctx| {
             let ready = client.poll_ready(ctx);
-            assert!(matches!(ready, Poll::Ready(Err(_))));
+            std::assert_matches!(&ready, Poll::Ready(Err(_)));
             ready
         }))
         .unwrap_err();
@@ -5290,7 +5290,10 @@ mod conn {
                 assert_ne!(n, 0, "client closed before sending request headers");
                 received.extend_from_slice(&buf[..n]);
 
-                if received.windows(4).any(|window| window == b"\r\n\r\n") {
+                if received
+                    .array_windows::<4>()
+                    .any(|window| window == b"\r\n\r\n")
+                {
                     break;
                 }
             }

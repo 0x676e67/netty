@@ -85,23 +85,18 @@ fn dst_port(uri: &Uri) -> Option<u16> {
 
 /// Debug view of a proxy URI without its userinfo, which may hold credentials.
 #[cfg(any(feature = "tunnel", feature = "socks"))]
-struct ProxyDst<'a>(&'a Uri);
-
-// ===== impl ProxyDst =====
-
-#[cfg(any(feature = "tunnel", feature = "socks"))]
-impl fmt::Debug for ProxyDst<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(scheme) = self.0.scheme_str() {
+fn proxy_dst_debug(uri: &Uri) -> impl fmt::Debug + '_ {
+    fmt::from_fn(move |f| {
+        if let Some(scheme) = uri.scheme_str() {
             write!(f, "{scheme}://")?;
         }
-        let authority = self.0.authority().map_or("", |a| a.as_str());
+        let authority = uri.authority().map_or("", |a| a.as_str());
         f.write_str(
             authority
                 .rsplit_once('@')
                 .map_or(authority, |(_, host)| host),
         )
-    }
+    })
 }
 
 /// Byte-stream helpers for handshakes over the caller's IO.

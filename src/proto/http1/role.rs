@@ -1,3 +1,4 @@
+use core::range::Range;
 use std::{
     fmt::{self, Write as _},
     mem::MaybeUninit,
@@ -216,8 +217,8 @@ impl Http1Transaction for Client {
                 // SAFETY: array is valid up to `headers_len`
                 #[allow(unsafe_code)]
                 let header = unsafe { header.assume_init_ref() };
-                let name = header_name!(&slice[header.name.0..header.name.1]);
-                let value = header_value!(slice.slice(header.value.0..header.value.1));
+                let name = header_name!(&slice[header.name]);
+                let value = header_value!(slice.slice(header.value));
 
                 if let header::CONNECTION = name {
                     // A message may carry more than one `Connection` line. Once
@@ -556,7 +557,7 @@ impl Client {
         // This means strings like "\r\n\t foo" must replace the "\r\n\t " with
         // a single space.
 
-        let buf = &mut all[idx.value.0..idx.value.1];
+        let buf = &mut all[idx.value];
 
         // look for a newline, otherwise bail out
         let first_nl = match buf.iter().position(|b| *b == b'\n') {
@@ -599,7 +600,7 @@ impl Client {
             unfolded.extend_from_slice(trim(line));
         }
         buf[..unfolded.len()].copy_from_slice(&unfolded);
-        idx.value.1 = idx.value.0 + unfolded.len();
+        idx.value.end = idx.value.start + unfolded.len();
     }
 }
 
@@ -638,8 +639,8 @@ fn set_content_length(headers: &mut HeaderMap, len: u64) -> Encoder {
 
 #[derive(Clone, Copy)]
 struct HeaderIndices {
-    name: (usize, usize),
-    value: (usize, usize),
+    name: Range<usize>,
+    value: Range<usize>,
 }
 
 fn record_header_indices(
@@ -660,8 +661,14 @@ fn record_header_indices(
         let value_end = value_start + header.value.len();
 
         indices.write(HeaderIndices {
-            name: (name_start, name_end),
-            value: (value_start, value_end),
+            name: Range {
+                start: name_start,
+                end: name_end,
+            },
+            value: Range {
+                start: value_start,
+                end: value_end,
+            },
         });
     }
 
@@ -937,8 +944,8 @@ mod tests {
         parse_resp(None).unwrap().unwrap();
         parse_resp(Some(38)).unwrap().unwrap();
         parse_resp(Some(50)).unwrap().unwrap();
-        assert!(matches!(parse_resp(Some(37)), Err(Parse::TooLarge)));
-        assert!(matches!(parse_resp(Some(10)), Err(Parse::TooLarge)));
+        std::assert_matches!(parse_resp(Some(37)), Err(Parse::TooLarge));
+        std::assert_matches!(parse_resp(Some(10)), Err(Parse::TooLarge));
     }
 
     #[test]
