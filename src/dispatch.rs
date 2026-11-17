@@ -8,14 +8,17 @@ type RetryPromise<T, U> = oneshot::Receiver<Result<U, TrySendError<T>>>;
 
 pub(crate) fn channel<T, U>() -> (Sender<T, U>, Receiver<T, U>) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let (giver, taker) = want::new();
+    let (giver, mut taker) = want::new();
+    // Seed with one want so the first HTTP/1 request can be sent before the
+    // receiver is polled. Every HTTP/1 request must consume a want.
+    taker.want();
     (
-        Sender {
-            buffered_once: false,
-            giver,
-            inner: tx,
+        Sender { giver, inner: tx },
+        Receiver {
+            inner: rx,
+            taker,
+            wanting: true,
         },
-        Receiver { inner: rx, taker },
     )
 }
 
@@ -40,16 +43,11 @@ pub struct TrySendError<T> {
 /// While the inner sender is unbounded, the Giver is used to determine
 /// if the Receiver is ready for another request.
 pub(crate) struct Sender<T, U> {
-    /// One message is always allowed, even if the Receiver hasn't asked
-    /// for it yet. This boolean keeps track of whether we've sent one
-    /// without notice.
-    buffered_once: bool,
-    /// The Giver helps watch that the Receiver side has been polled
-    /// when the queue is empty. This helps us know when a request and
-    /// response have been fully processed, and a connection is ready
-    /// for more.
+    // Controls whether the sender is permitted to dispatch a request
+    // Beyond the initial request, the Receiver only grants readiness once
+    // the preceding request/response cycle has fully completed
     giver: want::Giver,
-    /// Actually bounded by the Giver, plus `buffered_once`.
+    // Capacity is enforced via the Giver
     inner: mpsc::UnboundedSender<Envelope<T, U>>,
 }
 
@@ -76,15 +74,9 @@ impl<T, U> Sender<T, U> {
     }
 
     pub(crate) fn try_send(&mut self, val: T) -> Result<RetryPromise<T, U>, T> {
-        if self.giver.give() || !self.buffered_once {
-            // If the receiver is ready *now*, then of course we can send.
-            //
-            // If the receiver isn't ready yet, but we don't have anything
-            // in the channel yet, then allow one message.
-            self.buffered_once = true;
-        } else {
+        if !self.giver.give() {
             return Err(val);
-        };
+        }
 
         let (tx, rx) = oneshot::channel();
         self.inner
@@ -136,23 +128,35 @@ impl<T, U> Clone for UnboundedSender<T, U> {
 }
 
 /// Receives queued requests and their response callbacks for the connection driver.
-/// Signals demand while waiting for requests, and closure when closed or dropped.
+/// Signals demand for HTTP/1 once per receive cycle, and closure when closed or dropped.
 pub(crate) struct Receiver<T, U> {
     inner: mpsc::UnboundedReceiver<Envelope<T, U>>,
     taker: want::Taker,
+    // Tracks whether readiness (`want`) has already been granted for the next request
+    wanting: bool,
 }
 
 impl<T, U> Receiver<T, U> {
-    pub(crate) fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<(T, Callback<T, U>)>> {
-        match self.inner.poll_recv(cx) {
-            Poll::Ready(item) => {
-                Poll::Ready(item.map(|mut env| env.0.take().expect("envelope not dropped")))
-            }
-            Poll::Pending => {
-                self.taker.want();
-                Poll::Pending
-            }
+    pub(crate) fn poll_recv_bounded(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<(T, Callback<T, U>)>> {
+        if !self.wanting {
+            self.taker.want();
+            self.wanting = true;
         }
+        // Avoid re-signaling `want` here: the sender might have already claimed it
+        // and enqueued a request, even if polling the channel returns `Pending`
+        // due to Tokio's coop budget exhaustion or a concurrent send
+        let item = ready!(self.poll_recv(cx));
+        self.wanting = false;
+        Poll::Ready(item)
+    }
+
+    pub(crate) fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<(T, Callback<T, U>)>> {
+        self.inner
+            .poll_recv(cx)
+            .map(|item| item.map(|mut env| env.0.take().expect("envelope not dropped")))
     }
 
     #[inline]

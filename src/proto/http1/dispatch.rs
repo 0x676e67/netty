@@ -624,7 +624,7 @@ where
     ) -> Poll<Option<Result<(Self::PollItem, Self::PollBody), Self::PollError>>> {
         let mut this = self.as_mut();
         debug_assert!(!this.rx_closed);
-        match this.rx.poll_recv(cx) {
+        match this.rx.poll_recv_bounded(cx) {
             Poll::Ready(Some((req, mut cb))) => {
                 // check that future hasn't been canceled already
                 match cb.poll_canceled(cx) {
