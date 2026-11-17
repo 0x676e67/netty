@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794890151594,
+  "lastUpdate": 1794890153774,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -19331,6 +19331,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 2468025,
             "range": "± 17777.54",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f8df52fd2cdae9de51e8a0a27dad010286aa740f",
+          "message": "refactor: simplify response handling and test helpers (#217)",
+          "timestamp": "2026-11-17T12:33:42+08:00",
+          "tree_id": "1a60cdaaea0b189361974cd59e2cda508f827fdd",
+          "url": "https://github.com/0x676e67/netty/commit/f8df52fd2cdae9de51e8a0a27dad010286aa740f"
+        },
+        "date": 1794890152594,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 25146,
+            "range": "± 336.49",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3098369,
+            "range": "± 352497.19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 6932,
+            "range": "± 92.48",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 7585,
+            "range": "± 103.56",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 10559,
+            "range": "± 116.37",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 31975,
+            "range": "± 772.93",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 11286,
+            "range": "± 149.89",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 44025,
+            "range": "± 1215.26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 13247119,
+            "range": "± 4124194.55",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 3044169,
+            "range": "± 71758.83",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 2975652,
+            "range": "± 69253.60",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 29879888,
+            "range": "± 2535820.68",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 24865292,
+            "range": "± 772714.52",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 3070172,
+            "range": "± 273602.20",
             "unit": "ns/iter"
           }
         ]
