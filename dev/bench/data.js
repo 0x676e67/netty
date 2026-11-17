@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794894407735,
+  "lastUpdate": 1794897398735,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -19547,6 +19547,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 5085127,
             "range": "± 85698.36",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "18059f3440a9e5ffd5312f22180f4098cfb6d5e9",
+          "message": "perf(http1): read chunk framing bytes without split_to (#222)\n\n* perf(http1): read chunk framing bytes without split_to\n\nThe chunked decoder read every size, CRLF and trailer byte through\nread_mem(1), paying a split_to().freeze() per byte. Add read_byte to\nMemRead and use it in the byte! macro. About 3x faster decoding for\nsmall chunks.\n\nLocal adaptation:\nKeep the decoder benchmark in the local validation directory. It\nmeasures netty's Buffered reader in a release build.\n\n* Update io.rs\n\n---------\n\nCo-authored-by: Patrick Hintermayer <patrick@immometrica.com>",
+          "timestamp": "2026-11-17T14:34:05+08:00",
+          "tree_id": "c038ad915cb4e527754d4fcb3e3fa25c90e58ccc",
+          "url": "https://github.com/0x676e67/netty/commit/18059f3440a9e5ffd5312f22180f4098cfb6d5e9"
+        },
+        "date": 1794897397695,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 70685,
+            "range": "± 2008.33",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 4675630,
+            "range": "± 492080.13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 22016,
+            "range": "± 502.62",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 23859,
+            "range": "± 963.59",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 33729,
+            "range": "± 5013.02",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 101723,
+            "range": "± 3698.90",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 37515,
+            "range": "± 2451.76",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 79131,
+            "range": "± 2856.46",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 15282127,
+            "range": "± 8256664.54",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 6975235,
+            "range": "± 347719.07",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 6701735,
+            "range": "± 223983.91",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 46810786,
+            "range": "± 9203842.67",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 51758163,
+            "range": "± 1914872.84",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 5345889,
+            "range": "± 153820.45",
             "unit": "ns/iter"
           }
         ]
