@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794819399749,
+  "lastUpdate": 1794890104138,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -19115,6 +19115,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4488782,
             "range": "± 88289.44",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9a07c2575bbc85be5cd1afac41bcc1b2e61a0625",
+          "message": "fix(http1): drain in-flight requests before dispatcher shutdown (#208)",
+          "timestamp": "2026-11-17T12:33:09+08:00",
+          "tree_id": "9c1d6e508605ce893e8edde6fa9b5b7b3d8e3194",
+          "url": "https://github.com/0x676e67/netty/commit/9a07c2575bbc85be5cd1afac41bcc1b2e61a0625"
+        },
+        "date": 1794890103253,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 49691,
+            "range": "± 829.46",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3246034,
+            "range": "± 59451.22",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 18128,
+            "range": "± 4394.42",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 18818,
+            "range": "± 208.06",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 21743,
+            "range": "± 299.21",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 67387,
+            "range": "± 2470.37",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 22969,
+            "range": "± 298.80",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 56668,
+            "range": "± 1032.26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 5613635,
+            "range": "± 124366.07",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 5546397,
+            "range": "± 16481880.91",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 5357921,
+            "range": "± 110202.79",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 38877671,
+            "range": "± 8440383.27",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 43921771,
+            "range": "± 288504.07",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 4461964,
+            "range": "± 47781.63",
             "unit": "ns/iter"
           }
         ]
