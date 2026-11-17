@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794890153774,
+  "lastUpdate": 1794894407735,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -19439,6 +19439,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 3070172,
             "range": "± 273602.20",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2bfff345e5b8f6bcb6303935961171788777cd28",
+          "message": "fix(http2): strip all headers named in every Connection header (#219)\n\nHeaderMap::remove returns only the first value, so headers listed in a\nsecond Connection line were still sent over HTTP/2.\n\nLocal adaptation:\nApply the fix in netty's shared HTTP/2 and HTTP/3 request filter. Move\nout the first value with HeaderMap::remove and keep the remaining values\nin a SmallVec before changing the map. This keeps the empty and\nsingle-value paths allocation-free.\n\nCo-authored-by: Patrick Hintermayer <patrick@immometrica.com>",
+          "timestamp": "2026-11-17T13:44:24+08:00",
+          "tree_id": "5ae4c2bb3d925dbb02b515210114993e331332fe",
+          "url": "https://github.com/0x676e67/netty/commit/2bfff345e5b8f6bcb6303935961171788777cd28"
+        },
+        "date": 1794894407141,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 69279,
+            "range": "± 1373.80",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 4010052,
+            "range": "± 155432.97",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 21427,
+            "range": "± 457.28",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 22902,
+            "range": "± 634.23",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 32903,
+            "range": "± 713.03",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 99447,
+            "range": "± 2436.54",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 37433,
+            "range": "± 1322.72",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 78317,
+            "range": "± 1703.77",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 15249456,
+            "range": "± 8385394.94",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 7082482,
+            "range": "± 8354963.87",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 6943635,
+            "range": "± 129554.85",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 44954398,
+            "range": "± 8420229.21",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 50067270,
+            "range": "± 542743.17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 5085127,
+            "range": "± 85698.36",
             "unit": "ns/iter"
           }
         ]
