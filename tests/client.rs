@@ -2111,6 +2111,173 @@ mod conn {
         .expect("response with repeated trailers should finish");
     }
 
+    #[cfg(not(miri))]
+    #[tokio::test]
+    async fn http1_close_drains_pending_requests_on_reset() {
+        http1_close_drains_pending_requests(true, true).await;
+    }
+
+    #[cfg(not(miri))]
+    #[tokio::test]
+    async fn http1_close_drains_pending_requests_on_eof() {
+        http1_close_drains_pending_requests(false, true).await;
+    }
+
+    #[cfg(not(miri))]
+    #[tokio::test]
+    async fn http1_close_drains_pending_requests_without_shutdown() {
+        http1_close_drains_pending_requests(false, false).await;
+    }
+
+    #[cfg(not(miri))]
+    async fn http1_close_drains_pending_requests(reset: bool, should_shutdown: bool) {
+        use std::{future::Future, pin::pin, task::Waker};
+
+        struct ClosingIo {
+            io: DuplexStream,
+            reset: bool,
+            eof: bool,
+            flushes: Arc<AtomicUsize>,
+        }
+
+        impl tokio::io::AsyncRead for ClosingIo {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                assert!(!self.eof, "closed IO must not be read again");
+                let filled = buf.filled().len();
+                // Observe the transport close even when the dispatch channel must yield.
+                let read = poll_fn(|cx| Pin::new(&mut self.io).poll_read(cx, buf));
+                std::task::ready!(pin!(tokio::task::coop::unconstrained(read)).poll(cx))?;
+                self.eof = buf.filled().len() == filled;
+                if self.eof && self.reset {
+                    Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()))
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }
+        }
+
+        impl tokio::io::AsyncWrite for ClosingIo {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                Pin::new(&mut self.io).poll_write(cx, buf)
+            }
+
+            fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                self.flushes.fetch_add(1, Ordering::Relaxed);
+                Pin::new(&mut self.io).poll_flush(cx)
+            }
+
+            fn poll_shutdown(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<io::Result<()>> {
+                Pin::new(&mut self.io).poll_shutdown(cx)
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client_io, server_io) = tokio::io::duplex(1024);
+            let (close, closed) = oneshot::channel::<()>();
+            let server = tokio::spawn(async move {
+                let mut connection = pin!(hyper::server::conn::http1::Builder::new()
+                    .serve_connection(
+                        TokioIo::new(server_io),
+                        hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async move {
+                            assert_eq!(request.uri(), "/");
+                            Ok::<_, std::convert::Infallible>(Response::new(Empty::<Bytes>::new()))
+                        }),
+                    ));
+                tokio::select! {
+                    result = &mut connection => panic!("server closed before being asked: {result:?}"),
+                    signal = closed => signal.unwrap(),
+                }
+                connection.as_mut().graceful_shutdown();
+                connection.await.unwrap();
+            });
+
+            let flushes = Arc::new(AtomicUsize::new(0));
+            let (mut client, mut connection) = conn::http1::Builder::default()
+                .handshake(ClosingIo {
+                    io: client_io,
+                    reset,
+                    eof: false,
+                    flushes: flushes.clone(),
+                })
+                .await
+                .unwrap();
+
+            // Complete an exchange to put the connection into idle keep-alive.
+            let mut first = pin!(client.try_send_request(Request::new(Empty::<Bytes>::new())));
+            let response = poll_fn(|cx| {
+                assert!(Pin::new(&mut connection).poll(cx).is_pending());
+                first.as_mut().poll(cx)
+            })
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(client.is_ready());
+
+            close.send(()).unwrap();
+            server.await.unwrap();
+            let request = client.try_send_request(
+                Request::get("/not-sent")
+                    .body(Empty::<Bytes>::new())
+                    .unwrap(),
+            );
+            let mut driver = tokio_test::task::spawn(poll_fn(|cx| {
+                if should_shutdown {
+                    Pin::new(&mut connection).poll(cx)
+                } else {
+                    connection.poll_without_shutdown(cx)
+                }
+            }));
+
+            // Exhaust Tokio's cooperative budget so the closed dispatch channel yields.
+            // This exercises the same drain path as an in-progress send.
+            while tokio::task::coop::has_budget_remaining() {
+                tokio::task::coop::consume_budget().await;
+            }
+            assert!(
+                driver.poll().is_pending(),
+                "must finish draining before exiting"
+            );
+            let cx = &mut Context::from_waker(Waker::noop());
+            assert!(matches!(client.poll_ready(cx), Poll::Ready(Err(_))));
+
+            // Resume the drain without polling the closed transport again.
+            let flushes_at_close = flushes.load(Ordering::Relaxed);
+            tokio::task::yield_now().await;
+            assert!(driver.is_woken());
+            let result = tokio_test::assert_ready!(driver.poll());
+            assert_eq!(flushes.load(Ordering::Relaxed), flushes_at_close);
+            if reset {
+                let error = result.expect_err("connection reset error");
+                let source = error.source().unwrap().downcast_ref::<io::Error>().unwrap();
+                assert_eq!(source.kind(), io::ErrorKind::ConnectionReset);
+            } else {
+                result.unwrap();
+            }
+
+            // Cancellation must complete while both the sender and driver remain alive.
+            let error = request
+                .now_or_never()
+                .expect("queued request must finish")
+                .unwrap_err();
+            assert!(error.error().is_canceled());
+            assert_eq!(error.message().unwrap().uri(), "/not-sent");
+            assert!(matches!(client.poll_ready(cx), Poll::Ready(Err(_))));
+        })
+        .await
+        .expect("closing connection should finish");
+    }
+
     #[tokio::test]
     async fn http1_flush_before_shutdown() {
         use std::future::Future;
