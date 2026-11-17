@@ -3225,6 +3225,51 @@ mod conn {
     }
 
     #[tokio::test]
+    async fn http1_conn_coerces_http2_streaming_request() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client_io, server_io, _) = setup_duplex_test_server();
+            let svc = hyper::service::service_fn(|req: Request<hyper::body::Incoming>| async {
+                assert_eq!(req.method(), Method::POST);
+                assert_eq!(req.version(), hyper::Version::HTTP_11);
+                let chunked = req.headers().get("transfer-encoding").cloned();
+                let body = concat(req).await?;
+                assert_eq!(body, "hello world");
+                assert_eq!(chunked.as_ref().unwrap(), "chunked");
+                Ok::<_, hyper::Error>(Response::new(Full::new(body)))
+            });
+            let server = tokio::spawn(
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(server_io), svc),
+            );
+
+            let (mut client, connection) = conn::http1::Builder::default()
+                .handshake(client_io)
+                .await
+                .unwrap();
+            let connection = tokio::spawn(connection);
+            let body = StreamBody::new(futures_util::stream::iter([
+                Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from_static(b"hello"))),
+                Ok(Frame::data(Bytes::from_static(b" world"))),
+            ]));
+            assert_eq!(body.size_hint().exact(), None);
+            let req = Request::post("/a")
+                .version(hyper::Version::HTTP_2)
+                .body(body)
+                .unwrap();
+
+            let response = client.try_send_request(req).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(concat(response).await.unwrap(), "hello world");
+
+            drop(client);
+            connection.await.unwrap().unwrap();
+            server.await.unwrap().unwrap();
+        })
+        .await
+        .expect("coerced request body should reach the server");
+    }
+
+    #[tokio::test]
     async fn http1_rejects_request_version_without_http1_form() {
         // The mock panics on any write other than the final HTTP/1.1 request.
         let io = tokio_test::io::Builder::new()
