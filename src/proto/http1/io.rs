@@ -348,7 +348,6 @@ where
         }
     }
 
-    // Skips the split/freeze (and its refcount traffic) of `read_mem` for chunk framing bytes.
     fn read_byte(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<Option<u8>>> {
         if self.read_buf.is_empty() && ready!(self.poll_read_from_io(cx))? == 0 {
             return Poll::Ready(Ok(None));
