@@ -563,8 +563,12 @@ async fn unbounded_queue_returns_unattempted_requests_on_close() {
         let mut pending = Vec::new();
         // Exceed the former queue limit without polling the driver. Cloned
         // senders remain ready and every unsent request must be recoverable.
-        for index in 0..64 {
-            let sender = if index % 2 == 0 { &mut tx } else { &mut other };
+        for index in 0_usize..64 {
+            let sender = if index.is_multiple_of(2) {
+                &mut tx
+            } else {
+                &mut other
+            };
             sender.ready().await.unwrap();
             pending.push(
                 sender.try_send_request(

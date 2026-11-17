@@ -90,7 +90,7 @@ fn proxy_dst_debug(uri: &Uri) -> impl fmt::Debug + '_ {
         if let Some(scheme) = uri.scheme_str() {
             write!(f, "{scheme}://")?;
         }
-        let authority = uri.authority().map_or("", |a| a.as_str());
+        let authority = uri.authority().map_or_default(|a| a.as_str());
         f.write_str(
             authority
                 .rsplit_once('@')

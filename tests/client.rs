@@ -1739,14 +1739,18 @@ mod conn {
                     .keep_alive(false)
                     .serve_connection(
                         TokioIo::new(server_io),
-                        hyper::service::service_fn(|request| async move {
-                            assert_eq!(request.headers()["transfer-encoding"], "chunked");
-                            // The whole request must arrive, terminating chunk included.
-                            // Before the fix the body's chunk arrives but `0\r\n\r\n`
-                            // never does, so collecting the body waits forever.
-                            assert_eq!(concat(request.into_body()).await.unwrap(), "hello");
-                            Ok::<_, std::convert::Infallible>(Response::new(Empty::<Bytes>::new()))
-                        }),
+                        hyper::service::service_fn(
+                            async |request: Request<hyper::body::Incoming>| {
+                                assert_eq!(request.headers()["transfer-encoding"], "chunked");
+                                // The whole request must arrive, terminating chunk included.
+                                // Before the fix the body's chunk arrives but `0\r\n\r\n`
+                                // never does, so collecting the body waits forever.
+                                assert_eq!(concat(request.into_body()).await.unwrap(), "hello");
+                                Ok::<_, std::convert::Infallible>(Response::new(
+                                    Empty::<Bytes>::new(),
+                                ))
+                            },
+                        ),
                     )
                     .await
                     .unwrap();
@@ -1872,12 +1876,14 @@ mod conn {
                     hyper::server::conn::http1::Builder::new()
                         .serve_connection(
                             TokioIo::new(server_io),
-                            hyper::service::service_fn(|request| async move {
-                                assert!(!request.headers().contains_key("connection"));
-                                Ok::<_, std::convert::Infallible>(Response::new(Full::new(
-                                    Bytes::from_static(b"hello"),
-                                )))
-                            }),
+                            hyper::service::service_fn(
+                                async |request: Request<hyper::body::Incoming>| {
+                                    assert!(!request.headers().contains_key("connection"));
+                                    Ok::<_, std::convert::Infallible>(Response::new(Full::new(
+                                        Bytes::from_static(b"hello"),
+                                    )))
+                                },
+                            ),
                         )
                         .await
                         .unwrap();
@@ -1928,7 +1934,7 @@ mod conn {
                     .serve_connection(
                         TokioIo::new(server_io),
                         hyper::service::service_fn(
-                            |request: Request<hyper::body::Incoming>| async {
+                            async |request: Request<hyper::body::Incoming>| {
                                 let (body, trailers) =
                                     crate::concat_with_trailers(request.into_body())
                                         .await
@@ -3785,7 +3791,7 @@ mod conn {
             hyper::server::conn::http2::Builder::new(TokioExecutor)
                 .serve_connection(
                     TokioIo::new(server_io),
-                    hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async {
+                    hyper::service::service_fn(async |request: Request<hyper::body::Incoming>| {
                         Ok::<_, std::convert::Infallible>(Response::new(request.into_body()))
                     }),
                 )
@@ -3823,7 +3829,7 @@ mod conn {
             hyper::server::conn::http2::Builder::new(TokioExecutor)
                 .serve_connection(
                     TokioIo::new(server_io),
-                    hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async {
+                    hyper::service::service_fn(async |request: Request<hyper::body::Incoming>| {
                         Ok::<_, std::convert::Infallible>(Response::new(request.into_body()))
                     }),
                 )
@@ -3928,7 +3934,7 @@ mod conn {
             hyper::server::conn::http2::Builder::new(TokioExecutor)
                 .serve_connection(
                     TokioIo::new(server_io),
-                    hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async {
+                    hyper::service::service_fn(async |request: Request<hyper::body::Incoming>| {
                         Ok::<_, std::convert::Infallible>(Response::new(request.into_body()))
                     }),
                 )
@@ -4171,7 +4177,7 @@ mod conn {
                 .timer(TokioTimer)
                 .serve_connection(
                     sock,
-                    service_fn(|req| async move {
+                    service_fn(async |req| {
                         tokio::spawn(async move {
                             let _ = concat(req.into_body())
                                 .await
@@ -4415,7 +4421,7 @@ mod conn {
                         .serve_connection(
                             TokioIo::new(server_io),
                             hyper::service::service_fn(
-                                |request: Request<hyper::body::Incoming>| async move {
+                                async |request: Request<hyper::body::Incoming>| {
                                     let mut response =
                                         Response::new(Full::new(Bytes::from_static(b"ok")));
                                     if request.uri().path() == "/large-headers" {
@@ -5123,7 +5129,7 @@ mod conn {
             let mut read = 0;
             while read < 65_535 {
                 let frame = body.frame().await.expect("data").expect("frame");
-                read += frame.data_ref().map_or(0, Bytes::len);
+                read += frame.data_ref().map_or_default(Bytes::len);
             }
             read_tx.send(()).expect("server");
             let rest = body.collect().await.expect("body");
@@ -5688,7 +5694,7 @@ mod conn {
         // reserve, so stream B can never ship its data frame.
         let body_b = BodyExt::boxed(
             http_body_util::Full::new(Bytes::from_static(b"b"))
-                .map_err(|never: std::convert::Infallible| match never {}),
+                .map_err(|never: std::convert::Infallible| never),
         );
         let req_b = Request::post("http://localhost/b").body(body_b).unwrap();
         let b_fut = client.try_send_request(req_b);

@@ -119,8 +119,7 @@ where
     let body_start = all_data
         .array_windows::<4>()
         .position(|w| w == b"\r\n\r\n")
-        .map(|pos| pos + 4)
-        .unwrap_or(0);
+        .map_or_default(|pos| pos + 4);
 
     let body_bytes = bytes_received - body_start;
     assert_eq!(

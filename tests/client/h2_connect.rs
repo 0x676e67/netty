@@ -514,7 +514,7 @@ async fn h2_extended_connect_refusal_ignores_open_backpressure() {
     let mut queued = task::spawn(client.try_send_request(get("/queued")));
     assert_pending!(driver.poll(&mut queued));
 
-    let service = service_fn(|request: Request<hyper::body::Incoming>| async move {
+    let service = service_fn(async |request: Request<hyper::body::Incoming>| {
         if request.uri().path() == "/held" {
             std::future::pending::<()>().await;
         }

@@ -557,39 +557,12 @@ impl Client {
             None => return,
         };
 
-        // not on standard slices because whatever, sigh
-        fn trim_start(mut s: &[u8]) -> &[u8] {
-            while let [first, rest @ ..] = s {
-                if first.is_ascii_whitespace() {
-                    s = rest;
-                } else {
-                    break;
-                }
-            }
-            s
-        }
-
-        fn trim_end(mut s: &[u8]) -> &[u8] {
-            while let [rest @ .., last] = s {
-                if last.is_ascii_whitespace() {
-                    s = rest;
-                } else {
-                    break;
-                }
-            }
-            s
-        }
-
-        fn trim(s: &[u8]) -> &[u8] {
-            trim_start(trim_end(s))
-        }
-
         // TODO(perf): we could do the moves in-place, but this is so uncommon
         // that it shouldn't matter.
-        let mut unfolded = trim_end(&buf[..first_nl]).to_vec();
+        let mut unfolded = buf[..first_nl].trim_ascii_end().to_vec();
         for line in buf[first_nl + 1..].split(|b| *b == b'\n') {
             unfolded.push(b' ');
-            unfolded.extend_from_slice(trim(line));
+            unfolded.extend_from_slice(line.trim_ascii());
         }
         buf[..unfolded.len()].copy_from_slice(&unfolded);
         idx.value.end = idx.value.start + unfolded.len();

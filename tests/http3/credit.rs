@@ -60,7 +60,7 @@ async fn canceled_openers_do_not_strand_other_credit_waiters() {
                     .unwrap();
                 let path = request.uri().path();
                 let index: usize = path.trim_start_matches('/').parse().unwrap();
-                assert!(index < REQUESTS && index % 2 == 1);
+                assert!(index < REQUESTS && !index.is_multiple_of(2));
                 assert!(!seen[index], "duplicate request");
                 seen[index] = true;
                 assert!(stream.recv_data().await.unwrap().is_none());
@@ -74,7 +74,7 @@ async fn canceled_openers_do_not_strand_other_credit_waiters() {
             assert!(
                 seen.iter()
                     .enumerate()
-                    .all(|(i, &seen)| seen == (i % 2 == 1))
+                    .all(|(i, &seen)| seen == (!i.is_multiple_of(2)))
             );
             match server.accept().await {
                 Ok(None) => {}
@@ -86,7 +86,7 @@ async fn canceled_openers_do_not_strand_other_credit_waiters() {
             .into_iter()
             .enumerate()
             .filter_map(|(index, request)| request.map(|request| (index, request)))
-            .map(|(index, request)| async move {
+            .map(async |(index, request)| {
                 let body = request
                     .await
                     .unwrap()

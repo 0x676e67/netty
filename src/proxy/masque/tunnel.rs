@@ -291,10 +291,7 @@ impl UdpSender {
         capsule::encode_datagram(payload, &mut self.write_buf);
         // Polls without a task of its own, so the tasks waiting to write keep their wakeup.
         let _ = self.poll_write_buf();
-        if self.write_closed {
-            return Err(SendError::Closed);
-        }
-        Ok(())
+        (!self.write_closed).ok_or(SendError::Closed)
     }
 
     /// Waits until a payload of [`max_payload_size`](Self::max_payload_size) would be accepted;
@@ -742,7 +739,7 @@ mod tests {
         let flushed = poll_fn(|cx| tunnel.poll_flush(cx)).await;
         assert_eq!(flushed.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
         poll_fn(|cx| tunnel.poll_close(cx)).await.unwrap();
-        assert!(matches!(poll_fn(|cx| tunnel.poll_recv(cx)).await, Ok(None)));
+        std::assert_matches!(poll_fn(|cx| tunnel.poll_recv(cx)).await, Ok(None));
     }
 
     #[test]
@@ -899,9 +896,6 @@ mod tests {
             assert_eq!(payload.as_deref(), expected);
         }
         max.push(7);
-        assert!(matches!(
-            udp_payload(Bytes::from(max)),
-            Err(MasqueError::Malformed)
-        ));
+        std::assert_matches!(udp_payload(Bytes::from(max)), Err(MasqueError::Malformed));
     }
 }
