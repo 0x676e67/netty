@@ -10,6 +10,7 @@ use http::{
         UPGRADE,
     },
 };
+use smallvec::SmallVec;
 
 // List of connection headers from RFC 9110 Section 7.6.1
 //
@@ -44,19 +45,27 @@ pub(crate) fn strip_connection_headers(headers: &mut HeaderMap, is_request: bool
         warn!("TE headers illegal in HTTP/2 or HTTP/3 responses");
     }
 
-    if let Some(header) = headers.remove(CONNECTION) {
-        warn!(
-            "Connection header illegal in HTTP/2 or HTTP/3: {}",
-            CONNECTION.as_str()
-        );
+    let mut values = headers.get_all(CONNECTION).iter();
+    if values.next().is_none() {
+        return;
+    }
 
+    // `HeaderMap::remove` returns the first value and drops the others.
+    let remaining: SmallVec<[_; 1]> = values.cloned().collect();
+    let first = headers.remove(CONNECTION);
+    warn!(
+        "Connection header illegal in HTTP/2 or HTTP/3: {}",
+        CONNECTION.as_str()
+    );
+
+    // A `Connection` header may have a comma-separated list of names of other headers that
+    // are meant for only this specific connection.
+    //
+    // Iterate these names and remove them as headers. Connection-specific headers are
+    // forbidden in HTTP/2 and HTTP/3, as that information has been moved into frame types
+    // of the multiplexed protocol.
+    for header in first.into_iter().chain(remaining) {
         if let Ok(header_contents) = header.to_str() {
-            // A `Connection` header may have a comma-separated list of names of other headers that
-            // are meant for only this specific connection.
-            //
-            // Iterate these names and remove them as headers. Connection-specific headers are
-            // forbidden in HTTP/2 and HTTP/3, as that information has been moved into frame types
-            // of the multiplexed protocol.
             for name in header_contents.split(',') {
                 let name = name.trim();
                 headers.remove(name);
@@ -87,4 +96,25 @@ pub(crate) fn set_content_length_if_missing(headers: &mut HeaderMap, len: u64) {
     headers
         .entry(CONTENT_LENGTH)
         .or_insert_with(|| HeaderValue::from(len));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_connection_headers_multiple_values() {
+        let mut headers = HeaderMap::new();
+        headers.append(CONNECTION, "x-a".parse().unwrap());
+        headers.append(CONNECTION, "x-b, x-c".parse().unwrap());
+        headers.insert("x-a", "1".parse().unwrap());
+        headers.insert("x-b", "2".parse().unwrap());
+        headers.insert("x-c", "3".parse().unwrap());
+        headers.insert("x-d", "4".parse().unwrap());
+
+        strip_connection_headers(&mut headers, true);
+
+        assert_eq!(headers.len(), 1);
+        assert!(headers.contains_key("x-d"));
+    }
 }
