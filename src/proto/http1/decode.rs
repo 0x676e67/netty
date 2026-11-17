@@ -257,9 +257,8 @@ impl fmt::Debug for Decoder {
 
 macro_rules! byte (
     ($rdr:ident, $cx:expr) => ({
-        let buf = ready!($rdr.read_mem($cx, 1))?;
-        if !buf.is_empty() {
-            buf[0]
+        if let Some(b) = ready!($rdr.read_byte($cx))? {
+            b
         } else {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::UnexpectedEof,
                                       "unexpected EOF during chunk size line")));
