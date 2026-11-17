@@ -3785,6 +3785,105 @@ mod conn {
 
     #[cfg(feature = "http2")]
     #[tokio::test]
+    async fn http2_shutdown_drains_queued_request_before_resolving() {
+        use std::pin::pin;
+
+        use tokio::{
+            io::{AsyncRead, ReadBuf, ReadHalf},
+            task::coop,
+        };
+
+        type Task = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+        #[derive(Clone)]
+        struct CaptureExecutor(std::sync::mpsc::Sender<Task>);
+
+        impl<F: Future<Output = ()> + Send + 'static> netty::rt::Executor<F> for CaptureExecutor {
+            fn execute(&self, future: F) {
+                self.0.send(Box::pin(future)).unwrap();
+            }
+        }
+
+        struct UnconstrainedRead(ReadHalf<DuplexStream>);
+
+        impl AsyncRead for UnconstrainedRead {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                // Let the transport observe EOF even when the dispatcher has to yield.
+                let read = poll_fn(|cx| Pin::new(&mut self.0).poll_read(cx, buf));
+                pin!(coop::unconstrained(read)).poll(cx)
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client_io, server_io) = tokio::io::duplex(4096);
+            let (read, write) = tokio::io::split(client_io);
+            let (tasks_tx, tasks_rx) = std::sync::mpsc::channel();
+            let (mut client, mut conn) = conn::http2::Builder::new(CaptureExecutor(tasks_tx))
+                .handshake(tokio::io::join(UnconstrainedRead(read), write))
+                .await
+                .unwrap();
+            let mut driver = tasks_rx.try_recv().unwrap();
+            let mut server = Box::pin(
+                hyper::server::conn::http2::Builder::new(TokioExecutor).serve_connection(
+                    TokioIo::new(server_io),
+                    hyper::service::service_fn(async |_| {
+                        Ok::<_, std::convert::Infallible>(Response::new(Empty::<Bytes>::new()))
+                    }),
+                ),
+            );
+
+            // Establish the connection, then close the server while the client driver is idle.
+            let request = |uri| Request::get(uri).body(Empty::<Bytes>::new()).unwrap();
+            let mut first = pin!(client.try_send_request(request("https://localhost/")));
+            let response = poll_fn(|cx| {
+                assert!(driver.as_mut().poll(cx).is_pending());
+                assert!(server.as_mut().poll(cx).is_pending());
+                first.as_mut().poll(cx)
+            })
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            drop(response);
+            drop(server);
+
+            let queued_uri = "https://localhost/queued";
+            let response = client.try_send_request(request(queued_uri));
+            // Force the dispatch receiver to yield even though a request is queued.
+            while coop::has_budget_remaining() {
+                coop::consume_budget().await;
+            }
+            let (driver_poll, first_poll) = poll_fn(|cx| {
+                let driver_poll = driver.as_mut().poll(cx);
+                Poll::Ready((driver_poll, Pin::new(&mut conn).poll(cx)))
+            })
+            .await;
+            assert!(
+                client.is_closed(),
+                "transport should close in the first poll"
+            );
+            assert!(
+                first_poll.is_pending(),
+                "shutdown must wait for dispatch to drain"
+            );
+            assert!(driver_poll.is_pending());
+
+            driver.as_mut().await;
+            let _ = (&mut conn).await;
+            let err = response.await.expect_err("request should fail");
+            assert!(err.error().is_canceled());
+            assert_eq!(err.message().unwrap().uri(), queued_uri);
+            drop(conn);
+        })
+        .await
+        .expect("connection and queued request should finish");
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
     async fn http2_detect_conn_eof() {
         use futures_util::future;
 
