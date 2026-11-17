@@ -207,7 +207,7 @@ impl Body for Incoming {
         };
         content_length
             .into_opt()
-            .map_or_else(SizeHint::default, SizeHint::with_exact)
+            .map_or_default(SizeHint::with_exact)
     }
 }
 

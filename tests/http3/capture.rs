@@ -88,12 +88,11 @@ impl Capture {
 
 fn varint(bytes: &mut &[u8]) -> Option<u64> {
     let size = 1 << (*bytes.first()? >> 6);
-    let encoded = bytes.get(..size)?;
+    let encoded = bytes.split_off(..size)?;
     let mut value = u64::from(encoded[0] & 63);
     for &byte in &encoded[1..] {
         value = (value << 8) | u64::from(byte);
     }
-    *bytes = &bytes[size..];
     Some(value)
 }
 
