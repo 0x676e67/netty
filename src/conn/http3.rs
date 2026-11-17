@@ -402,7 +402,7 @@ impl<E> Builder<E> {
             .map_err(Error::new_h3)?;
 
         #[cfg(feature = "http3-datagram")]
-        let (registry, datagrams) = datagrams.map_or((None, None), |(r, d)| (Some(r), Some(d)));
+        let (registry, datagrams) = datagrams.unzip();
         let shared = Shared::new(
             opts.max_concurrent_requests,
             #[cfg(feature = "http3-datagram")]

@@ -482,33 +482,40 @@ async fn async_test(cfg: __TestConfig) {
     client_futures.await;
 }
 
-/// Sends `req` on a new HTTP/2 connection over `stream`, driving the connection in a task.
-#[cfg(feature = "http2")]
-async fn send_http2<B>(stream: TcpStream, req: Request<B>) -> Response<netty::body::Incoming>
-where
-    B: hyper::body::Body + std::fmt::Debug + Send + Unpin + 'static,
-    B::Data: Send,
-    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-    rt::TokioExecutor: netty::rt::bounds::Http2ClientConnExec<B, TcpStream>,
-    netty::conn::http2::Connection<TcpStream, B, rt::TokioExecutor>: Send,
-{
-    let (mut sender, conn) = netty::conn::http2::Builder::new(rt::TokioExecutor::new())
-        .handshake(stream)
-        .await
-        .unwrap();
+cfg_select! {
+    feature = "http2" => {
+        /// Sends `req` on a new HTTP/2 connection over `stream`, driving the connection in a task.
+        async fn send_http2<B>(
+            stream: TcpStream,
+            req: Request<B>,
+        ) -> Response<netty::body::Incoming>
+        where
+            B: hyper::body::Body + std::fmt::Debug + Send + Unpin + 'static,
+            B::Data: Send,
+            B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+            rt::TokioExecutor: netty::rt::bounds::Http2ClientConnExec<B, TcpStream>,
+            netty::conn::http2::Connection<TcpStream, B, rt::TokioExecutor>: Send,
+        {
+            let (mut sender, conn) = netty::conn::http2::Builder::new(rt::TokioExecutor::new())
+                .handshake(stream)
+                .await
+                .unwrap();
 
-    tokio::task::spawn(async move {
-        if let Err(err) = conn.await {
-            panic!("{:?}", err);
+            tokio::task::spawn(async move {
+                if let Err(err) = conn.await {
+                    panic!("{:?}", err);
+                }
+            });
+            sender.try_send_request(req).await.unwrap()
         }
-    });
-    sender.try_send_request(req).await.unwrap()
-}
-
-/// HTTP/2 test cases are compiled out without the `http2` feature, so this is never reached.
-#[cfg(not(feature = "http2"))]
-async fn send_http2<B>(_: TcpStream, _: Request<B>) -> Response<netty::body::Incoming> {
-    unreachable!("HTTP/2 test cases require the `http2` feature")
+    }
+    _ => {
+        /// HTTP/2 test cases are compiled out without the `http2` feature, so this is never
+        /// reached.
+        async fn send_http2<B>(_: TcpStream, _: Request<B>) -> Response<netty::body::Incoming> {
+            unreachable!("HTTP/2 test cases require the `http2` feature")
+        }
+    }
 }
 
 struct ProxyConfig {

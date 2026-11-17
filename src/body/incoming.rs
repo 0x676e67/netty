@@ -140,19 +140,17 @@ impl Body for Incoming {
                             ping.record_data(bytes.len());
                             return Poll::Ready(Some(Ok(Frame::data(bytes))));
                         }
+                        Some(Err(e)) if let Some(http2::Reason::NO_ERROR) = e.reason() => {
+                            // A NO_ERROR reset after an early response ends the body cleanly
+                            // (RFC 7540 Section 8.1).
+                            return Poll::Ready(None);
+                        }
                         Some(Err(e)) => {
-                            if let Some(http2::Reason::NO_ERROR) = e.reason() {
-                                // As mentioned in RFC 7540 Section 8.1, a RST_STREAM with NO_ERROR
-                                // indicates an early response, and should cause the body reading
-                                // to stop, but not fail it:
-                                return Poll::Ready(None);
-                            } else {
-                                // A keep-alive timeout closes the stream too.
-                                let err = ping.ensure_not_timed_out().err();
-                                return Poll::Ready(Some(Err(
-                                    err.unwrap_or_else(|| Error::new_body(e))
-                                )));
-                            }
+                            // A keep-alive timeout closes the stream too.
+                            let err = ping.ensure_not_timed_out().err();
+                            return Poll::Ready(Some(Err(
+                                err.unwrap_or_else(|| Error::new_body(e))
+                            )));
                         }
                         None => {
                             // fall through to trailers
@@ -164,16 +162,10 @@ impl Body for Incoming {
                 // after data, check trailers
                 match ready!(recv.poll_trailers(cx)) {
                     Ok(t) => Poll::Ready(Ok(t.map(Frame::trailers)).transpose()),
+                    Err(e) if let Some(http2::Reason::NO_ERROR) = e.reason() => Poll::Ready(None),
                     Err(e) => {
-                        if let Some(http2::Reason::NO_ERROR) = e.reason() {
-                            // Same as above, a RST_STREAM with NO_ERROR indicates an early
-                            // response, and should cause reading the trailers to stop, but
-                            // not fail it:
-                            Poll::Ready(None)
-                        } else {
-                            let err = ping.ensure_not_timed_out().err();
-                            Poll::Ready(Some(Err(err.unwrap_or_else(|| Error::new_h2(e)))))
-                        }
+                        let err = ping.ensure_not_timed_out().err();
+                        Poll::Ready(Some(Err(err.unwrap_or_else(|| Error::new_h2(e)))))
                     }
                 }
             }
@@ -207,7 +199,7 @@ impl Body for Incoming {
         };
         content_length
             .into_opt()
-            .map_or_else(SizeHint::default, SizeHint::with_exact)
+            .map_or_default(SizeHint::with_exact)
     }
 }
 

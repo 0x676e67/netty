@@ -636,43 +636,37 @@ where
 
     fn recv_msg(&mut self, msg: Result<(Self::RecvItem, Incoming)>) -> Result<()> {
         match msg {
-            Ok((msg, body)) => {
-                if let Some(cb) = self.callback.take() {
-                    let res = msg.into_response(body);
-                    cb.send(Ok(res));
-                    Ok(())
-                } else {
-                    // Getting here is likely a bug! An error should have happened
-                    // in Conn::require_empty_read() before ever parsing a
-                    // full message!
-                    Err(Error::new_unexpected_message())
-                }
+            Ok((msg, body)) if let Some(cb) = self.callback.take() => {
+                let res = msg.into_response(body);
+                cb.send(Ok(res));
+                Ok(())
             }
-            Err(err) => {
-                if let Some(cb) = self.callback.take() {
-                    cb.send(Err(TrySendError {
-                        error: err,
-                        message: None,
-                    }));
-                    Ok(())
-                } else if !self.rx_closed {
-                    self.rx.close();
-                    if let Some((req, cb)) = self.rx.try_recv() {
-                        trace!("canceling queued request with connection error: {}", err);
-                        // in this case, the message was never even started, so it's safe to tell
-                        // the user that the request was completely canceled
-                        cb.send(Err(TrySendError {
-                            error: Error::new_canceled().with(err),
-                            message: Some(req),
-                        }));
-                        Ok(())
-                    } else {
-                        Err(err)
-                    }
-                } else {
-                    Err(err)
-                }
+            // Bind both fields so the body drops before the message head.
+            Ok((_msg, _body)) => {
+                // Conn::require_empty_read() should have caught the unsolicited response.
+                Err(Error::new_unexpected_message())
             }
+            Err(err) if let Some(cb) = self.callback.take() => {
+                cb.send(Err(TrySendError {
+                    error: err,
+                    message: None,
+                }));
+                Ok(())
+            }
+            Err(err) if !self.rx_closed => {
+                self.rx.close();
+                let Some((req, cb)) = self.rx.try_recv() else {
+                    return Err(err);
+                };
+                trace!("canceling queued request with connection error: {}", err);
+                // This request has not started, so it can still be returned.
+                cb.send(Err(TrySendError {
+                    error: Error::new_canceled().with(err),
+                    message: Some(req),
+                }));
+                Ok(())
+            }
+            Err(err) => Err(err),
         }
     }
 

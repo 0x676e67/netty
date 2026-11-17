@@ -181,8 +181,7 @@ where
         if self.ended {
             SizeHint::with_exact(0)
         } else {
-            self.remaining
-                .map_or_else(SizeHint::default, SizeHint::with_exact)
+            self.remaining.map_or_default(SizeHint::with_exact)
         }
     }
 }
