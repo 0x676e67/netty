@@ -1,6 +1,7 @@
 use std::{
     future::Future,
     marker::Unpin,
+    mem::DropGuard,
     pin::Pin,
     task::{Context, Poll, ready},
 };
@@ -411,11 +412,16 @@ where
             } else if !self.conn.can_buffer_body() {
                 ready!(self.poll_flush(cx))?;
             } else {
-                // A new scope is needed :(
-                if let (Some(mut body), clear_body) =
-                    OptGuard::new(self.body_rx.as_mut()).guard_mut()
-                {
-                    debug_assert!(!*clear_body, "opt guard defaults to keeping body");
+                let mut body_guard = DropGuard::new(
+                    (self.body_rx.as_mut(), false),
+                    |(mut body_rx, clear_body)| {
+                        if clear_body {
+                            body_rx.set(None);
+                        }
+                    },
+                );
+                let (body_rx, clear_body) = &mut *body_guard;
+                if let Some(mut body) = body_rx.as_mut().as_pin_mut() {
                     if !self.conn.can_write_body() {
                         trace!(
                             "no more write body allowed, user body is_end_stream = {}",
@@ -532,33 +538,6 @@ where
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.poll_catch(cx, true)
-    }
-}
-
-// ===== impl OptGuard =====
-
-/// A drop guard to allow a mutable borrow of an Option while being able to
-/// set whether the `Option` should be cleared on drop.
-struct OptGuard<'a, T>(Pin<&'a mut Option<T>>, bool);
-
-impl<'a, T> OptGuard<'a, T> {
-    #[inline]
-    fn new(pin: Pin<&'a mut Option<T>>) -> Self {
-        OptGuard(pin, false)
-    }
-
-    #[inline]
-    fn guard_mut(&mut self) -> (Option<Pin<&mut T>>, &mut bool) {
-        (self.0.as_mut().as_pin_mut(), &mut self.1)
-    }
-}
-
-impl<T> Drop for OptGuard<'_, T> {
-    #[inline]
-    fn drop(&mut self) {
-        if self.1 {
-            self.0.set(None);
-        }
     }
 }
 
@@ -716,9 +695,40 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{task::Waker, time::Duration};
 
     use super::{proto::http1, *};
+
+    #[test]
+    fn request_body_is_kept_until_eof_or_error() {
+        let mut cx = Context::from_waker(Waker::noop());
+
+        for abort in [false, true] {
+            let io = tokio_test::io::Builder::new().build();
+            let (mut tx, rx) = dispatch::channel();
+            let conn = Conn::<_, Bytes, http1::role::Client>::new(io);
+            let mut dispatcher = Dispatcher::new(Client::new(rx), conn);
+            let (body_tx, body) = Incoming::channel();
+            let request = Request::post("/").body(body).unwrap();
+            let _response = tx.try_send(request).unwrap();
+
+            assert!(dispatcher.poll_write(&mut cx).is_pending());
+            assert!(dispatcher.body_rx.is_some());
+
+            if abort {
+                body_tx.abort();
+                std::assert_matches!(
+                    dispatcher.poll_write(&mut cx),
+                    Poll::Ready(Err(error)) if error.is_user()
+                );
+            } else {
+                drop(body_tx);
+                assert!(dispatcher.poll_write(&mut cx).is_pending());
+                assert!(!dispatcher.conn.can_write_body());
+            }
+            assert!(dispatcher.body_rx.is_none());
+        }
+    }
 
     #[test]
     fn client_read_bytes_before_writing_request() {
