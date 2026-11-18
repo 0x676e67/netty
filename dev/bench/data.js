@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794969182605,
+  "lastUpdate": 1794970301621,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -19871,6 +19871,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4527089,
             "range": "± 121558.87",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d2a210e1e77b66f7ff1d90de5f71405418234590",
+          "message": "fix(http1): prevent `SendRequest` from reporting ready while a request is pending (#223)\n\nRepresent the initial buffer slot with a want and signal each subsequent want only once per receive cycle\n\nDo not restore readiness on Pending or withdraw a grant when dequeuing a request\nExtend the existing regression to check readiness while the request is still queued\n\nFixes #4246\n\nLocal adaptation:\nApply the grant to netty's try_send and bounded HTTP/1 receive path.\nHTTP/2 reads directly from the shared queue. Keep shutdown draining\nand use a Hyper server in the readiness regression.\n\nCo-authored-by: Asuka <Kayano04@outlook.jp>",
+          "timestamp": "2026-11-18T10:49:49+08:00",
+          "tree_id": "5d504e6d866cca59eb4c59c4a98f9521109bed94",
+          "url": "https://github.com/0x676e67/netty/commit/d2a210e1e77b66f7ff1d90de5f71405418234590"
+        },
+        "date": 1794970301011,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 49394,
+            "range": "± 1219.90",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3283330,
+            "range": "± 32713.50",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 18038,
+            "range": "± 323.09",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 18716,
+            "range": "± 248.18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 21583,
+            "range": "± 221.28",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 68328,
+            "range": "± 1210.66",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 22941,
+            "range": "± 262.34",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 56248,
+            "range": "± 801.96",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 13700730,
+            "range": "± 16228682.88",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 13694216,
+            "range": "± 16506389.03",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 5279792,
+            "range": "± 41379.21",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 38570600,
+            "range": "± 8236880.02",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 43999076,
+            "range": "± 221043.59",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 4477345,
+            "range": "± 44716.73",
             "unit": "ns/iter"
           }
         ]
