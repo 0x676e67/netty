@@ -1579,6 +1579,77 @@ mod conn {
     }
 
     #[tokio::test]
+    async fn http1_readiness_stays_pending_until_response() {
+        let (client_io, server_io, _) = setup_duplex_test_server();
+        let received = Arc::new(Notify::new());
+        let respond = Arc::new(Notify::new());
+        let service = hyper::service::service_fn({
+            let received = received.clone();
+            let respond = respond.clone();
+            move |_| {
+                received.notify_one();
+                let respond = respond.clone();
+                async move {
+                    respond.notified().await;
+                    Ok::<_, std::convert::Infallible>(Response::new(Empty::<Bytes>::new()))
+                }
+            }
+        });
+        let server = tokio::spawn(
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(server_io), service),
+        );
+        let (mut client, mut connection) = conn::http1::Builder::default()
+            .handshake(client_io)
+            .await
+            .unwrap();
+        let response = client.try_send_request(
+            Request::get("/")
+                .header("host", "localhost")
+                .body(Empty::<Bytes>::new())
+                .unwrap(),
+        );
+
+        poll_fn(|cx| {
+            // An exhausted coop budget makes the queue return Pending even with
+            // a buffered request. Readiness must not be re-signaled here.
+            while let Poll::Ready(restore) = tokio::task::coop::poll_proceed(cx) {
+                restore.made_progress();
+            }
+            assert!(Pin::new(&mut connection).poll(cx).is_pending());
+            assert!(
+                client.poll_ready(cx).is_pending(),
+                "dispatcher should not report ready while a request is still buffered"
+            );
+            assert!(!client.is_ready());
+            Poll::Ready(())
+        })
+        .await;
+
+        let connection = tokio::spawn(connection);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            received.notified().await;
+            assert!(!client.is_ready(), "connection is serving the request");
+            poll_fn(|cx| {
+                assert!(client.poll_ready(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            respond.notify_one();
+            assert_eq!(response.await.unwrap().status(), StatusCode::OK);
+            client.ready().await.unwrap();
+            assert!(client.is_ready());
+
+            drop(client);
+            connection.await.unwrap().unwrap();
+            server.await.unwrap().unwrap();
+        })
+        .await
+        .expect("HTTP/1 readiness should recover after the response");
+    }
+
+    #[tokio::test]
     async fn http1_response_lf_crlf_terminator() {
         struct SplitRead {
             io: DuplexStream,
