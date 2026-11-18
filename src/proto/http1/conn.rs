@@ -675,24 +675,27 @@ where
         }
     }
 
-    pub(super) fn write_body_and_end(&mut self, chunk: B) {
+    pub(super) fn write_body_and_end(&mut self, chunk: B) -> Result<()> {
         debug_assert!(self.can_write_body() && self.can_buffer_body());
         // empty chunks should be discarded at Dispatcher level
         debug_assert!(chunk.remaining() != 0);
 
         let state = match self.state.writing {
             Writing::Body(ref encoder) => {
-                let can_keep_alive = encoder.encode_and_end(chunk, self.io.write_buf());
-                if can_keep_alive {
-                    Writing::KeepAlive
-                } else {
-                    Writing::Closed
+                match encoder.encode_and_end(chunk, self.io.write_buf()) {
+                    Ok(true) => Writing::KeepAlive,
+                    Ok(false) => Writing::Closed,
+                    Err(not_eof) => {
+                        self.state.writing = Writing::Closed;
+                        return Err(Error::new_body_write_aborted().with(not_eof));
+                    }
                 }
             }
             _ => unreachable!("write_body invalid state: {:?}", self.state.writing),
         };
 
         self.state.writing = state;
+        Ok(())
     }
 
     pub(super) fn end_body(&mut self) -> Result<()> {
