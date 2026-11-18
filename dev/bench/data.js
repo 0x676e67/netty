@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794979002129,
+  "lastUpdate": 1794984052040,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -20087,6 +20087,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 2733831,
             "range": "± 17463.66",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "abaa73d5964af776424f7f5bbd351af9bf52a555",
+          "message": "fix(http2): report zero body size hint for HEAD responses (#225)\n\n* fix(http1): preserve streaming bodies when coercing HTTP/2 requests\n\nAllow chunked framing for HTTP/2 requests serialized as HTTP/1.1.\nPreviously, unknown-length bodies without Content-Length used a\nzero-length encoder and were silently discarded.\n\nAdd an integration regression that verifies the HTTP/1.1 version,\nchunked framing, complete payload, and body termination.\n\nLocal adaptation:\nRun the regression over netty's Tokio duplex fixture with a Hyper\nserver. Use netty's HTTP/1 builder and try_send_request to drive the\nclient.\n\n* fix(http2): report zero body size hint for HEAD responses\n\nCarry the request method through response mapping and use an exact body\nlength of zero for HEAD responses. Their Content-Length describes the\ncorresponding GET representation, not the bytes in the response body.\n\nPreserve the response header and receive stream so delayed completion and\ntrailers remain observable. Cover immediate completion, empty DATA,\ntrailers, missing Content-Length, and a GET response as a control.\n\nLocal adaptation:\nCarry the HEAD flag through netty's single-task dispatcher. The\nregression uses Hyper as the HTTP/2 server and releases the delayed\nresponse frames after checking the size hint and end-of-stream state.\n\n---------\n\nCo-authored-by: Shuvro Roy <shuvro.nsu.cse@gmail.com>",
+          "timestamp": "2026-11-18T14:39:04+08:00",
+          "tree_id": "6acb35aabd9aaca77c23d463d51a8aeb7f3d3fc0",
+          "url": "https://github.com/0x676e67/netty/commit/abaa73d5964af776424f7f5bbd351af9bf52a555"
+        },
+        "date": 1794984051151,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 24867,
+            "range": "± 155.83",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3125793,
+            "range": "± 33853.90",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 6925,
+            "range": "± 64.88",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 7551,
+            "range": "± 97.24",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 10428,
+            "range": "± 43.14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 32004,
+            "range": "± 722.77",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 11244,
+            "range": "± 81.34",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 43996,
+            "range": "± 576.09",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 3120105,
+            "range": "± 33059.23",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 11256276,
+            "range": "± 8260203.15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 3003598,
+            "range": "± 19129.25",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 25782971,
+            "range": "± 176434.91",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 26396845,
+            "range": "± 97980.10",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 2719548,
+            "range": "± 18978.90",
             "unit": "ns/iter"
           }
         ]
