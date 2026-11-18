@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794969153343,
+  "lastUpdate": 1794969182605,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -19763,6 +19763,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 2756155,
             "range": "± 56787.15",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0cb2519c5bc158654ff6206ab8442cc6ffbf4e29",
+          "message": "fix(http1): error when final body chunk is shorter than content-length (#221)\n\nA body whose only frame ends the stream goes through write_body_and_end,\nwhich ignored a short write and just closed the writer. The client then\nwaited forever for a response. Return the same BodyWriteAborted error\nthat end_body already returns for streamed bodies.\n\nLocal adaptation:\nReuse netty's body-write error handling. The regression drives the\nnetty client against a Hyper server over Tokio duplex I/O and checks\nBodyWriteAborted through try_send_request.\n\nCo-authored-by: Patrick Hintermayer <patrick@immometrica.com>",
+          "timestamp": "2026-11-18T10:30:54+08:00",
+          "tree_id": "36a8d71232baecd4c98e6eda423c989c63068716",
+          "url": "https://github.com/0x676e67/netty/commit/0cb2519c5bc158654ff6206ab8442cc6ffbf4e29"
+        },
+        "date": 1794969181767,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 50852,
+            "range": "± 6263.32",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3567868,
+            "range": "± 341474.44",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 18135,
+            "range": "± 206.96",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 18758,
+            "range": "± 396.41",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 21519,
+            "range": "± 468.30",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 67853,
+            "range": "± 2639.73",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 22554,
+            "range": "± 418.40",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 56341,
+            "range": "± 989.56",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 13763477,
+            "range": "± 16518488.25",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 5448618,
+            "range": "± 91603.44",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 5447992,
+            "range": "± 52392.00",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 38948669,
+            "range": "± 8406564.35",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 44266002,
+            "range": "± 314463.52",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 4527089,
+            "range": "± 121558.87",
             "unit": "ns/iter"
           }
         ]
