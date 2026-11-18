@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794897398735,
+  "lastUpdate": 1794969153343,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -19655,6 +19655,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 5345889,
             "range": "± 153820.45",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1427441861a3b353f150c21adf9c2b755fab4272",
+          "message": "refactor(http1): use DropGuard for request body cleanup (#220)\n\n* fix(http1): drain in-flight requests before dispatcher shutdown\n\nKeep the closed dispatch receiver alive until all in-progress sends have published and canceled their callbacks\n\nPreserve the connection result across drain polls and keep upgrade handoffs unchanged\n\nCloses #4202\n\nLocal adaptation:\nKeep netty's existing upload shutdown rules and require the close hook\non its client dispatcher. Store the connection result only while draining\nis pending. Cover EOF, reset, and poll_without_shutdown with a Hyper\nserver and controlled client I/O.\n\n* refactor(http1): use DropGuard for request body cleanup\n\n---------\n\nCo-authored-by: 赤坂理子 <Kayano04@outlook.jp>",
+          "timestamp": "2026-11-18T10:30:34+08:00",
+          "tree_id": "c397babcec0faf0f8804a3ec6d8ac74044b8e39f",
+          "url": "https://github.com/0x676e67/netty/commit/1427441861a3b353f150c21adf9c2b755fab4272"
+        },
+        "date": 1794969152547,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 29408,
+            "range": "± 761.98",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3195256,
+            "range": "± 117000.21",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 8755,
+            "range": "± 403.13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 9459,
+            "range": "± 400.67",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 13207,
+            "range": "± 1670.83",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 38916,
+            "range": "± 2084.07",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 13884,
+            "range": "± 423.90",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 50948,
+            "range": "± 3230.16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 15188087,
+            "range": "± 4143677.88",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 3563051,
+            "range": "± 4557486.93",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 3459538,
+            "range": "± 325883.30",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 28290714,
+            "range": "± 1840989.76",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 29149867,
+            "range": "± 675101.38",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 2756155,
+            "range": "± 56787.15",
             "unit": "ns/iter"
           }
         ]
