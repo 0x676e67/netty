@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794970301621,
+  "lastUpdate": 1794979002129,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -19979,6 +19979,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 4477345,
             "range": "± 44716.73",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "501f1768783ef0edb761bf69fad9de9651e527c7",
+          "message": "fix(http1): preserve streaming bodies when coercing HTTP/2 requests (#224)\n\nAllow chunked framing for HTTP/2 requests serialized as HTTP/1.1.\nPreviously, unknown-length bodies without Content-Length used a\nzero-length encoder and were silently discarded.\n\nAdd an integration regression that verifies the HTTP/1.1 version,\nchunked framing, complete payload, and body termination.\n\nLocal adaptation:\nRun the regression over netty's Tokio duplex fixture with a Hyper\nserver. Use netty's HTTP/1 builder and try_send_request to drive the\nclient.\n\nCo-authored-by: Shuvro Roy <shuvro.nsu.cse@gmail.com>",
+          "timestamp": "2026-11-18T13:14:53+08:00",
+          "tree_id": "3893d1bdc60ef702eb7a1ade81d4b46bd172ff8b",
+          "url": "https://github.com/0x676e67/netty/commit/501f1768783ef0edb761bf69fad9de9651e527c7"
+        },
+        "date": 1794979001033,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 24815,
+            "range": "± 341.07",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 2993475,
+            "range": "± 219866.04",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 6900,
+            "range": "± 127.73",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 7536,
+            "range": "± 47.29",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 10477,
+            "range": "± 92.06",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 32114,
+            "range": "± 218.91",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 11216,
+            "range": "± 94.34",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 43771,
+            "range": "± 1077.71",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 11259818,
+            "range": "± 8166203.35",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 3080156,
+            "range": "± 29788.71",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 3014653,
+            "range": "± 23560.52",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 26085238,
+            "range": "± 195491.77",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 26666598,
+            "range": "± 305821.87",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 2733831,
+            "range": "± 17463.66",
             "unit": "ns/iter"
           }
         ]
