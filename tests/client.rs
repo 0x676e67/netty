@@ -4818,6 +4818,105 @@ mod conn {
 
     #[cfg(feature = "http2")]
     #[tokio::test]
+    async fn http2_head_response_size_hint() {
+        use http_body_util::Either;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for (method, end_stream, trailers, content_length) in [
+                (Method::HEAD, true, false, Some("5")),
+                (Method::HEAD, false, false, Some("5")),
+                (Method::HEAD, false, true, Some("5")),
+                (Method::HEAD, false, false, None),
+                (Method::GET, false, false, Some("5")),
+            ] {
+                let (client_io, server_io, _) = setup_duplex_test_server();
+                let finish = Arc::new(Notify::new());
+                let expected_body = if method == Method::HEAD {
+                    Bytes::new()
+                } else {
+                    Bytes::from_static(b"hello")
+                };
+                let response_body = expected_body.clone();
+                let expected_method = method.clone();
+                let service = hyper::service::service_fn({
+                    let finish = finish.clone();
+                    move |req: Request<hyper::body::Incoming>| {
+                        assert_eq!(req.method(), &expected_method);
+                        let mut response = Response::builder();
+                        if let Some(value) = content_length {
+                            response = response.header("content-length", value);
+                        }
+                        let body = if end_stream {
+                            Either::Left(Empty::new())
+                        } else {
+                            let finish = finish.clone();
+                            let data = response_body.clone();
+                            Either::Right(StreamBody::new(futures_util::stream::once(async move {
+                                finish.notified().await;
+                                let frame = if trailers {
+                                    let mut headers = HeaderMap::new();
+                                    headers.insert("x-finished", "yes".parse().unwrap());
+                                    Frame::trailers(headers)
+                                } else {
+                                    Frame::data(data)
+                                };
+                                Ok::<_, std::convert::Infallible>(frame)
+                            })))
+                        };
+                        future::ok::<_, std::convert::Infallible>(response.body(body).unwrap())
+                    }
+                });
+                let server = tokio::spawn(
+                    hyper::server::conn::http2::Builder::new(TokioExecutor)
+                        .serve_connection(TokioIo::new(server_io), service),
+                );
+
+                let (mut client, connection) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                    .handshake(client_io)
+                    .await
+                    .unwrap();
+                let connection = tokio::spawn(connection);
+                let request = Request::builder()
+                    .method(method)
+                    .uri("https://localhost/")
+                    .body(Empty::<Bytes>::new())
+                    .unwrap();
+                let response = client.try_send_request(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    response
+                        .headers()
+                        .get("content-length")
+                        .map(|value| value.to_str().unwrap()),
+                    content_length,
+                );
+                let mut body = response.into_body();
+                assert_eq!(body.size_hint().exact(), Some(expected_body.len() as u64));
+                assert_eq!(body.is_end_stream(), end_stream);
+
+                finish.notify_one();
+                let collected = (&mut body).collect().await.unwrap();
+                if trailers {
+                    assert_eq!(collected.trailers().unwrap()["x-finished"], "yes");
+                } else {
+                    assert!(collected.trailers().is_none());
+                }
+                assert_eq!(collected.to_bytes(), expected_body);
+                assert_eq!(body.size_hint().exact(), Some(0));
+                assert!(body.is_end_stream());
+                drop(body);
+
+                drop(client);
+                connection.await.unwrap().unwrap();
+                server.await.unwrap().unwrap();
+            }
+        })
+        .await
+        .expect("response bodies should complete");
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
     async fn h2_connect() {
         let (client_io, server_io, _) = setup_duplex_test_server();
 

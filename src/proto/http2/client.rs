@@ -775,6 +775,7 @@ where
     B: Body,
 {
     is_connect: bool,
+    is_head: bool,
     connect_udp: bool,
     eos: bool,
     fut: ResponseFuture,
@@ -943,6 +944,7 @@ pin_project! {
     {
         #[pin]
         fut: ResponseFuture,
+        is_head: bool,
         #[pin]
         ping: Option<Recorder>,
         #[pin]
@@ -1028,7 +1030,12 @@ where
                 if let Some(mut send_stream) = send_stream {
                     let _ = send_stream.send_data(SendBuf::None, true);
                 }
-                let content_length = headers::content_length_parse_all(res.headers());
+                let content_length = if *this.is_head {
+                    // HEAD Content-Length describes the corresponding GET response body.
+                    Some(0)
+                } else {
+                    headers::content_length_parse_all(res.headers())
+                };
                 let res = res.map(|stream| {
                     let ping = ping.for_stream(&stream);
                     Incoming::h2(stream, content_length.into(), ping)
@@ -1156,6 +1163,7 @@ where
         SendWhen {
             when: ResponseFutMap {
                 fut: f.fut,
+                is_head: f.is_head,
                 ping: Some(ping),
                 send_stream: Some(send_stream),
                 cancel_tx: pipe_cancel_tx,
@@ -1245,6 +1253,7 @@ where
                     }
 
                     let is_connect = req.method() == Method::CONNECT;
+                    let is_head = req.method() == Method::HEAD;
                     let eos = body.is_end_stream();
                     // `send_request` takes the `:protocol` extension.
                     let connect_udp = is_connect
@@ -1279,6 +1288,7 @@ where
 
                     let f = FutCtx {
                         is_connect,
+                        is_head,
                         connect_udp,
                         eos,
                         fut,
