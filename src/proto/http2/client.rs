@@ -8,7 +8,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker, ready},
     time::Instant,
@@ -123,10 +123,12 @@ where
         preface_ping,
         is_terminated: false,
     };
+    let active = Arc::new(AtomicUsize::new(0));
 
     let (done, done_rx) = oneshot::channel();
     let dispatch = Dispatch {
         ping,
+        active: active.clone(),
         conn_drop_ref: conn_drop_ref.clone(),
         executor: exec.clone(),
         spawn_pipe: |exec, pipe| exec.execute_h2_future(H2ClientFuture::Pipe { pipe }),
@@ -145,6 +147,7 @@ where
         _conn_drop_ref: conn_drop_ref,
         done: done_rx,
         peer,
+        active,
         h2_tx,
     })
 }
@@ -414,6 +417,40 @@ impl PeerSettings {
     fn poll_parked(&self, cx: &mut Context<'_>) -> bool {
         self.conn_waker.register(cx.waker());
         self.parked.load(Ordering::Acquire)
+    }
+}
+
+/// Counts one live exchange on a connection until released or dropped: a request waiting for
+/// its response, an unfinished response body, a request body pipe or a tunnel. The count holds
+/// no connection handle, so guards never keep the connection open.
+#[derive(Default)]
+pub(crate) struct Active(Option<Arc<AtomicUsize>>);
+
+// ===== impl Active =====
+
+impl Active {
+    pub(crate) fn new(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::AcqRel);
+        Self(Some(count.clone()))
+    }
+
+    /// Ends the exchange before the guard drops.
+    pub(crate) fn release(&mut self) {
+        if let Some(count) = self.0.take() {
+            count.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+impl Clone for Active {
+    fn clone(&self) -> Self {
+        self.0.as_ref().map_or_else(Self::default, Self::new)
+    }
+}
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -795,6 +832,7 @@ where
     _conn_drop_ref: ConnDropRef,
     done: DoneRx,
     peer: Arc<PeerSettings>,
+    active: Arc<AtomicUsize>,
     h2_tx: SendRequest<SendBuf<B::Data>>,
 }
 
@@ -807,6 +845,8 @@ where
     B: Body + 'static,
 {
     ping: ping::Recorder,
+    /// Live exchanges, shared with the senders.
+    active: Arc<AtomicUsize>,
     conn_drop_ref: ConnDropRef,
     executor: E,
     // Spawns a request body pipe; set where the executor is known to spawn it.
@@ -832,6 +872,7 @@ pin_project! {
         pipe: PipeToSendStream<S>,
         #[pin]
         conn_drop_ref: Option<ConnDropRef>,
+        active: Active,
         cancel_rx: Option<PipeCancelRx>,
     }
 }
@@ -856,6 +897,7 @@ where
                 debug!("client request body send cancelled, resetting stream");
                 this.pipe.as_mut().send_reset(http2::Reason::CANCEL);
                 this.conn_drop_ref.take().expect(EXPECT_TAKEN_ONCE_MSG);
+                this.active.release();
                 return Poll::Ready(());
             }
             Some(Poll::Ready(Err(_))) => {
@@ -872,6 +914,7 @@ where
                     debug!("client request body error: {}", _e);
                 }
                 drop(this.conn_drop_ref.take().expect(EXPECT_TAKEN_ONCE_MSG));
+                this.active.release();
                 return Poll::Ready(());
             }
             Poll::Pending => (),
@@ -945,6 +988,7 @@ pin_project! {
         fut: ResponseFuture,
         #[pin]
         ping: Option<Recorder>,
+        active: Active,
         #[pin]
         send_stream: Option<Option<SendStream<SendBuf<<B as Body>::Data>>>>,
         cancel_tx: Option<PipeCancelTx>,
@@ -975,6 +1019,7 @@ where
         let result = ready!(this.fut.poll(cx));
 
         let ping = this.ping.take().expect("Future polled twice");
+        let active = mem::take(this.active);
         let send_stream = this.send_stream.take().expect("Future polled twice");
 
         match result {
@@ -1011,6 +1056,7 @@ where
                     send_stream,
                     recv_stream,
                     ping,
+                    active,
                     // Only MASQUE resets the stream.
                     (cfg!(feature = "masque") && *this.connect_udp).then_some(res.extensions_mut()),
                 );
@@ -1031,7 +1077,7 @@ where
                 let content_length = headers::content_length_parse_all(res.headers());
                 let res = res.map(|stream| {
                     let ping = ping.for_stream(&stream);
-                    Incoming::h2(stream, content_length.into(), ping)
+                    Incoming::h2(stream, content_length.into(), ping, active)
                 });
                 Poll::Ready(Ok(res))
             }
@@ -1057,6 +1103,10 @@ where
 
     pub(crate) fn peer_settings(&self) -> Arc<PeerSettings> {
         self.peer.clone()
+    }
+
+    pub(crate) fn active(&self) -> Arc<AtomicUsize> {
+        self.active.clone()
     }
 
     pub(crate) fn current_max_send_streams(&self) -> usize {
@@ -1117,6 +1167,7 @@ where
 
     fn poll_pipe(&mut self, f: FutCtx<B>) -> SendWhen<B, E> {
         let ping = self.ping.clone();
+        let active = Active::new(&self.active);
 
         // Lets the response tell a spawned body pipe to reset the stream when the client
         // cancels the request.
@@ -1139,6 +1190,7 @@ where
                         let pipe = PipeMap {
                             pipe,
                             conn_drop_ref: Some(conn_drop_ref),
+                            active: active.clone(),
                             cancel_rx: Some(cancel_rx),
                         };
                         // The rest of the body is piped on a task of its own.
@@ -1157,6 +1209,7 @@ where
             when: ResponseFutMap {
                 fut: f.fut,
                 ping: Some(ping),
+                active,
                 send_stream: Some(send_stream),
                 cancel_tx: pipe_cancel_tx,
                 connect_udp: f.connect_udp,
