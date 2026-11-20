@@ -134,6 +134,7 @@ where
         h2_tx: h2_tx.clone(),
         req_rx,
         fut_ctx: None,
+        closing: None,
         done: Some(done),
     };
     let task = ConnTask::new(conn, conn_drop_rx, peer.clone(), dispatch);
@@ -587,7 +588,7 @@ pin_project! {
         #[pin]
         conn: Option<ConnMapErr<T, B>>,
         peer: Arc<PeerSettings>,
-        // `None` once dispatch ended and reported how.
+        // `None` once dispatch drained its request queue and reported how it ended.
         dispatch: Option<Dispatch<B, E>>,
         // Responses of dispatched requests, completed by the connection's reads.
         responses: FuturesUnordered<SendWhen<B, E>>,
@@ -629,6 +630,16 @@ where
     E: Http2UpgradedExec<B::Data> + Clone,
     T: AsyncRead + AsyncWrite + Unpin,
 {
+    fn poll_requests(this: &mut ConnTaskProj<'_, T, B, E>, cx: &mut Context<'_>) {
+        while let Some(dispatch) = this.dispatch.as_mut() {
+            match Pin::new(dispatch).poll_next(cx) {
+                Poll::Ready(Some(response)) => this.responses.push(response),
+                Poll::Ready(None) => *this.dispatch = None,
+                Poll::Pending => break,
+            }
+        }
+    }
+
     /// Hands queued requests to the connection, which writes them in this pass. Each adds a
     /// response.
     ///
@@ -639,13 +650,7 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<ControlFlow<()>> {
         let in_flight = this.responses.len();
-        while let Some(dispatch) = this.dispatch.as_mut() {
-            match Pin::new(dispatch).poll_next(cx) {
-                Poll::Ready(Some(response)) => this.responses.push(response),
-                Poll::Ready(None) => *this.dispatch = None,
-                Poll::Pending => break,
-            }
-        }
+        Self::poll_requests(this, cx);
 
         // With other responses in flight, their callers may send more requests soon:
         // yield once so one write takes them all.
@@ -665,40 +670,43 @@ where
             let _ = this.drop_rx.as_mut().poll_next(cx);
         }
 
-        let Some(mut conn) = this.conn.as_mut().as_pin_mut() else {
-            return;
-        };
-        let finished = conn.as_mut().poll(cx).is_ready();
+        if let Some(mut conn) = this.conn.as_mut().as_pin_mut() {
+            let finished = conn.as_mut().poll(cx).is_ready();
 
-        // The driver applies the server's SETTINGS while polled, possibly in its final poll;
-        // this task is the only writer, so only changes are published.
-        if let Some(enabled) = conn.extended_connect_protocol()
-            && this.peer.extended_connect() != Some(enabled)
-        {
-            this.peer.publish(enabled);
+            // The driver applies the server's SETTINGS while polled, possibly in its final poll;
+            // this task is the only writer, so only changes are published.
+            if let Some(enabled) = conn.extended_connect_protocol()
+                && this.peer.extended_connect() != Some(enabled)
+            {
+                this.peer.publish(enabled);
+            }
+
+            if !finished {
+                return;
+            }
+            // ok or err, the `conn` has finished. Dropping it ends its streams, so their
+            // responses report how it ended.
+            this.conn.set(None);
         }
 
-        if finished {
-            // ok or err, the `conn` has finished. Dropping it ends its streams, so their
-            // responses report how it ended, and dispatch ends with it.
-            this.conn.set(None);
-            if let Some(mut dispatch) = this.dispatch.take() {
-                while let Poll::Ready(Some(response)) = Pin::new(&mut dispatch).poll_next(cx) {
-                    this.responses.push(response);
-                }
-                dispatch.conn_closed();
-            }
+        // Keep polling here if the drain wakes this part after the transport is gone.
+        Self::poll_requests(this, cx);
+        if let Some(dispatch) = this.dispatch.as_mut()
+            && dispatch.closing.is_none()
+            && dispatch.poll_conn_closed(cx).is_ready()
+        {
+            *this.dispatch = None;
         }
     }
 
-    /// Completes responses, breaking once the connection has finished and none is left.
+    /// Completes responses, then breaks once the connection and dispatch have both finished.
     fn poll_responses(
         this: &mut ConnTaskProj<'_, T, B, E>,
         cx: &mut Context<'_>,
     ) -> Poll<ControlFlow<()>> {
         while let Poll::Ready(Some(())) = Pin::new(&mut *this.responses).poll_next(cx) {}
 
-        if this.conn.is_none() && this.responses.is_empty() {
+        if this.conn.is_none() && this.dispatch.is_none() && this.responses.is_empty() {
             return Poll::Ready(ControlFlow::Break(()));
         }
         Poll::Pending
@@ -817,6 +825,8 @@ where
     h2_tx: SendRequest<SendBuf<B::Data>>,
     req_rx: ClientRx<B>,
     fut_ctx: Option<FutCtx<B>>,
+    // The result to report when a pending drain finishes.
+    closing: Option<Result<Dispatched>>,
     // `None` once dispatch reported how it ended.
     done: Option<DoneTx>,
 }
@@ -1097,18 +1107,20 @@ where
     B::Error: Into<BoxError>,
     E: Http2UpgradedExec<B::Data> + Clone,
 {
-    /// Reports how dispatch ended to the `Connection` future, if it is still there.
-    fn end(&mut self, dispatched: Result<Dispatched>) {
+    /// Drains the request queue before reporting how dispatch ended.
+    fn poll_close(&mut self, cx: &mut Context<'_>, dispatched: Result<Dispatched>) -> Poll<()> {
+        if self.req_rx.poll_close(cx).is_pending() {
+            self.closing = Some(dispatched);
+            return Poll::Pending;
+        }
         if let Some(done) = self.done.take() {
             let _ = done.send(dispatched);
         }
+        Poll::Ready(())
     }
 
-    /// Ends dispatch with the connection, unless it already ended.
-    fn conn_closed(mut self) {
-        if self.done.is_none() {
-            return;
-        }
+    /// Drains dispatch when the transport ended before it could report a result.
+    fn poll_conn_closed(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         trace!("connection task is closed, closing dispatch task");
         // The connection may have closed on a keep-alive timeout since `poll_ready`, which
         // dispatch reports too.
@@ -1119,7 +1131,7 @@ where
                 Err(err)
             }
         };
-        self.end(dispatched);
+        self.poll_close(cx, dispatched)
     }
 
     fn poll_pipe(&mut self, f: FutCtx<B>) -> SendWhen<B, E> {
@@ -1331,6 +1343,9 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if let Some(dispatched) = this.closing.take() {
+            return this.poll_close(cx, dispatched).map(|()| None);
+        }
         // A dropped `Connection` future stops dispatch. `done` registers the waker only when
         // dispatch would wait, so each request costs just an atomic load.
         let step = if this.done.as_ref().is_none_or(DoneTx::is_canceled) {
@@ -1346,10 +1361,7 @@ where
         };
         match step {
             ControlFlow::Continue(response) => Poll::Ready(Some(response)),
-            ControlFlow::Break(dispatched) => {
-                this.end(dispatched);
-                Poll::Ready(None)
-            }
+            ControlFlow::Break(dispatched) => this.poll_close(cx, dispatched).map(|()| None),
         }
     }
 }
