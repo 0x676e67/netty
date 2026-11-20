@@ -321,6 +321,11 @@ where
         if let Some(id) = self.opts.initial_stream_id {
             builder.initial_stream_id(id);
         }
+        if !self.opts.adaptive_window
+            && let Some(target) = self.opts.initial_stream_window_size
+        {
+            builder.initial_stream_window_size(target);
+        }
         if let Some(max) = self.opts.max_pending_accept_reset_streams {
             builder.max_pending_accept_reset_streams(max);
         }
