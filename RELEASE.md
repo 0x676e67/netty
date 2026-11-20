@@ -1,3 +1,128 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## netty [0.3.0](https://github.com/0x676e67/netty/compare/v0.2.5...v0.3.0) - 2026-11-20
+
+
+
+### 🚀 Features
+
+- *(http1)* Add max_header_size limit for server and client ([#149](https://github.com/0x676e67/netty/issues/149)) - ([22a2b4a](https://github.com/0x676e67/netty/commit/22a2b4aa4fa8cfa532792ecfa6cc176d891fda10))
+- *(http2)* Add DATA and header frame caps and one frame per write ([#197](https://github.com/0x676e67/netty/issues/197)) - ([9723d93](https://github.com/0x676e67/netty/commit/9723d93883bf514e2fc468583cb1f398089238cd))
+- *(http2)* 💥 **breaking:** Add preface ping, ping payload and read-based keep-alive ([#190](https://github.com/0x676e67/netty/issues/190)) - ([5fcc31e](https://github.com/0x676e67/netty/commit/5fcc31ee514442abbc31d6bc9f9844b9733da6e7))
+- *(http2)* 💥 **breaking:** Make HTTP/2 an optional default feature ([#193](https://github.com/0x676e67/netty/issues/193)) - ([6e53746](https://github.com/0x676e67/netty/commit/6e53746abc632056e3a8e518e10e26f6b86a21e6))
+- *(http2)* Gate extended CONNECT on peer SETTINGS ([#151](https://github.com/0x676e67/netty/issues/151)) - ([3703f25](https://github.com/0x676e67/netty/commit/3703f250846b832f222dc284e84af771c7e855a2))
+- *(http3)* 💥 **breaking:** Configure pseudo-header order through options ([#167](https://github.com/0x676e67/netty/issues/167)) - ([3070e05](https://github.com/0x676e67/netty/commit/3070e0515e28af4177695cb2b2bfcbed6dbb561c))
+- *(proxy)* Add SOCKS5 UDP ASSOCIATE with sans-IO datagram framing ([#154](https://github.com/0x676e67/netty/issues/154)) - ([e83ecb4](https://github.com/0x676e67/netty/commit/e83ecb4a23ef6b96ea55f9a410a4955cf1e49683))
+- *(proxy)* Add MASQUE CONNECT-UDP over HTTP/2 - ([8da4b0b](https://github.com/0x676e67/netty/commit/8da4b0b1a20678a6961481a3808ba73da47df7b0))
+- *(proxy)* Add SOCKS connector backed by tokio-socks ([#161](https://github.com/0x676e67/netty/issues/161)) - ([6c475e7](https://github.com/0x676e67/netty/commit/6c475e73d4ade28d43d0f9530a58262623c2a24a))
+- *(proxy)* Add HTTP CONNECT tunnel connector ([#152](https://github.com/0x676e67/netty/issues/152)) - ([6e89ccb](https://github.com/0x676e67/netty/commit/6e89ccbf31331f9b3638e447632bab3a3b72e997))
+- *(proxy)* Keep the control peer's scope in SOCKS5 relay_addr - ([2497b75](https://github.com/0x676e67/netty/commit/2497b75119cf53bbd20de97f4adbde7c964abe71))
+- *(proxy)* Add MASQUE CONNECT-UDP client - ([ee3b819](https://github.com/0x676e67/netty/commit/ee3b819dccefe42c46f62a603c1d22500a17bab5))
+- *(proxy)* Add SOCKS5 UDP ASSOCIATE with sans-IO datagram framing - ([148a469](https://github.com/0x676e67/netty/commit/148a46901a489c7725faaa613e9f353be74dbed8))
+- *(proxy)* Add SOCKS connector backed by tokio-socks - ([9c402da](https://github.com/0x676e67/netty/commit/9c402daa2e26a6cdadf8d0ed86c017739d26689a))
+- *(proxy)* Add HTTP CONNECT tunnel connector - ([d5257b8](https://github.com/0x676e67/netty/commit/d5257b8d28734e35cdab8ea710daf67f379b885e))
+
+### 🐛 Bug Fixes
+
+- *(http)* Clamp buffer sizes and correct stale option docs ([#204](https://github.com/0x676e67/netty/issues/204)) - ([9a30c0f](https://github.com/0x676e67/netty/commit/9a30c0feea0fca65f884ce2ec2b16055941e934a))
+- *(http1)* Preserve streaming bodies when coercing HTTP/2 requests ([#224](https://github.com/0x676e67/netty/issues/224)) - ([501f176](https://github.com/0x676e67/netty/commit/501f1768783ef0edb761bf69fad9de9651e527c7))
+- *(http1)* Prevent `SendRequest` from reporting ready while a request is pending ([#223](https://github.com/0x676e67/netty/issues/223)) - ([d2a210e](https://github.com/0x676e67/netty/commit/d2a210e1e77b66f7ff1d90de5f71405418234590))
+- *(http1)* Error when final body chunk is shorter than content-length ([#221](https://github.com/0x676e67/netty/issues/221)) - ([0cb2519](https://github.com/0x676e67/netty/commit/0cb2519c5bc158654ff6206ab8442cc6ffbf4e29))
+- *(http1)* Drain in-flight requests before dispatcher shutdown ([#208](https://github.com/0x676e67/netty/issues/208)) - ([9a07c25](https://github.com/0x676e67/netty/commit/9a07c2575bbc85be5cd1afac41bcc1b2e61a0625))
+- *(http1)* Drop Content-Length when a response also has Transfer-Encoding - ([8595a72](https://github.com/0x676e67/netty/commit/8595a72ac9217e000e30c344b48458571a85bba8))
+- *(http1)* Reject request versions without an HTTP/1 form ([#198](https://github.com/0x676e67/netty/issues/198)) - ([b0cbdc6](https://github.com/0x676e67/netty/commit/b0cbdc6563594e9cc33d1b032e911bd9e776af7f))
+- *(http1)* Remove content-length if transfer-encoding is auto-added ([#166](https://github.com/0x676e67/netty/issues/166)) - ([f6dd929](https://github.com/0x676e67/netty/commit/f6dd9291f2823dfe615b1ae41c4f16afa3ae7cb0))
+- *(http1)* Always remove content-length if transfer-encoding is sent ([#165](https://github.com/0x676e67/netty/issues/165)) - ([688f481](https://github.com/0x676e67/netty/commit/688f481deeebc3a2d592efd6866ed8636f542da9))
+- *(http1)* Let a Connection close token win over a later keep-alive ([#147](https://github.com/0x676e67/netty/issues/147)) - ([a5ec550](https://github.com/0x676e67/netty/commit/a5ec55002583e16c0730247e1a3a406e76d3bd24))
+- *(http1)* Close canceled connections without flushing ([#145](https://github.com/0x676e67/netty/issues/145)) - ([f8652dd](https://github.com/0x676e67/netty/commit/f8652ddf5e386d66b7f03cceedbc6b319d849762))
+- *(http2)* Prevent requests from hanging during concurrent connection shutdown race ([#227](https://github.com/0x676e67/netty/issues/227)) - ([36df697](https://github.com/0x676e67/netty/commit/36df69717a27431973adfb582805a82863f17290))
+- *(http2)* Report zero body size hint for HEAD responses ([#225](https://github.com/0x676e67/netty/issues/225)) - ([abaa73d](https://github.com/0x676e67/netty/commit/abaa73d5964af776424f7f5bbd351af9bf52a555))
+- *(http2)* Strip all headers named in every Connection header ([#219](https://github.com/0x676e67/netty/issues/219)) - ([2bfff34](https://github.com/0x676e67/netty/commit/2bfff345e5b8f6bcb6303935961171788777cd28))
+- *(http2)* Read keep-alive idleness from the connection's streams ([#203](https://github.com/0x676e67/netty/issues/203)) - ([2b2bc3c](https://github.com/0x676e67/netty/commit/2b2bc3c9eaf76a144e4a8353afc955484ffd39f5))
+- *(http2)* Count reads toward the keep-alive timeout ([#202](https://github.com/0x676e67/netty/issues/202)) - ([fd03929](https://github.com/0x676e67/netty/commit/fd039299eebc32bd4bdfa23e59e7857e67ed30f6))
+- *(http2)* Keep a BDP window waiting for the SETTINGS ACK ([#201](https://github.com/0x676e67/netty/issues/201)) - ([cd93255](https://github.com/0x676e67/netty/commit/cd9325597432c65912d3e882120f7f2b2143add0))
+- *(http2)* Cap keep-alive durations instead of overflowing ([#196](https://github.com/0x676e67/netty/issues/196)) - ([8a40c00](https://github.com/0x676e67/netty/commit/8a40c00b04d73aea21cff2a7f3cc10d519bed131))
+- *(http2)* Let h2 resolve pending-open requests on connection error ([#191](https://github.com/0x676e67/netty/issues/191)) - ([5f441a7](https://github.com/0x676e67/netty/commit/5f441a7ae7d096b258766ab16da5810d6bd3994a))
+- *(http2)* Ignore content-length on 2xx responses to CONNECT ([#171](https://github.com/0x676e67/netty/issues/171)) - ([b8d0d0d](https://github.com/0x676e67/netty/commit/b8d0d0d345283a1d4fa0a2101c49e473f34abb90))
+- *(http2)* Open CONNECT tunnels on any 2xx and share the Hyper proxy test fixture ([#170](https://github.com/0x676e67/netty/issues/170)) - ([49237fd](https://github.com/0x676e67/netty/commit/49237fd7caf833a0e1aa1a52602340d31d62affb))
+- *(http2)* Do not reserve capacity for idle Upgraded streams ([#140](https://github.com/0x676e67/netty/issues/140)) - ([f598a3e](https://github.com/0x676e67/netty/commit/f598a3edfcc72c4ad0ca7e1a0aff884ee1cff3d7))
+- *(http3)* Return admission permits once only the response body remains ([#195](https://github.com/0x676e67/netty/issues/195)) - ([29076b5](https://github.com/0x676e67/netty/commit/29076b55c1568537898e33ff2b9a3c3dd4f4ff80))
+- *(http3)* End only the tunnel send direction when a write reports a peer stop ([#181](https://github.com/0x676e67/netty/issues/181)) - ([fa54e31](https://github.com/0x676e67/netty/commit/fa54e31d018279d009dee362b5d4fb9036edffbd))
+- *(http3)* Abort refused CONNECT-UDP and reject capsule-breaking 2xx ([#174](https://github.com/0x676e67/netty/issues/174)) - ([1a2cf19](https://github.com/0x676e67/netty/commit/1a2cf19ad71559ef960176b61c72f5772b55be8a))
+- *(http3)* Tighten RFC 9114 compliance ([#172](https://github.com/0x676e67/netty/issues/172)) - ([a0565dc](https://github.com/0x676e67/netty/commit/a0565dc1c0f19e9866ddcabe175361e2eee91a98))
+- *(http3)* Reset both directions of a malformed CONNECT response head - ([02c61b4](https://github.com/0x676e67/netty/commit/02c61b4bd92c17433ece97e708495c90cb4ceae4))
+- *(masque)* Keep capsule write wakeups for tasks sharing a tunnel ([#199](https://github.com/0x676e67/netty/issues/199)) - ([1d7d65e](https://github.com/0x676e67/netty/commit/1d7d65e62e43fb1f7e1a47015a02d60f91a0c431))
+- *(masque)* Stop HTTP/2 tunnel receive on drop and close sends on reset ([#188](https://github.com/0x676e67/netty/issues/188)) - ([163c6b4](https://github.com/0x676e67/netty/commit/163c6b45973b8b7acec1a66e24e160349a546374))
+- *(masque)* Restore proxy validation and close datagrams before stream resets ([#184](https://github.com/0x676e67/netty/issues/184)) - ([47118e2](https://github.com/0x676e67/netty/commit/47118e240b8d8ddb21e9287b4ec5b8faf2e05c7f))
+- *(masque)* Reject templates that do not expand to a URI and correct docs ([#183](https://github.com/0x676e67/netty/issues/183)) - ([95dc6a8](https://github.com/0x676e67/netty/commit/95dc6a8dc4347f588affd6af3daacd28b8baa0c5))
+- *(masque)* Split tunnel halves and follow RFC datagram close semantics ([#180](https://github.com/0x676e67/netty/issues/180)) - ([0b86df5](https://github.com/0x676e67/netty/commit/0b86df5a9c7e2a31b31d90b3b52a910ee8918f90))
+- *(masque)* Harden HTTP/3 close handling and template validation ([#178](https://github.com/0x676e67/netty/issues/178)) - ([7114888](https://github.com/0x676e67/netty/commit/71148886d26900944d22d59668480746c68c9e75))
+- *(masque)* Tighten tunnel limits, receive fairness and test coverage ([#177](https://github.com/0x676e67/netty/issues/177)) - ([7834b9d](https://github.com/0x676e67/netty/commit/7834b9d65939222279fd0ab4bd356b159da38ff5))
+- *(masque)* Report unusable datagram limits and drop extra send copies ([#175](https://github.com/0x676e67/netty/issues/175)) - ([f84b764](https://github.com/0x676e67/netty/commit/f84b7646e8a6b5b7492042d9781e8b726d0682ad))
+- *(proxy)* Validate MASQUE proxy and target hosts and give flushes their own wakeup - ([6c526c4](https://github.com/0x676e67/netty/commit/6c526c4b76d89b7bab7e5d55f43ba80689f9d0fa))
+- *(proxy)* Check CONNECT-UDP capsule framing in every build and tie stream resets to the IO - ([284bb38](https://github.com/0x676e67/netty/commit/284bb38a79e19acc677c51912aecde97d6ce1ec6))
+- *(proxy)* Abort unclosed HTTP/2 CONNECT-UDP tunnels on drop and require the client's upgrade - ([78e9150](https://github.com/0x676e67/netty/commit/78e9150ab5a3cfbbcbf22bab04122f936067b1b8))
+- *(proxy)* Reset malformed MASQUE responses and wake senders on MTU change ([#163](https://github.com/0x676e67/netty/issues/163)) - ([978e842](https://github.com/0x676e67/netty/commit/978e84217b90641324aa1743bde2e2f66d062319))
+- *(proxy)* Reset malformed HTTP/2 CONNECT-UDP streams with PROTOCOL_ERROR - ([c50af25](https://github.com/0x676e67/netty/commit/c50af258d1a85ed36b4094842485f3593b3e1ffd))
+- *(proxy)* Reset truncated MASQUE capsules with H3_MESSAGE_ERROR - ([06dc56a](https://github.com/0x676e67/netty/commit/06dc56aef2516212fab371d48ac5cdcb5c56db78))
+- *(proxy)* Reset malformed MASQUE responses and wake senders on MTU change - ([4860e91](https://github.com/0x676e67/netty/commit/4860e9118ac8e5a2aa9a8a7ad8c56a38bce5e7fb))
+- *(proxy)* Tighten MASQUE validation and Datagram session teardown - ([db6b720](https://github.com/0x676e67/netty/commit/db6b7203eb7a2e3ef4ecaacdc814f901f56dde81))
+- *(proxy)* Harden MASQUE close, receive budget and target checks - ([492212b](https://github.com/0x676e67/netty/commit/492212b9ee452c3fe8a0b57049c4801858b5797f))
+- *(proxy)* Match link-local SOCKS5 relays by scope - ([494b6dd](https://github.com/0x676e67/netty/commit/494b6dd0532213366a3038e5c499b54c334a586e))
+- *(proxy)* Split mixed SOCKS5 UDP batches and read mapped addresses as IPv4 - ([e5f2d80](https://github.com/0x676e67/netty/commit/e5f2d806a87968180774f595cfa6d66f9f2d969c))
+- *(proxy)* Check SOCKS destination and credentials before connecting - ([7d40b22](https://github.com/0x676e67/netty/commit/7d40b22b602c510d084320543c7f286877bf9493))
+- *(proxy)* Validate CONNECT target and harden tunnel handshake - ([6cd06dd](https://github.com/0x676e67/netty/commit/6cd06dd3f0e3cd9d2454c1bbd9458b92ff6840a8))
+
+### 🚜 Refactor
+
+- *(http1)* Use DropGuard for request body cleanup ([#220](https://github.com/0x676e67/netty/issues/220)) - ([1427441](https://github.com/0x676e67/netty/commit/1427441861a3b353f150c21adf9c2b755fab4272))
+- *(http3)* Split client request handling ([#209](https://github.com/0x676e67/netty/issues/209)) - ([aecedc4](https://github.com/0x676e67/netty/commit/aecedc4263e1fa629e07e846a0e8659dbf19258d))
+- *(proxy)* Share lock poison recovery and the CONNECT-UDP test request - ([e805792](https://github.com/0x676e67/netty/commit/e805792d92180b1ac2592f44b7956484088f267e))
+- *(proxy)* Open HTTP/2 CONNECT-UDP tunnels synchronously and ungate stream resets - ([fec701d](https://github.com/0x676e67/netty/commit/fec701d1b2aa5f1327ce01efb664fbbd64c8561f))
+- *(proxy)* Limit MASQUE CONNECT-UDP to HTTP/3 - ([c9d0c7a](https://github.com/0x676e67/netty/commit/c9d0c7a92270bbc09406660ca9d909cdea9f6c0f))
+- Simplify header folding and datagram setup ([#218](https://github.com/0x676e67/netty/issues/218)) - ([4ea2d73](https://github.com/0x676e67/netty/commit/4ea2d731b736390bd31ce46ce1db87b77dab66ba))
+- Simplify response handling and test helpers ([#217](https://github.com/0x676e67/netty/issues/217)) - ([f8df52f](https://github.com/0x676e67/netty/commit/f8df52fd2cdae9de51e8a0a27dad010286aa740f))
+- Simplify stable Rust idioms - ([a881d28](https://github.com/0x676e67/netty/commit/a881d28532f77556a3970d0433b62cde7e8b0e94))
+- Simplify HTTP encoding and polling ([#214](https://github.com/0x676e67/netty/issues/214)) - ([19b7735](https://github.com/0x676e67/netty/commit/19b7735a8fcb40577667dfec6de9fee3864afb90))
+- Simplify header slots and upgrade results ([#212](https://github.com/0x676e67/netty/issues/212)) - ([1b6d909](https://github.com/0x676e67/netty/commit/1b6d90919bf25732df31231f7c43ea4f73e2bdf4))
+- Adopt newer stable Rust APIs ([#210](https://github.com/0x676e67/netty/issues/210)) - ([a03da64](https://github.com/0x676e67/netty/commit/a03da6495fe660b5cd4360f5c2d86aa83a468b0e))
+
+### 📚 Documentation
+
+- *(http3)* Describe datagram limits and connection close outcomes ([#176](https://github.com/0x676e67/netty/issues/176)) - ([f0ea808](https://github.com/0x676e67/netty/commit/f0ea808dd498b5d44c92d4808658bff5cb8a8ba3))
+
+### ⚡ Performance
+
+- *(body)* Skip waking a closed peer when a channel end drops ([#150](https://github.com/0x676e67/netty/issues/150)) - ([663b094](https://github.com/0x676e67/netty/commit/663b094fe80389c393880d8d5168c73131629336))
+- *(http1)* Read chunk framing bytes without split_to ([#222](https://github.com/0x676e67/netty/issues/222)) - ([18059f3](https://github.com/0x676e67/netty/commit/18059f3440a9e5ffd5312f22180f4098cfb6d5e9))
+- *(http1)* Scan fragmented headers with array windows ([#213](https://github.com/0x676e67/netty/issues/213)) - ([2a76dda](https://github.com/0x676e67/netty/commit/2a76dda8f4a8d252042320707d13108296fe8146))
+- *(http2)* Drive client connections in a single task ([#205](https://github.com/0x676e67/netty/issues/205)) - ([3a1c928](https://github.com/0x676e67/netty/commit/3a1c92895df2718b71c78730b85670aab0f2d806))
+- *(http2)* Shrink tasks and defer cancellation channel allocation ([#182](https://github.com/0x676e67/netty/issues/182)) - ([c671f45](https://github.com/0x676e67/netty/commit/c671f45299bff5b6a8bcc4c37dafbc0dba0d0f6f))
+- *(http3)* Box connection task to shrink spawned futures ([#189](https://github.com/0x676e67/netty/issues/189)) - ([4197732](https://github.com/0x676e67/netty/commit/41977320273a564e9e26b597e5d91ecdab7d8bb4))
+
+### 🎨 Styling
+
+- *(lib)* Address cast-possible-truncation clippy findings ([#148](https://github.com/0x676e67/netty/issues/148)) - ([3fa9152](https://github.com/0x676e67/netty/commit/3fa91527201cd138ad3c20ef50547cfc17b734a2))
+
+### 🧪 Testing
+
+- *(proxy)* Use Hyper for HTTP/2 CONNECT-UDP regressions - ([2ad290d](https://github.com/0x676e67/netty/commit/2ad290de9c5a370eef31d7f8d949d44e82d6f706))
+- *(proxy)* Answer SOCKS5 handshakes with fast-socks5 - ([b60241c](https://github.com/0x676e67/netty/commit/b60241c6bed814be134d1a0c212e255bc338ad4c))
+- *(proxy)* Move QUIC relay fixture to local harness - ([586ef29](https://github.com/0x676e67/netty/commit/586ef29809baf3726559f3459c3b6f8a9241b8ce))
+- *(proxy)* Relay SOCKS5 UDP through fast-socks5 - ([583916d](https://github.com/0x676e67/netty/commit/583916d5956fbf677dca2008efa87385879b9cc9))
+- *(proxy)* Use Hyper for CONNECT regressions - ([9a2c673](https://github.com/0x676e67/netty/commit/9a2c673855e094be27e180447a2c12f1a924967b))
+
+### ⚙️ Miscellaneous Tasks
+
+- Raise MSRV to Rust 1.100 ([#211](https://github.com/0x676e67/netty/issues/211)) - ([3963a44](https://github.com/0x676e67/netty/commit/3963a44abd8048d0f98fac2e5a593834fdb2cccd))
+- Bump MSRV to 1.98 and edition to 2024 ([#142](https://github.com/0x676e67/netty/issues/142)) - ([0b1799b](https://github.com/0x676e67/netty/commit/0b1799b6459a72186108bd8808f9ed11e0402999))
 ## [0.2.5] - 2026-09-25
 
 ### 🚀 Features
