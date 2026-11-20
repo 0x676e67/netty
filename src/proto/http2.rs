@@ -65,7 +65,7 @@ pin_project! {
         stream: S,
         body_tx: SendStream<SendBuf<S::Data>>,
         data_done: bool,
-                // A data chunk that has been polled from the body but is still waiting
+        // A data chunk that has been polled from the body but is still waiting
         // for stream-level capacity before it can be shipped. Stored here so
         // it survives across `Poll::Pending` returns from `poll_capacity`; if
         // we left the chunk in a local, it would be dropped on every repoll.
