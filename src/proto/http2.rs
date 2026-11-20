@@ -325,8 +325,12 @@ pub struct Http2Options {
     /// The initial window size for HTTP/2 connection-level flow control.
     pub initial_conn_window_size: u32,
 
-    /// The initial window size for HTTP/2 streams.
+    /// The initial stream window advertised in `SETTINGS_INITIAL_WINDOW_SIZE`.
     pub initial_window_size: u32,
+
+    /// The optional receive window target for locally initiated streams.
+    /// Ignored when adaptive flow control is enabled.
+    pub initial_stream_window_size: Option<u32>,
 
     /// The initial maximum number of locally initiated (send) streams.
     pub initial_max_send_streams: usize,
@@ -433,6 +437,25 @@ impl Http2OptionsBuilder {
         self
     }
 
+    /// Sets the initial receive window target for locally initiated streams.
+    ///
+    /// This leaves [`initial_window_size`](Self::initial_window_size) unchanged.
+    /// A target above the advertised window sends a stream `WINDOW_UPDATE`
+    /// after the complete request header block. Equal or smaller targets do not
+    /// send an update or shrink the window.
+    ///
+    /// A target disables adaptive flow control. Passing `None` does nothing;
+    /// the default is unset. Targets above 2³¹ − 1 cause the
+    /// [handshake](crate::conn::http2::Builder::handshake) to fail before I/O.
+    #[inline]
+    pub fn initial_stream_window_size(mut self, target: impl Into<Option<u32>>) -> Self {
+        if let Some(target) = target.into() {
+            self.opts.adaptive_window = false;
+            self.opts.initial_stream_window_size = Some(target);
+        }
+        self
+    }
+
     /// Sets the max connection-level flow control for HTTP2
     ///
     /// Passing `None` will do nothing.
@@ -479,7 +502,8 @@ impl Http2OptionsBuilder {
     ///
     /// Enabling it resets [`initial_window_size`](Self::initial_window_size) and
     /// [`initial_connection_window_size`](Self::initial_connection_window_size)
-    /// to 65,535, and a size passed to either later disables it.
+    /// to 65,535 and clears the [`initial_stream_window_size`](Self::initial_stream_window_size)
+    /// target. Setting any of these sizes later disables it.
     ///
     /// Default is `false`.
     #[inline]
@@ -488,6 +512,7 @@ impl Http2OptionsBuilder {
         if enabled {
             self.opts.initial_window_size = SPEC_WINDOW_SIZE;
             self.opts.initial_conn_window_size = SPEC_WINDOW_SIZE;
+            self.opts.initial_stream_window_size = None;
         }
         self
     }
@@ -905,6 +930,7 @@ impl Default for Http2Options {
             initial_stream_id: None,
             initial_conn_window_size: DEFAULT_CONN_WINDOW,
             initial_window_size: DEFAULT_STREAM_WINDOW,
+            initial_stream_window_size: None,
             initial_max_send_streams: DEFAULT_INITIAL_MAX_SEND_STREAMS,
             max_frame_size: Some(DEFAULT_MAX_FRAME_SIZE),
             max_header_list_size: Some(DEFAULT_MAX_HEADER_LIST_SIZE),

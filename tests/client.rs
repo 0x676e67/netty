@@ -5411,6 +5411,70 @@ mod conn {
 
     #[cfg(feature = "http2")]
     #[tokio::test]
+    async fn http2_initial_stream_window_size_sends_window_update() {
+        const ADVERTISED_WINDOW: u32 = 131_072;
+        const STREAM_WINDOW: u32 = 12 * 1024 * 1024;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client_io, server_io, _) = setup_duplex_test_server();
+
+            let server = tokio::spawn(async move {
+                let (mut rd, mut wr) = tokio::io::split(server_io);
+                accept_h2_preface(&mut rd, &mut wr).await;
+
+                let (kind, flags, stream, settings) = read_frame(&mut rd).await;
+                assert_eq!((kind, flags, stream), (FRAME_SETTINGS, 0, 0));
+                let initial_window = settings
+                    .chunks_exact(6)
+                    .find(|setting| setting[..2] == [0, 4])
+                    .expect("SETTINGS_INITIAL_WINDOW_SIZE");
+                assert_eq!(initial_window[2..], ADVERTISED_WINDOW.to_be_bytes());
+
+                loop {
+                    let (kind, flags, stream, _) = read_frame(&mut rd).await;
+                    if kind == FRAME_HEADERS {
+                        assert_eq!(stream, 1);
+                        assert_eq!(flags & 0x4, 0x4, "END_HEADERS");
+                        break;
+                    }
+                    assert!(
+                        kind != FRAME_WINDOW_UPDATE || stream == 0,
+                        "stream WINDOW_UPDATE before request HEADERS"
+                    );
+                }
+                let (kind, flags, stream, payload) = read_frame(&mut rd).await;
+                assert_eq!((kind, flags, stream), (FRAME_WINDOW_UPDATE, 0, 1));
+                assert_eq!(payload, (STREAM_WINDOW - ADVERTISED_WINDOW).to_be_bytes());
+
+                // `:status: 200` from the HPACK static table, ending the stream.
+                write_frame(&mut wr, FRAME_HEADERS, 0x5, 1, &[0x88]).await;
+            });
+
+            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .options(
+                    Http2Options::builder()
+                        .initial_window_size(ADVERTISED_WINDOW)
+                        .initial_stream_window_size(STREAM_WINDOW)
+                        .build(),
+                )
+                .handshake(TokioIo::new(TokioIo::new(client_io)))
+                .await
+                .expect("http handshake");
+            tokio::spawn(conn);
+
+            let res = client
+                .try_send_request(http::Request::new(Empty::<Bytes>::new()))
+                .await
+                .expect("request");
+            assert_eq!(res.status(), StatusCode::OK);
+            server.await.expect("server");
+        })
+        .await
+        .expect("test timed out");
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
     async fn http2_adaptive_window_waits_for_settings_ack() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let (client_io, server_io, _) = setup_duplex_test_server();
