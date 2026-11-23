@@ -33,6 +33,7 @@
 pub mod datagram;
 
 use std::{
+    fmt,
     future::{Future, poll_fn},
     marker::PhantomData,
     mem::DropGuard,
@@ -66,6 +67,10 @@ use crate::{
 
 /// The boxed request future a handle returns.
 type ExchangeFuture<B> = BoxFuture<'static, Result<Response<Incoming>, TrySendError<Request<B>>>>;
+
+/// Drives an HTTP/3 request to its response, as returned by [`SendRequest::try_send_request`].
+#[must_use = "poll or await this future to receive the response"]
+pub struct ResponseFuture<B>(ExchangeFuture<B>);
 
 /// Starts requests on the connection. Erasing the QUIC backend and executor
 /// here keeps handles at `SendRequest<B>`, like the HTTP/1 and HTTP/2 ones.
@@ -204,7 +209,7 @@ where
 {
     /// Sends a `Request` on the associated connection.
     ///
-    /// Returns a future that if successful, yields the `Response`.
+    /// Returns a [`ResponseFuture`] that yields the `Response` on success.
     /// The request progresses when the returned future is polled.
     ///
     /// # Errors
@@ -230,17 +235,32 @@ where
     /// `H3_REQUEST_CANCELLED` once the body ends or is dropped
     /// ([RFC 9298 §3.1](https://www.rfc-editor.org/rfc/rfc9298.html#section-3.1)).
     #[allow(clippy::result_large_err)]
-    pub fn try_send_request(
-        &mut self,
-        request: Request<B>,
-    ) -> impl Future<Output = Result<Response<Incoming>, TrySendError<Request<B>>>> + use<B> {
+    pub fn try_send_request(&mut self, request: Request<B>) -> ResponseFuture<B> {
         // Reserve before returning the future so dropping the last sender
         // cannot close the connection before this request is polled.
         let reservation = (!self.shared.is_draining()).then(|| Active::reserve(&self.shared));
-        self.exchange
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .call(request, reservation)
+        ResponseFuture(
+            self.exchange
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .call(request, reservation),
+        )
+    }
+}
+
+// ===== impl ResponseFuture =====
+
+impl<B> Future for ResponseFuture<B> {
+    type Output = Result<Response<Incoming>, TrySendError<Request<B>>>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.0.as_mut().poll(cx)
+    }
+}
+
+impl<B> fmt::Debug for ResponseFuture<B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResponseFuture").finish_non_exhaustive()
     }
 }
 

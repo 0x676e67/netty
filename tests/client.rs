@@ -4109,7 +4109,17 @@ mod conn {
         })
         .await
         .expect("dispatch should stop once the connection is dropped");
-        assert!(client.try_send_request(request()).await.is_err());
+        let mut error = client
+            .try_send_request(request())
+            .await
+            .expect_err("closed dispatch should reject the request");
+        assert!(error.error().is_canceled());
+        let unsent = error
+            .take_message()
+            .expect("dispatch should return the request");
+        assert_eq!(unsent.method(), Method::POST);
+        assert_eq!(unsent.uri(), "https://localhost/");
+        assert_eq!(concat(unsent.into_body()).await.unwrap().as_ref(), b"hello");
         server.abort();
     }
 

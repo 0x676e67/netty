@@ -5,6 +5,8 @@
 //! are not handled at this level. This module provides the building blocks to
 //! customize those things externally.
 
+mod response;
+
 pub mod http1;
 #[cfg(feature = "http2")]
 pub mod http2;

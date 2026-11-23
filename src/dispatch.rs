@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::Error;
 
-type RetryPromise<T, U> = oneshot::Receiver<Result<U, TrySendError<T>>>;
+pub(crate) type RetryPromise<T, U> = oneshot::Receiver<Result<U, TrySendError<T>>>;
 
 pub(crate) fn channel<T, U>() -> (Sender<T, U>, Receiver<T, U>) {
     let (tx, rx) = mpsc::unbounded_channel();

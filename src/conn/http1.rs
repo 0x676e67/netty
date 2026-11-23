@@ -12,6 +12,8 @@ use http_body::Body;
 use httparse::ParserConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+pub use super::response::ResponseFuture;
+use super::response::request_not_ready;
 use crate::{
     Error, Result,
     body::Incoming,
@@ -132,7 +134,7 @@ where
 {
     /// Sends a `Request` on the associated connection.
     ///
-    /// Returns a future that if successful, yields the `Response`.
+    /// Returns a [`ResponseFuture`] that yields the `Response` on success.
     ///
     /// # Errors
     ///
@@ -149,19 +151,13 @@ where
     /// complete this shutdown. The same [`SendRequest`] cannot be reused;
     /// subsequent requests return a [canceled error](Error::is_canceled).
     #[allow(clippy::result_large_err)]
-    pub fn try_send_request(
-        &mut self,
-        req: Request<B>,
-    ) -> impl Future<Output = Result<Response<Incoming>, TrySendError<Request<B>>>> + use<B> {
+    pub fn try_send_request(&mut self, req: Request<B>) -> ResponseFuture<B> {
         let sent = match req.version() {
             // The encoder sends HTTP/2 requests as HTTP/1.1.
             Version::HTTP_10 | Version::HTTP_11 | Version::HTTP_2 => {
-                self.dispatch.try_send(req).map_err(|req| {
+                self.dispatch.try_send(req).map_err(|request| {
                     debug!("connection was not ready");
-                    TrySendError {
-                        error: Error::new_canceled().with("connection was not ready"),
-                        message: Some(req),
-                    }
+                    request_not_ready(request)
                 })
             }
             _ => {
@@ -172,13 +168,7 @@ where
                 })
             }
         };
-        async move {
-            match sent?.await {
-                Ok(res) => res,
-                // this is definite bug if it happens, but it shouldn't happen!
-                Err(_) => panic!("dispatch dropped without returning error"),
-            }
-        }
+        ResponseFuture::new(sent)
     }
 }
 
