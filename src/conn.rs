@@ -21,7 +21,7 @@ use std::{
 use http::{Request, Response};
 
 pub use super::dispatch::TrySendError;
-use crate::{Error, body::Incoming, dispatch::RetryPromise};
+use crate::{body::Incoming, dispatch::RetryPromise};
 
 type ResponseReceiver<B> = RetryPromise<Request<B>, Response<Incoming>>;
 
@@ -29,23 +29,21 @@ type ResponseReceiver<B> = RetryPromise<Request<B>, Response<Incoming>>;
 ///
 /// Dropping it while the request is in flight cancels the request.
 #[must_use = "poll or await this future to receive the response"]
-pub struct ResponseFuture<B> {
-    sent: Result<ResponseReceiver<B>, Ready<TrySendError<Request<B>>>>,
-}
+pub struct ResponseFuture<B>(Result<ResponseReceiver<B>, Ready<TrySendError<Request<B>>>>);
 
 impl<B> ResponseFuture<B> {
+    /// Creates a new [`ResponseFuture`] from the result of sending a request.
     fn new(sent: Result<ResponseReceiver<B>, TrySendError<Request<B>>>) -> Self {
-        Self {
-            sent: sent.map_err(future::ready),
-        }
+        Self(sent.map_err(future::ready))
     }
 }
 
 impl<B> Future for ResponseFuture<B> {
     type Output = Result<Response<Incoming>, TrySendError<Request<B>>>;
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match &mut self.get_mut().sent {
+        match &mut self.get_mut().0 {
             Ok(receiver) => {
                 let response = ready!(Pin::new(receiver).poll(cx));
                 Poll::Ready(response.expect("dispatch dropped without returning error"))
@@ -58,12 +56,5 @@ impl<B> Future for ResponseFuture<B> {
 impl<B> fmt::Debug for ResponseFuture<B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ResponseFuture").finish_non_exhaustive()
-    }
-}
-
-fn request_not_ready<B>(request: Request<B>) -> TrySendError<Request<B>> {
-    TrySendError {
-        error: Error::new_canceled().with("connection was not ready"),
-        message: Some(request),
     }
 }

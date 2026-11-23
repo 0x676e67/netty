@@ -33,7 +33,6 @@
 pub mod datagram;
 
 use std::{
-    fmt,
     future::{Future, poll_fn},
     marker::PhantomData,
     mem::DropGuard,
@@ -249,14 +248,9 @@ where
 impl<B> Future for ResponseFuture<B> {
     type Output = Result<Response<Incoming>, TrySendError<Request<B>>>;
 
+    #[inline(always)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.0.as_mut().poll(cx)
-    }
-}
-
-impl<B> fmt::Debug for ResponseFuture<B> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResponseFuture").finish_non_exhaustive()
     }
 }
 
@@ -266,10 +260,12 @@ impl<B, F> Exchange<B> for F
 where
     F: FnMut(Request<B>, Option<Active>) -> ResponseFuture<B> + Clone + Send + 'static,
 {
+    #[inline(always)]
     fn call(&mut self, request: Request<B>, reservation: Option<Active>) -> ResponseFuture<B> {
         self(request, reservation)
     }
 
+    #[inline(always)]
     fn clone_box(&self) -> Box<dyn Exchange<B>> {
         Box::new(self.clone())
     }

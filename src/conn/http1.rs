@@ -12,7 +12,7 @@ use http_body::Body;
 use httparse::ParserConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::{ResponseFuture, request_not_ready};
+use super::ResponseFuture;
 use crate::{
     Error, Result,
     body::Incoming,
@@ -155,7 +155,10 @@ where
             Version::HTTP_10 | Version::HTTP_11 | Version::HTTP_2 => {
                 self.dispatch.try_send(req).map_err(|request| {
                     debug!("connection was not ready");
-                    request_not_ready(request)
+                    TrySendError {
+                        error: Error::new_canceled().with("connection was not ready"),
+                        message: Some(request),
+                    }
                 })
             }
             _ => {

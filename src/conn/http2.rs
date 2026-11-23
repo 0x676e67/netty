@@ -12,7 +12,7 @@ use http::{Request, Response};
 use http_body::Body;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::{ResponseFuture, request_not_ready};
+use super::{ResponseFuture, TrySendError};
 use crate::{
     Result,
     body::Incoming,
@@ -161,7 +161,10 @@ where
     pub fn try_send_request(&mut self, req: Request<B>) -> ResponseFuture<B> {
         let sent = self.dispatch.try_send(req).map_err(|request| {
             debug!("connection was not ready");
-            request_not_ready(request)
+            TrySendError {
+                error: Error::new_canceled().with("connection was not ready"),
+                message: Some(request),
+            }
         });
         ResponseFuture::new(sent)
     }
