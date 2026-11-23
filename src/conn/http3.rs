@@ -65,18 +65,17 @@ use crate::{
     rt::{bounds::Http3ClientConnExec, quic},
 };
 
-/// The boxed request future a handle returns.
-type ExchangeFuture<B> = BoxFuture<'static, Result<Response<Incoming>, TrySendError<Request<B>>>>;
-
 /// Drives an HTTP/3 request to its response, as returned by [`SendRequest::try_send_request`].
 #[must_use = "poll or await this future to receive the response"]
-pub struct ResponseFuture<B>(ExchangeFuture<B>);
+pub struct ResponseFuture<B>(
+    BoxFuture<'static, Result<Response<Incoming>, TrySendError<Request<B>>>>,
+);
 
 /// Starts requests on the connection. Erasing the QUIC backend and executor
 /// here keeps handles at `SendRequest<B>`, like the HTTP/1 and HTTP/2 ones.
 trait Exchange<B>: Send {
     /// Starts a request with its reservation.
-    fn call(&mut self, request: Request<B>, reservation: Option<Active>) -> ExchangeFuture<B>;
+    fn call(&mut self, request: Request<B>, reservation: Option<Active>) -> ResponseFuture<B>;
 
     /// Clones the exchange for a cloned handle.
     fn clone_box(&self) -> Box<dyn Exchange<B>>;
@@ -234,17 +233,14 @@ where
     /// `connect-udp` request is aborted instead: its send direction resets with
     /// `H3_REQUEST_CANCELLED` once the body ends or is dropped
     /// ([RFC 9298 §3.1](https://www.rfc-editor.org/rfc/rfc9298.html#section-3.1)).
-    #[allow(clippy::result_large_err)]
     pub fn try_send_request(&mut self, request: Request<B>) -> ResponseFuture<B> {
         // Reserve before returning the future so dropping the last sender
         // cannot close the connection before this request is polled.
         let reservation = (!self.shared.is_draining()).then(|| Active::reserve(&self.shared));
-        ResponseFuture(
-            self.exchange
-                .get_mut()
-                .unwrap_or_else(PoisonError::into_inner)
-                .call(request, reservation),
-        )
+        self.exchange
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .call(request, reservation)
     }
 }
 
@@ -268,9 +264,9 @@ impl<B> fmt::Debug for ResponseFuture<B> {
 
 impl<B, F> Exchange<B> for F
 where
-    F: FnMut(Request<B>, Option<Active>) -> ExchangeFuture<B> + Clone + Send + 'static,
+    F: FnMut(Request<B>, Option<Active>) -> ResponseFuture<B> + Clone + Send + 'static,
 {
-    fn call(&mut self, request: Request<B>, reservation: Option<Active>) -> ExchangeFuture<B> {
+    fn call(&mut self, request: Request<B>, reservation: Option<Active>) -> ResponseFuture<B> {
         self(request, reservation)
     }
 
@@ -448,13 +444,13 @@ impl<E> Builder<E> {
             let shared = shared.clone();
             let exec = self.exec;
             Box::new(move |request, reservation| {
-                client::request::<Q, _, _>(
+                ResponseFuture(client::request::<Q, _, _>(
                     sender.clone(),
                     exec.clone(),
                     shared.clone(),
                     request,
                     reservation,
-                )
+                ))
             })
         };
 

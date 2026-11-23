@@ -12,8 +12,7 @@ use http_body::Body;
 use httparse::ParserConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-pub use super::ResponseFuture;
-use super::request_not_ready;
+use super::{ResponseFuture, request_not_ready};
 use crate::{
     Error, Result,
     body::Incoming,
@@ -150,7 +149,6 @@ where
     /// its driver observes the cancellation. Keep polling [`Connection`] to
     /// complete this shutdown. The same [`SendRequest`] cannot be reused;
     /// subsequent requests return a [canceled error](Error::is_canceled).
-    #[allow(clippy::result_large_err)]
     pub fn try_send_request(&mut self, req: Request<B>) -> ResponseFuture<B> {
         let sent = match req.version() {
             // The encoder sends HTTP/2 requests as HTTP/1.1.

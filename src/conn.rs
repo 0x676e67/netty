@@ -13,7 +13,7 @@ pub mod http3;
 
 use std::{
     fmt,
-    future::Future,
+    future::{self, Future, Ready},
     pin::Pin,
     task::{Context, Poll, ready},
 };
@@ -30,22 +30,14 @@ type ResponseReceiver<B> = RetryPromise<Request<B>, Response<Incoming>>;
 /// Dropping it while the request is in flight cancels the request.
 #[must_use = "poll or await this future to receive the response"]
 pub struct ResponseFuture<B> {
-    state: State<B>,
-}
-
-enum State<B> {
-    Waiting(ResponseReceiver<B>),
-    // Keep the original request out of the future's inline storage.
-    Rejected(Option<Box<TrySendError<Request<B>>>>),
+    sent: Result<ResponseReceiver<B>, Ready<TrySendError<Request<B>>>>,
 }
 
 impl<B> ResponseFuture<B> {
     fn new(sent: Result<ResponseReceiver<B>, TrySendError<Request<B>>>) -> Self {
-        let state = match sent {
-            Ok(receiver) => State::Waiting(receiver),
-            Err(error) => State::Rejected(Some(Box::new(error))),
-        };
-        Self { state }
+        Self {
+            sent: sent.map_err(future::ready),
+        }
     }
 }
 
@@ -53,17 +45,12 @@ impl<B> Future for ResponseFuture<B> {
     type Output = Result<Response<Incoming>, TrySendError<Request<B>>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match &mut self.get_mut().state {
-            State::Waiting(receiver) => {
+        match &mut self.get_mut().sent {
+            Ok(receiver) => {
                 let response = ready!(Pin::new(receiver).poll(cx));
                 Poll::Ready(response.expect("dispatch dropped without returning error"))
             }
-            State::Rejected(error) => {
-                let error = error
-                    .take()
-                    .expect("response future polled after completion");
-                Poll::Ready(Err(*error))
-            }
+            Err(error) => Pin::new(error).poll(cx).map(Err),
         }
     }
 }

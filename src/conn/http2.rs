@@ -12,8 +12,7 @@ use http::{Request, Response};
 use http_body::Body;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-pub use super::ResponseFuture;
-use super::request_not_ready;
+use super::{ResponseFuture, request_not_ready};
 use crate::{
     Result,
     body::Incoming,
@@ -159,7 +158,6 @@ where
     /// The connection remains usable for other current and subsequent requests.
     /// Keep driving the connection and its background tasks so the reset can
     /// reach the peer.
-    #[allow(clippy::result_large_err)]
     pub fn try_send_request(&mut self, req: Request<B>) -> ResponseFuture<B> {
         let sent = self.dispatch.try_send(req).map_err(|request| {
             debug!("connection was not ready");
