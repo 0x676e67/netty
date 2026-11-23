@@ -12,8 +12,8 @@ use http_body::Body;
 use httparse::ParserConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-pub use super::response::ResponseFuture;
-use super::response::request_not_ready;
+pub use super::ResponseFuture;
+use super::request_not_ready;
 use crate::{
     Error, Result,
     body::Incoming,
