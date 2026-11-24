@@ -365,6 +365,7 @@ pub struct Http2Options {
     pub reset_stream_duration: Option<Duration>,
 
     /// The maximum size of the send buffer for HTTP/2 streams.
+    /// The handshake caps this value at `u32::MAX`.
     pub max_send_buffer_size: usize,
 
     /// The cap on sent DATA payloads, within the peer's max frame size.
@@ -447,12 +448,13 @@ impl Http2OptionsBuilder {
     /// A target disables adaptive flow control. Passing `None` does nothing.
     /// The default is unset.
     ///
-    /// If adaptive flow control is disabled, the
-    /// [handshake](crate::conn::http2::Builder::handshake) panics before I/O
-    /// when the target exceeds 2³¹ − 1.
+    /// # Panics
+    ///
+    /// The target must be no larger than 2³¹ − 1.
     #[inline]
     pub fn initial_stream_window_size(mut self, target: impl Into<Option<u32>>) -> Self {
         if let Some(target) = target.into() {
+            Http2Options::assert_initial_stream_window_size(target);
             self.opts.adaptive_window = false;
             self.opts.initial_stream_window_size = Some(target);
         }
@@ -729,10 +731,14 @@ impl Http2OptionsBuilder {
 
     /// Set the maximum write buffer size for each HTTP/2 stream.
     ///
-    /// Default is currently 1MB, but may change. A `max` above `u32::MAX` is
-    /// treated as `u32::MAX`.
+    /// Default is currently 1MB, but may change.
+    ///
+    /// # Panics
+    ///
+    /// The value must be no larger than `u32::MAX`.
     #[inline]
     pub fn max_send_buf_size(mut self, max: usize) -> Self {
+        assert!(max <= u32::MAX as usize);
         self.opts.max_send_buffer_size = max;
         self
     }
@@ -922,6 +928,13 @@ impl Http2Options {
                 ..Default::default()
             },
         }
+    }
+
+    pub(crate) fn assert_initial_stream_window_size(target: u32) {
+        assert!(
+            target <= http2::proto::MAX_WINDOW_SIZE,
+            "HTTP/2 initial stream window target exceeds 2^31 - 1"
+        );
     }
 }
 

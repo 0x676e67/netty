@@ -4468,6 +4468,13 @@ mod conn {
             .expect("client should be open");
     }
 
+    #[cfg(all(feature = "http2", target_pointer_width = "64"))]
+    #[test]
+    #[should_panic]
+    fn http2_oversized_max_send_buf_size_panics_in_setter() {
+        Http2Options::builder().max_send_buf_size(u32::MAX as usize + 1);
+    }
+
     #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_saturates_oversized_options() {
@@ -4487,16 +4494,15 @@ mod conn {
                 .expect("serve_connection");
         });
 
+        let mut options = Http2Options::builder()
+            .keep_alive_interval(Duration::MAX)
+            .keep_alive_timeout(Duration::MAX)
+            .keep_alive_while_idle(true)
+            .build();
+        options.max_send_buffer_size = usize::MAX;
         let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
             .timer(rt::TokioTimer::new())
-            .options(
-                Http2Options::builder()
-                    .keep_alive_interval(Duration::MAX)
-                    .keep_alive_timeout(Duration::MAX)
-                    .keep_alive_while_idle(true)
-                    .max_send_buf_size(usize::MAX)
-                    .build(),
-            )
+            .options(options)
             .handshake(TokioIo::new(TokioIo::new(client_io)))
             .await
             .expect("http handshake");
@@ -5410,12 +5416,18 @@ mod conn {
     }
 
     #[cfg(feature = "http2")]
+    #[test]
+    #[should_panic(expected = "HTTP/2 initial stream window target exceeds 2^31 - 1")]
+    fn http2_out_of_range_initial_stream_window_panics_in_setter() {
+        Http2Options::builder().initial_stream_window_size(1_u32 << 31);
+    }
+
+    #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_out_of_range_initial_stream_window_panics_during_handshake() {
         let (client_io, mut server_io, _) = setup_duplex_test_server();
-        let options = Http2Options::builder()
-            .initial_stream_window_size(1_u32 << 31)
-            .build();
+        let mut options = Http2Options::default();
+        options.initial_stream_window_size = Some(1_u32 << 31);
         let handshake = conn::http2::Builder::new(rt::TokioExecutor::new())
             .options(options)
             .handshake::<_, Empty<Bytes>>(client_io);

@@ -329,10 +329,7 @@ where
         if !self.opts.adaptive_window
             && let Some(target) = self.opts.initial_stream_window_size
         {
-            assert!(
-                target <= http2::proto::MAX_WINDOW_SIZE,
-                "HTTP/2 initial stream window target exceeds 2^31 - 1"
-            );
+            Http2Options::assert_initial_stream_window_size(target);
             builder.initial_stream_window_size(target);
         }
         if let Some(max) = self.opts.max_pending_accept_reset_streams {
