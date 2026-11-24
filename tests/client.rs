@@ -5411,18 +5411,20 @@ mod conn {
 
     #[cfg(feature = "http2")]
     #[tokio::test]
-    async fn http2_out_of_range_initial_stream_window_is_user_error() {
+    async fn http2_out_of_range_initial_stream_window_panics_during_handshake() {
         let (client_io, mut server_io, _) = setup_duplex_test_server();
+        let options = Http2Options::builder()
+            .initial_stream_window_size(1_u32 << 31)
+            .build();
         let handshake = conn::http2::Builder::new(rt::TokioExecutor::new())
-            .options(
-                Http2Options::builder()
-                    .initial_stream_window_size(::http2::proto::MAX_WINDOW_SIZE + 1)
-                    .build(),
-            )
-            .handshake::<_, Empty<Bytes>>(client_io)
-            .await;
-        let err = handshake.err().expect("out-of-range stream window target");
-        assert!(err.is_user(), "{err:?}");
+            .options(options)
+            .handshake::<_, Empty<Bytes>>(client_io);
+
+        let outcome = std::panic::AssertUnwindSafe(handshake).catch_unwind().await;
+        assert!(
+            outcome.is_err(),
+            "out-of-range stream window target must panic"
+        );
         assert_eq!(server_io.read(&mut [0]).await.unwrap(), 0);
     }
 

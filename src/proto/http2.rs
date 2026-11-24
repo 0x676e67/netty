@@ -444,10 +444,12 @@ impl Http2OptionsBuilder {
     /// after the complete request header block. Equal or smaller targets do not
     /// send an update or shrink the window.
     ///
-    /// A target disables adaptive flow control. Passing `None` does nothing;
-    /// the default is unset. The [handshake](crate::conn::http2::Builder::handshake)
-    /// rejects targets above 2³¹ − 1 with a [user error](crate::Error::is_user)
-    /// before any I/O.
+    /// A target disables adaptive flow control. Passing `None` does nothing.
+    /// The default is unset.
+    ///
+    /// If adaptive flow control is disabled, the
+    /// [handshake](crate::conn::http2::Builder::handshake) panics before I/O
+    /// when the target exceeds 2³¹ − 1.
     #[inline]
     pub fn initial_stream_window_size(mut self, target: impl Into<Option<u32>>) -> Self {
         if let Some(target) = target.into() {
