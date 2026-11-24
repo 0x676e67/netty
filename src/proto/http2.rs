@@ -454,7 +454,7 @@ impl Http2OptionsBuilder {
     #[inline]
     pub fn initial_stream_window_size(mut self, target: impl Into<Option<u32>>) -> Self {
         if let Some(target) = target.into() {
-            Http2Options::assert_initial_stream_window_size(target);
+            assert!(target <= http2::proto::MAX_WINDOW_SIZE);
             self.opts.adaptive_window = false;
             self.opts.initial_stream_window_size = Some(target);
         }
@@ -928,13 +928,6 @@ impl Http2Options {
                 ..Default::default()
             },
         }
-    }
-
-    pub(crate) fn assert_initial_stream_window_size(target: u32) {
-        assert!(
-            target <= http2::proto::MAX_WINDOW_SIZE,
-            "HTTP/2 initial stream window target exceeds 2^31 - 1"
-        );
     }
 }
 
