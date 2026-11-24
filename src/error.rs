@@ -110,6 +110,9 @@ pub(super) enum User {
     /// HTTP/2 keep-alive was enabled without a timer.
     #[cfg(feature = "http2")]
     KeepAliveWithoutTimer,
+    /// The HTTP/2 initial stream window target exceeds the flow-control limit.
+    #[cfg(feature = "http2")]
+    InitialStreamWindowTooLarge,
 }
 
 // Sentinel type to indicate the error was caused by a timeout.
@@ -440,6 +443,10 @@ impl Error {
             Kind::User(User::DispatchGone) => "dispatch task is gone",
             #[cfg(feature = "http2")]
             Kind::User(User::KeepAliveWithoutTimer) => "HTTP/2 keep-alive requires a timer",
+            #[cfg(feature = "http2")]
+            Kind::User(User::InitialStreamWindowTooLarge) => {
+                "HTTP/2 initial stream window target exceeds 2^31 - 1"
+            }
         }
     }
 }
@@ -457,6 +464,12 @@ impl Error {
     #[inline]
     pub(super) fn new_user_keep_alive_without_timer() -> Error {
         Error::new_user(User::KeepAliveWithoutTimer)
+    }
+
+    pub(super) fn new_user_initial_stream_window_too_large() -> Error {
+        Error::new_user(User::InitialStreamWindowTooLarge).with(::http2::Error::from(
+            ::http2::UserError::InvalidInitialStreamWindowSize,
+        ))
     }
 }
 

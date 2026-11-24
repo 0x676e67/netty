@@ -5411,6 +5411,23 @@ mod conn {
 
     #[cfg(feature = "http2")]
     #[tokio::test]
+    async fn http2_out_of_range_initial_stream_window_is_user_error() {
+        let (client_io, mut server_io, _) = setup_duplex_test_server();
+        let handshake = conn::http2::Builder::new(rt::TokioExecutor::new())
+            .options(
+                Http2Options::builder()
+                    .initial_stream_window_size(::http2::proto::MAX_WINDOW_SIZE + 1)
+                    .build(),
+            )
+            .handshake::<_, Empty<Bytes>>(client_io)
+            .await;
+        let err = handshake.err().expect("out-of-range stream window target");
+        assert!(err.is_user(), "{err:?}");
+        assert_eq!(server_io.read(&mut [0]).await.unwrap(), 0);
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
     async fn http2_initial_stream_window_size_sends_window_update() {
         use tokio::io::{AsyncRead, ReadBuf, ReadHalf};
 
