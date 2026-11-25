@@ -466,9 +466,14 @@ impl Http2OptionsBuilder {
     /// Passing `None` will do nothing.
     ///
     /// Default is 5 MiB.
+    ///
+    /// # Panics
+    ///
+    /// The window size must be no larger than 2³¹ − 1.
     #[inline]
     pub fn initial_connection_window_size(mut self, sz: impl Into<Option<u32>>) -> Self {
         if let Some(sz) = sz.into() {
+            assert!(sz <= http2::proto::MAX_WINDOW_SIZE);
             self.opts.adaptive_window = false;
             self.opts.initial_conn_window_size = sz;
         }
