@@ -296,10 +296,8 @@ where
     /// enabled without a [`timer`](Self::timer), or an error if the HTTP/2
     /// connection handshake fails.
     ///
-    /// # Panics
-    ///
-    /// Panics if an initial stream window target exceeds 2³¹ − 1 when applied
-    /// with adaptive flow control disabled.
+    /// Returns an error before I/O if adaptive flow control is disabled and
+    /// [`Http2Options::initial_stream_window_size`] exceeds 2³¹ − 1.
     pub async fn handshake<T, B>(self, io: T) -> Result<(SendRequest<B>, Connection<T, B, Ex>)>
     where
         T: AsyncRead + AsyncWrite + Unpin,
