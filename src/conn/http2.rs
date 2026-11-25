@@ -12,10 +12,11 @@ use http::{Request, Response};
 use http_body::Body;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use super::{ResponseFuture, TrySendError};
 use crate::{
     Result,
     body::Incoming,
-    dispatch::{self, TrySendError},
+    dispatch,
     error::{BoxError, Error},
     proto::{
         self,
@@ -142,7 +143,7 @@ where
 {
     /// Sends a `Request` on the associated connection.
     ///
-    /// Returns a future that if successful, yields the `Response`.
+    /// Returns a [`ResponseFuture`] that yields the `Response` on success.
     ///
     /// # Errors
     ///
@@ -157,30 +158,15 @@ where
     /// The connection remains usable for other current and subsequent requests.
     /// Keep driving the connection and its background tasks so the reset can
     /// reach the peer.
-    #[allow(clippy::result_large_err)]
-    pub fn try_send_request(
-        &mut self,
-        req: Request<B>,
-    ) -> impl Future<Output = Result<Response<Incoming>, TrySendError<Request<B>>>> + use<B> {
-        let sent = self.dispatch.try_send(req);
-        async move {
-            match sent {
-                Ok(rx) => match rx.await {
-                    Ok(Ok(res)) => Ok(res),
-                    Ok(Err(err)) => Err(err),
-                    // this is definite bug if it happens, but it shouldn't happen!
-                    Err(_) => panic!("dispatch dropped without returning error"),
-                },
-                Err(req) => {
-                    debug!("connection was not ready");
-                    let error = Error::new_canceled().with("connection was not ready");
-                    Err(TrySendError {
-                        error,
-                        message: Some(req),
-                    })
-                }
+    pub fn try_send_request(&mut self, req: Request<B>) -> ResponseFuture<B> {
+        let sent = self.dispatch.try_send(req).map_err(|request| {
+            debug!("connection was not ready");
+            TrySendError {
+                error: Error::new_canceled().with("connection was not ready"),
+                message: Some(request),
             }
-        }
+        });
+        ResponseFuture::new(sent)
     }
 }
 
