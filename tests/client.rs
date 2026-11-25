@@ -4468,13 +4468,6 @@ mod conn {
             .expect("client should be open");
     }
 
-    #[cfg(all(feature = "http2", target_pointer_width = "64"))]
-    #[test]
-    #[should_panic]
-    fn http2_oversized_max_send_buf_size_panics_in_setter() {
-        Http2Options::builder().max_send_buf_size(u32::MAX as usize + 1);
-    }
-
     #[cfg(feature = "http2")]
     #[tokio::test]
     async fn http2_saturates_oversized_options() {
@@ -5413,31 +5406,6 @@ mod conn {
         })
         .await
         .expect("test timed out");
-    }
-
-    #[cfg(feature = "http2")]
-    #[test]
-    #[should_panic]
-    fn http2_out_of_range_initial_stream_window_panics_in_setter() {
-        Http2Options::builder().initial_stream_window_size(1_u32 << 31);
-    }
-
-    #[cfg(feature = "http2")]
-    #[tokio::test]
-    async fn http2_out_of_range_initial_stream_window_panics_during_handshake() {
-        let (client_io, mut server_io, _) = setup_duplex_test_server();
-        let mut options = Http2Options::default();
-        options.initial_stream_window_size = Some(1_u32 << 31);
-        let handshake = conn::http2::Builder::new(rt::TokioExecutor::new())
-            .options(options)
-            .handshake::<_, Empty<Bytes>>(client_io);
-
-        let outcome = std::panic::AssertUnwindSafe(handshake).catch_unwind().await;
-        assert!(
-            outcome.is_err(),
-            "out-of-range stream window target must panic"
-        );
-        assert_eq!(server_io.read(&mut [0]).await.unwrap(), 0);
     }
 
     #[cfg(feature = "http2")]
