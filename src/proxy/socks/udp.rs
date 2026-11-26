@@ -22,17 +22,15 @@ use std::{
 use bytes::BufMut;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::proxy::{read, send};
+use super::{
+    AuthFailure,
+    handshake::{
+        ATYP_DOMAIN, ATYP_IPV4, ATYP_IPV6, AuthError, VERSION, authenticate, read_array, read_exact,
+    },
+};
+use crate::proxy::send;
 
-const VERSION: u8 = 0x05;
-const AUTH_VERSION: u8 = 0x01;
-const NO_AUTH: u8 = 0x00;
-const USERNAME_PASSWORD: u8 = 0x02;
-const NO_ACCEPTABLE_METHODS: u8 = 0xFF;
 const CMD_UDP_ASSOCIATE: u8 = 0x03;
-const ATYP_IPV4: u8 = 0x01;
-const ATYP_DOMAIN: u8 = 0x03;
-const ATYP_IPV6: u8 = 0x04;
 
 /// A SOCKS5 address (RFC 1928 §5): an IP address or a domain name, with a port.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -108,49 +106,18 @@ pub async fn associate<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    // RFC 1929 lengths are one byte and must be non-zero.
-    let auth = match auth {
-        Some((username, password)) => {
-            let len = |s: &str| {
-                u8::try_from(s.len())
-                    .ok()
-                    .filter(|&n| n > 0)
-                    .ok_or(AssociateError::InvalidCredentials)
-            };
-            Some((username, len(username)?, password, len(password)?))
-        }
-        None => None,
-    };
-
-    let methods: &[u8] = match auth {
-        Some(_) => &[VERSION, 2, NO_AUTH, USERNAME_PASSWORD],
-        None => &[VERSION, 1, NO_AUTH],
-    };
-    send(&mut io, methods).await?;
-    let [version, method] = read_array(&mut io).await?;
-    if version != VERSION {
-        return Err(AssociateError::InvalidResponse);
-    }
-    match (method, auth) {
-        (NO_AUTH, _) => {}
-        (USERNAME_PASSWORD, Some((username, ulen, password, plen))) => {
-            let mut req = Vec::with_capacity(3 + username.len() + password.len());
-            req.extend_from_slice(&[AUTH_VERSION, ulen]);
-            req.extend_from_slice(username.as_bytes());
-            req.push(plen);
-            req.extend_from_slice(password.as_bytes());
-            send(&mut io, &req).await?;
-            let [version, status] = read_array(&mut io).await?;
-            if version != AUTH_VERSION {
-                return Err(AssociateError::InvalidResponse);
+    let auth = auth.map(|(user, pass)| (user.as_bytes(), pass.as_bytes()));
+    authenticate(&mut io, auth)
+        .await
+        .map_err(|error| match error {
+            AuthError::Io(error) => AssociateError::Io(error),
+            AuthError::InvalidCredentials => AssociateError::InvalidCredentials,
+            AuthError::InvalidResponse(_) | AuthError::Failed(AuthFailure::Required) => {
+                AssociateError::InvalidResponse
             }
-            if status != 0 {
-                return Err(AssociateError::AuthFailed);
-            }
-        }
-        (NO_ACCEPTABLE_METHODS, _) => return Err(AssociateError::NoAcceptableAuth),
-        _ => return Err(AssociateError::InvalidResponse),
-    }
+            AuthError::Failed(AuthFailure::NoAcceptableMethod) => AssociateError::NoAcceptableAuth,
+            AuthError::Failed(AuthFailure::Rejected(_)) => AssociateError::AuthFailed,
+        })?;
 
     let mut req = Vec::with_capacity(22);
     req.extend_from_slice(&[VERSION, CMD_UDP_ASSOCIATE, 0x00]);
@@ -370,29 +337,6 @@ fn put_ip<B: BufMut>(buf: &mut B, addr: SocketAddr) {
         }
     }
     buf.put_u16(addr.port());
-}
-
-async fn read_exact<T>(io: &mut T, buf: &mut [u8]) -> io::Result<()>
-where
-    T: AsyncRead + Unpin,
-{
-    let mut filled = 0;
-    while filled < buf.len() {
-        match read(io, &mut buf[filled..]).await? {
-            0 => return Err(io::ErrorKind::UnexpectedEof.into()),
-            n => filled += n,
-        }
-    }
-    Ok(())
-}
-
-async fn read_array<T, const N: usize>(io: &mut T) -> io::Result<[u8; N]>
-where
-    T: AsyncRead + Unpin,
-{
-    let mut buf = [0; N];
-    read_exact(io, &mut buf).await?;
-    Ok(buf)
 }
 
 // ===== impl Address =====
