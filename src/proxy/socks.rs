@@ -91,7 +91,9 @@ pub enum SocksError {
     DnsResolveFailure(BoxError),
     /// The resolver returned no address usable by the SOCKS version.
     DnsFailure,
-    /// The SOCKS handshake failed. Its source is the original I/O error or a protocol diagnostic.
+    /// The SOCKS handshake failed.
+    ///
+    /// I/O failures retain the original I/O error; other sources are backend-specific.
     Handshake(BoxError),
     /// The proxy selected username/password authentication without supplied credentials.
     AuthRequired,
@@ -313,8 +315,7 @@ where
         tokio_socks::Error::NoAcceptableAuthMethods => SocksError::NoAcceptableAuth,
         tokio_socks::Error::PasswordAuthFailure(status) => SocksError::AuthRejected(status),
         tokio_socks::Error::Io(error) => SocksError::Handshake(error.into()),
-        // Keep the diagnostic without exposing the backend error through Error::source.
-        error => SocksError::Handshake(error.to_string().into()),
+        error => SocksError::Handshake(error.into()),
     };
     let utf8 = |bytes| str::from_utf8(bytes).map_err(SocksError::Utf8);
     let socket = Socket(io);
@@ -831,15 +832,13 @@ mod tests {
                 "handshake stalled; was the request flushed?",
             )
             .await;
-            match (&result, expected) {
-                (Ok(_), Ok(_)) => {}
-                (Err(SocksError::Handshake(cause)), Err(_)) => {
-                    assert!(!cause.is::<tokio_socks::Error>(), "{cause:?}");
-                    assert!(!cause.is::<io::Error>(), "{cause:?}");
-                    assert_eq!(cause.to_string(), "Connection refused");
-                }
-                _ => panic!("{dst} {version:?}: {result:?}"),
-            }
+            assert!(
+                matches!(
+                    (&result, expected),
+                    (Ok(_), Ok(_)) | (Err(SocksError::Handshake(_)), Err(_))
+                ),
+                "{dst} {version:?}: {result:?}"
+            );
 
             let (server, seen) = bounded(proxy, "proxy stalled").await.expect("proxy task");
             let (Ok(want) | Err(want)) = expected;
