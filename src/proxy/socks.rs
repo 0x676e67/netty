@@ -96,11 +96,11 @@ pub enum SocksError {
     /// I/O failures retain the original I/O error; other sources are backend-specific.
     Handshake(BoxError),
     /// The proxy selected username/password authentication without supplied credentials.
-    AuthRequired,
+    AuthorizationRequired,
     /// The proxy accepted none of the offered authentication methods.
-    NoAcceptableAuth,
+    NoAcceptableAuthMethods,
     /// The proxy rejected the credentials with the given authentication status.
-    AuthRejected(u8),
+    PasswordAuthFailure(u8),
     /// SOCKS4 cannot reach an IPv6 destination.
     AddressNotSupported,
     /// The destination host does not fit in the SOCKS request.
@@ -311,9 +311,9 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     let failed = |error: tokio_socks::Error| match error {
-        tokio_socks::Error::AuthorizationRequired => SocksError::AuthRequired,
-        tokio_socks::Error::NoAcceptableAuthMethods => SocksError::NoAcceptableAuth,
-        tokio_socks::Error::PasswordAuthFailure(status) => SocksError::AuthRejected(status),
+        tokio_socks::Error::AuthorizationRequired => SocksError::AuthorizationRequired,
+        tokio_socks::Error::NoAcceptableAuthMethods => SocksError::NoAcceptableAuthMethods,
+        tokio_socks::Error::PasswordAuthFailure(status) => SocksError::PasswordAuthFailure(status),
         tokio_socks::Error::Io(error) => SocksError::Handshake(error.into()),
         error => SocksError::Handshake(error.into()),
     };
@@ -395,11 +395,11 @@ impl fmt::Display for SocksError {
             }
             SocksError::DnsFailure => f.write_str("could not resolve to acceptable address type"),
             SocksError::Handshake(_) => f.write_str("error during SOCKS handshake"),
-            SocksError::AuthRequired => f.write_str("proxy requires SOCKS5 credentials"),
-            SocksError::NoAcceptableAuth => {
+            SocksError::AuthorizationRequired => f.write_str("proxy requires SOCKS5 credentials"),
+            SocksError::NoAcceptableAuthMethods => {
                 f.write_str("proxy accepted no SOCKS5 authentication method")
             }
-            SocksError::AuthRejected(status) => write!(
+            SocksError::PasswordAuthFailure(status) => write!(
                 f,
                 "proxy rejected SOCKS5 credentials (status {status:#04x})"
             ),
@@ -853,12 +853,12 @@ mod tests {
         }
 
         let cases: [(Auth<'_>, &[u8], SocksError); 3] = [
-            (None, &[5, 2], SocksError::AuthRequired),
-            (None, &[5, 0xff], SocksError::NoAcceptableAuth),
+            (None, &[5, 2], SocksError::AuthorizationRequired),
+            (None, &[5, 0xff], SocksError::NoAcceptableAuthMethods),
             (
                 Some((b"user", b"secret")),
                 &[5, 2, 1, 1],
-                SocksError::AuthRejected(1),
+                SocksError::PasswordAuthFailure(1),
             ),
         ];
         for (auth, reply, expected) in cases {
@@ -873,9 +873,12 @@ mod tests {
             .expect_err("SOCKS5 authentication failure");
             assert!(err.source().is_none(), "{err:?}");
             match (err, expected) {
-                (SocksError::AuthRequired, SocksError::AuthRequired)
-                | (SocksError::NoAcceptableAuth, SocksError::NoAcceptableAuth) => {}
-                (SocksError::AuthRejected(status), SocksError::AuthRejected(expected)) => {
+                (SocksError::AuthorizationRequired, SocksError::AuthorizationRequired)
+                | (SocksError::NoAcceptableAuthMethods, SocksError::NoAcceptableAuthMethods) => {}
+                (
+                    SocksError::PasswordAuthFailure(status),
+                    SocksError::PasswordAuthFailure(expected),
+                ) => {
                     assert_eq!(status, expected);
                 }
                 (err, expected) => panic!("{reply:02x?}: expected {expected:?}, got {err:?}"),
