@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795648111103,
+  "lastUpdate": 1795656901799,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -20519,6 +20519,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 5274952,
             "range": "± 68729.83",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "444022d808b3d55310a9d9fa0671a56b5b1a075c",
+          "message": "feat(http2): expose the initial stream receive window target (#229)\n\n* feat(http2): expose the initial stream receive window target\n\n* test(http2): verify initial stream window updates with Hyper\n\n* fix(http2): classify oversized stream window targets as user errors\n\n* fix(http2): assert the initial stream window limit during handshake\n\n* fix(http2): validate stream window and send buffer options in setters\n\n* refactor(http2): inline initial stream window assertions\n\n* Update http2.rs\n\n* Update client.rs\n\n* docs(http2): clarify oversized stream window handshake errors\n\n* fix(http2): assert the connection window limit in the setter",
+          "timestamp": "2026-11-26T09:33:02+08:00",
+          "tree_id": "22cb2dd73ed9807f71beeb6798ab43103d9b44f8",
+          "url": "https://github.com/0x676e67/netty/commit/444022d808b3d55310a9d9fa0671a56b5b1a075c"
+        },
+        "date": 1795656900838,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 25111,
+            "range": "± 354.92",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3017476,
+            "range": "± 21702.00",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 6854,
+            "range": "± 113.17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 7548,
+            "range": "± 110.91",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 10527,
+            "range": "± 112.61",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 32461,
+            "range": "± 669.82",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 11321,
+            "range": "± 128.07",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 44242,
+            "range": "± 541.29",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 3151502,
+            "range": "± 53417.48",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 3115910,
+            "range": "± 28752.28",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 3064171,
+            "range": "± 50858.09",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 27181376,
+            "range": "± 219425.60",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 27382975,
+            "range": "± 279196.49",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 2779060,
+            "range": "± 26564.48",
             "unit": "ns/iter"
           }
         ]
