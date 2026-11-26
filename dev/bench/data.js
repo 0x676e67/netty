@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795656901799,
+  "lastUpdate": 1795661154212,
   "repoUrl": "https://github.com/0x676e67/netty",
   "entries": {
     "end_to_end": [
@@ -20627,6 +20627,114 @@ window.BENCHMARK_DATA = {
             "name": "http2_parallel_x10_res_1mb",
             "value": 2779060,
             "range": "± 26564.48",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gngppz@gmail.com",
+            "name": "0x676e67",
+            "username": "0x676e67"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b385e40336a84d371dd248cca28eaae9a868063b",
+          "message": "refactor(client): unify and shrink conn::ResponseFuture (#234)\n\n* refactor(client): unify and shrink conn::ResponseFuture\n\n* refactor(client): rename ResponseFuture inner enum to Kind",
+          "timestamp": "2026-11-26T10:43:56+08:00",
+          "tree_id": "98b9c6ca4ec5019a3723023d483ec26b7a5edfbd",
+          "url": "https://github.com/0x676e67/netty/commit/b385e40336a84d371dd248cca28eaae9a868063b"
+        },
+        "date": 1795661153689,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "http1_consecutive_x1_both_100kb",
+            "value": 49876,
+            "range": "± 628.98",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_both_10mb",
+            "value": 3369397,
+            "range": "± 305730.81",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_empty",
+            "value": 17937,
+            "range": "± 563.82",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http1_consecutive_x1_req_10b",
+            "value": 18633,
+            "range": "± 300.09",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_empty",
+            "value": 21395,
+            "range": "± 302.84",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_100kb",
+            "value": 69865,
+            "range": "± 4119.71",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_consecutive_x1_req_10b",
+            "value": 22684,
+            "range": "± 1165.33",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_empty",
+            "value": 55830,
+            "range": "± 868.13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks",
+            "value": 5663042,
+            "range": "± 16238856.03",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_adaptive_window",
+            "value": 5506445,
+            "range": "± 8274429.87",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            "value": 5274256,
+            "range": "± 68160.70",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_req_10mb",
+            "value": 38367349,
+            "range": "± 8258551.00",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_10mb",
+            "value": 42957533,
+            "range": "± 1910102.11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "http2_parallel_x10_res_1mb",
+            "value": 4414161,
+            "range": "± 49759.10",
             "unit": "ns/iter"
           }
         ]
