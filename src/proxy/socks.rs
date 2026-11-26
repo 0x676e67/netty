@@ -92,7 +92,15 @@ pub enum SocksError {
     /// The resolver returned no address usable by the SOCKS version.
     DnsFailure,
     /// The SOCKS handshake failed.
+    ///
+    /// I/O failures retain the original I/O error; other sources are backend-specific.
     Handshake(BoxError),
+    /// The proxy selected username/password authentication without supplied credentials.
+    AuthorizationRequired,
+    /// The proxy accepted none of the offered authentication methods.
+    NoAcceptableAuthMethods,
+    /// The proxy rejected the credentials with the given authentication status.
+    PasswordAuthFailure(u8),
     /// SOCKS4 cannot reach an IPv6 destination.
     AddressNotSupported,
     /// The destination host does not fit in the SOCKS request.
@@ -302,7 +310,13 @@ async fn handshake<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let failed = |err: tokio_socks::Error| SocksError::Handshake(err.into());
+    let failed = |error: tokio_socks::Error| match error {
+        tokio_socks::Error::AuthorizationRequired => SocksError::AuthorizationRequired,
+        tokio_socks::Error::NoAcceptableAuthMethods => SocksError::NoAcceptableAuthMethods,
+        tokio_socks::Error::PasswordAuthFailure(status) => SocksError::PasswordAuthFailure(status),
+        tokio_socks::Error::Io(error) => SocksError::Handshake(error.into()),
+        error => SocksError::Handshake(error.into()),
+    };
     let utf8 = |bytes| str::from_utf8(bytes).map_err(SocksError::Utf8);
     let socket = Socket(io);
 
@@ -381,6 +395,14 @@ impl fmt::Display for SocksError {
             }
             SocksError::DnsFailure => f.write_str("could not resolve to acceptable address type"),
             SocksError::Handshake(_) => f.write_str("error during SOCKS handshake"),
+            SocksError::AuthorizationRequired => f.write_str("proxy requires SOCKS5 credentials"),
+            SocksError::NoAcceptableAuthMethods => {
+                f.write_str("proxy accepted no SOCKS5 authentication method")
+            }
+            SocksError::PasswordAuthFailure(status) => write!(
+                f,
+                "proxy rejected SOCKS5 credentials (status {status:#04x})"
+            ),
             SocksError::AddressNotSupported => {
                 f.write_str("SOCKS4 does not support IPv6 destinations")
             }
@@ -582,7 +604,7 @@ mod tests {
 
         // `Err` is rejected before the inner connector is called. `Ok` passes the checks and
         // fails writing to the closed proxy end.
-        let broken = Ok("Handshake(Io(Kind(BrokenPipe)))");
+        let broken = Ok(());
         let cases: [(&str, Version, DnsResolve, Auth<'_>, _); 18] = [
             ("/relative", V5, Remote, None, Err("MissingHost")),
             ("http://:80/", V5, Remote, None, Err("MissingHost")),
@@ -680,12 +702,23 @@ mod tests {
             let err = bounded(connector.call(dst.parse().unwrap()), "handshake stalled")
                 .await
                 .expect_err("bad destination or closed proxy end");
-            let (Ok(want) | Err(want)) = expected;
-            assert_eq!(
-                format!("{err:?}"),
-                want,
-                "{dst} {version:?} {dns_resolve:?}"
-            );
+            match expected {
+                Ok(()) => {
+                    assert!(matches!(err, SocksError::Handshake(_)), "{err:?}");
+                    assert_eq!(
+                        err.source()
+                            .and_then(|cause| cause.downcast_ref::<io::Error>())
+                            .map(io::Error::kind),
+                        Some(io::ErrorKind::BrokenPipe),
+                        "{dst} {version:?} {dns_resolve:?}",
+                    );
+                }
+                Err(want) => assert_eq!(
+                    format!("{err:?}"),
+                    want,
+                    "{dst} {version:?} {dns_resolve:?}"
+                ),
+            }
             assert_eq!(
                 connector.inner.0.is_none(),
                 expected.is_ok(),
@@ -816,6 +849,39 @@ mod tests {
                 let mut pong = [0; 4];
                 io.read_exact(&mut pong).await.expect("tunneled read");
                 assert_eq!(&pong, b"pong");
+            }
+        }
+
+        let cases: [(Auth<'_>, &[u8], SocksError); 3] = [
+            (None, &[5, 2], SocksError::AuthorizationRequired),
+            (None, &[5, 0xff], SocksError::NoAcceptableAuthMethods),
+            (
+                Some((b"user", b"secret")),
+                &[5, 2, 1, 1],
+                SocksError::PasswordAuthFailure(1),
+            ),
+        ];
+        for (auth, reply, expected) in cases {
+            let (client, mut server) = duplex(256);
+            server.write_all(reply).await.expect("proxy reply");
+            let err = bounded(
+                connector(Some(client), V5, Remote, auth)
+                    .call("https://example.com".parse().unwrap()),
+                "SOCKS5 authentication stalled",
+            )
+            .await
+            .expect_err("SOCKS5 authentication failure");
+            assert!(err.source().is_none(), "{err:?}");
+            match (err, expected) {
+                (SocksError::AuthorizationRequired, SocksError::AuthorizationRequired)
+                | (SocksError::NoAcceptableAuthMethods, SocksError::NoAcceptableAuthMethods) => {}
+                (
+                    SocksError::PasswordAuthFailure(status),
+                    SocksError::PasswordAuthFailure(expected),
+                ) => {
+                    assert_eq!(status, expected);
+                }
+                (err, expected) => panic!("{reply:02x?}: expected {expected:?}, got {err:?}"),
             }
         }
 
