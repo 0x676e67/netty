@@ -281,6 +281,9 @@ where
     /// Returns an [`is_user`](crate::Error::is_user) error if keep-alive is
     /// enabled without a [`timer`](Self::timer), or an error if the HTTP/2
     /// connection handshake fails.
+    ///
+    /// Returns an error before I/O if adaptive flow control is disabled and
+    /// [`Http2Options::initial_stream_window_size`] exceeds 2³¹ − 1.
     pub async fn handshake<T, B>(self, io: T) -> Result<(SendRequest<B>, Connection<T, B, Ex>)>
     where
         T: AsyncRead + AsyncWrite + Unpin,
@@ -306,6 +309,11 @@ where
             .max_local_error_reset_streams(self.opts.max_local_error_reset_streams);
         if let Some(id) = self.opts.initial_stream_id {
             builder.initial_stream_id(id);
+        }
+        if !self.opts.adaptive_window
+            && let Some(target) = self.opts.initial_stream_window_size
+        {
+            builder.initial_stream_window_size(target);
         }
         if let Some(max) = self.opts.max_pending_accept_reset_streams {
             builder.max_pending_accept_reset_streams(max);

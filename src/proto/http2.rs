@@ -325,8 +325,12 @@ pub struct Http2Options {
     /// The initial window size for HTTP/2 connection-level flow control.
     pub initial_conn_window_size: u32,
 
-    /// The initial window size for HTTP/2 streams.
+    /// The initial stream window advertised in `SETTINGS_INITIAL_WINDOW_SIZE`.
     pub initial_window_size: u32,
+
+    /// The optional receive window target for locally initiated streams.
+    /// Ignored when adaptive flow control is enabled.
+    pub initial_stream_window_size: Option<u32>,
 
     /// The initial maximum number of locally initiated (send) streams.
     pub initial_max_send_streams: usize,
@@ -361,6 +365,7 @@ pub struct Http2Options {
     pub reset_stream_duration: Option<Duration>,
 
     /// The maximum size of the send buffer for HTTP/2 streams.
+    /// The handshake caps this value at `u32::MAX`.
     pub max_send_buffer_size: usize,
 
     /// The cap on sent DATA payloads, within the peer's max frame size.
@@ -433,14 +438,42 @@ impl Http2OptionsBuilder {
         self
     }
 
+    /// Sets the initial receive window target for locally initiated streams.
+    ///
+    /// This leaves [`initial_window_size`](Self::initial_window_size) unchanged.
+    /// A target above the advertised window sends a stream `WINDOW_UPDATE`
+    /// after the complete request header block. Equal or smaller targets do not
+    /// send an update or shrink the window.
+    ///
+    /// A target disables adaptive flow control. Passing `None` does nothing.
+    /// The default is unset.
+    ///
+    /// # Panics
+    ///
+    /// The target must be no larger than 2³¹ − 1.
+    #[inline]
+    pub fn initial_stream_window_size(mut self, target: impl Into<Option<u32>>) -> Self {
+        if let Some(target) = target.into() {
+            assert!(target <= http2::proto::MAX_WINDOW_SIZE);
+            self.opts.adaptive_window = false;
+            self.opts.initial_stream_window_size = Some(target);
+        }
+        self
+    }
+
     /// Sets the max connection-level flow control for HTTP2
     ///
     /// Passing `None` will do nothing.
     ///
     /// Default is 5 MiB.
+    ///
+    /// # Panics
+    ///
+    /// The window size must be no larger than 2³¹ − 1.
     #[inline]
     pub fn initial_connection_window_size(mut self, sz: impl Into<Option<u32>>) -> Self {
         if let Some(sz) = sz.into() {
+            assert!(sz <= http2::proto::MAX_WINDOW_SIZE);
             self.opts.adaptive_window = false;
             self.opts.initial_conn_window_size = sz;
         }
@@ -479,7 +512,8 @@ impl Http2OptionsBuilder {
     ///
     /// Enabling it resets [`initial_window_size`](Self::initial_window_size) and
     /// [`initial_connection_window_size`](Self::initial_connection_window_size)
-    /// to 65,535, and a size passed to either later disables it.
+    /// to 65,535 and clears the [`initial_stream_window_size`](Self::initial_stream_window_size)
+    /// target. Setting any of these sizes later disables it.
     ///
     /// Default is `false`.
     #[inline]
@@ -488,6 +522,7 @@ impl Http2OptionsBuilder {
         if enabled {
             self.opts.initial_window_size = SPEC_WINDOW_SIZE;
             self.opts.initial_conn_window_size = SPEC_WINDOW_SIZE;
+            self.opts.initial_stream_window_size = None;
         }
         self
     }
@@ -701,10 +736,14 @@ impl Http2OptionsBuilder {
 
     /// Set the maximum write buffer size for each HTTP/2 stream.
     ///
-    /// Default is currently 1MB, but may change. A `max` above `u32::MAX` is
-    /// treated as `u32::MAX`.
+    /// Default is currently 1MB, but may change.
+    ///
+    /// # Panics
+    ///
+    /// The value must be no larger than `u32::MAX`.
     #[inline]
     pub fn max_send_buf_size(mut self, max: usize) -> Self {
+        assert!(max <= u32::MAX as usize);
         self.opts.max_send_buffer_size = max;
         self
     }
@@ -905,6 +944,7 @@ impl Default for Http2Options {
             initial_stream_id: None,
             initial_conn_window_size: DEFAULT_CONN_WINDOW,
             initial_window_size: DEFAULT_STREAM_WINDOW,
+            initial_stream_window_size: None,
             initial_max_send_streams: DEFAULT_INITIAL_MAX_SEND_STREAMS,
             max_frame_size: Some(DEFAULT_MAX_FRAME_SIZE),
             max_header_list_size: Some(DEFAULT_MAX_HEADER_LIST_SIZE),

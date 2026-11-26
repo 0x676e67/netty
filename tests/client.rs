@@ -4497,16 +4497,15 @@ mod conn {
                 .expect("serve_connection");
         });
 
+        let mut options = Http2Options::builder()
+            .keep_alive_interval(Duration::MAX)
+            .keep_alive_timeout(Duration::MAX)
+            .keep_alive_while_idle(true)
+            .build();
+        options.max_send_buffer_size = usize::MAX;
         let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
             .timer(rt::TokioTimer::new())
-            .options(
-                Http2Options::builder()
-                    .keep_alive_interval(Duration::MAX)
-                    .keep_alive_timeout(Duration::MAX)
-                    .keep_alive_while_idle(true)
-                    .max_send_buf_size(usize::MAX)
-                    .build(),
-            )
+            .options(options)
             .handshake(TokioIo::new(TokioIo::new(client_io)))
             .await
             .expect("http handshake");
@@ -5414,6 +5413,123 @@ mod conn {
                 .expect("second request");
             assert_eq!(res.status(), StatusCode::OK);
             server.await.expect("server");
+        })
+        .await
+        .expect("test timed out");
+    }
+
+    #[cfg(feature = "http2")]
+    #[tokio::test]
+    async fn http2_initial_stream_window_size_sends_window_update() {
+        use tokio::io::{AsyncRead, ReadBuf, ReadHalf};
+
+        const ADVERTISED_WINDOW: u32 = 131_072;
+        const STREAM_WINDOW: u32 = 12 * 1024 * 1024;
+        // The response needs more capacity than SETTINGS_INITIAL_WINDOW_SIZE grants.
+        static RESPONSE_BODY: [u8; ADVERTISED_WINDOW as usize + 1] =
+            [0; ADVERTISED_WINDOW as usize + 1];
+
+        struct RecordingRead<'a> {
+            io: ReadHalf<DuplexStream>,
+            received: &'a mut Vec<u8>,
+        }
+
+        impl AsyncRead for RecordingRead<'_> {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                let filled = buf.filled().len();
+                std::task::ready!(Pin::new(&mut self.io).poll_read(cx, buf))?;
+                self.received.extend_from_slice(&buf.filled()[filled..]);
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client_io, server_io, _) = setup_duplex_test_server();
+
+            let server = tokio::spawn(async move {
+                let (read, write) = tokio::io::split(server_io);
+                let mut received = Vec::new();
+                let read = RecordingRead {
+                    io: read,
+                    received: &mut received,
+                };
+                let io = TokioIo::new(tokio::io::join(read, write));
+                hyper::server::conn::http2::Builder::new(TokioExecutor)
+                    .serve_connection(
+                        io,
+                        hyper::service::service_fn(async |_| {
+                            Ok::<_, std::convert::Infallible>(Response::new(Full::new(
+                                Bytes::from_static(&RESPONSE_BODY),
+                            )))
+                        }),
+                    )
+                    .await
+                    .expect("Hyper connection");
+                received
+            });
+
+            let (mut client, conn) = conn::http2::Builder::new(rt::TokioExecutor::new())
+                .options(
+                    Http2Options::builder()
+                        .initial_window_size(ADVERTISED_WINDOW)
+                        .initial_stream_window_size(STREAM_WINDOW)
+                        .build(),
+                )
+                .handshake(client_io)
+                .await
+                .expect("http handshake");
+            let connection = tokio::spawn(conn);
+
+            let request = Request::get("https://localhost/")
+                .body(Empty::<Bytes>::new())
+                .unwrap();
+            let response = client.try_send_request(request).await.expect("request");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response.into_body().collect().await.expect("response body");
+            assert_eq!(body.aggregate().remaining(), RESPONSE_BODY.len());
+            drop(client);
+            connection.await.expect("client task").expect("connection");
+
+            let received = server.await.expect("server task");
+            let mut frames = received
+                .strip_prefix(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+                .expect("client preface");
+            let (kind, flags, stream, settings) = read_frame(&mut frames).await;
+            assert_eq!((kind, flags, stream), (FRAME_SETTINGS, 0, 0));
+            let initial_window = settings
+                .chunks_exact(6)
+                .find(|setting| setting[..2] == [0, 4])
+                .expect("SETTINGS_INITIAL_WINDOW_SIZE");
+            assert_eq!(initial_window[2..], ADVERTISED_WINDOW.to_be_bytes());
+
+            loop {
+                let (kind, flags, stream, _) = read_frame(&mut frames).await;
+                if kind == FRAME_HEADERS {
+                    assert_eq!(stream, 1);
+                    assert_eq!(flags & 0x4, 0x4, "END_HEADERS");
+                    break;
+                }
+                assert!(
+                    kind != FRAME_WINDOW_UPDATE || stream == 0,
+                    "stream WINDOW_UPDATE before request HEADERS"
+                );
+            }
+            let (kind, flags, stream, payload) = read_frame(&mut frames).await;
+            assert_eq!((kind, flags, stream), (FRAME_WINDOW_UPDATE, 0, 1));
+            assert_eq!(payload, (STREAM_WINDOW - ADVERTISED_WINDOW).to_be_bytes());
+
+            // The response beyond the advertised window must use the initial update.
+            while !frames.is_empty() {
+                let (kind, _, stream, _) = read_frame(&mut frames).await;
+                assert!(
+                    kind != FRAME_WINDOW_UPDATE || stream == 0,
+                    "unexpected extra stream WINDOW_UPDATE"
+                );
+            }
         })
         .await
         .expect("test timed out");
