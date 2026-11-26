@@ -421,7 +421,7 @@ impl<E> Builder<E> {
             let shared = shared.clone();
             let exec = self.exec;
             Box::new(move |request, reservation| {
-                ResponseFuture::http3(client::request::<Q, _, _>(
+                ResponseFuture::boxed(client::request::<Q, _, _>(
                     sender.clone(),
                     exec.clone(),
                     shared.clone(),

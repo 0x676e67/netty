@@ -31,31 +31,31 @@ type ResponseReceiver<B> = RetryPromise<Request<B>, Response<Incoming>>;
 ///
 /// Dropping it while the request is in flight cancels the request.
 #[must_use = "poll or await this future to receive the response"]
-pub struct ResponseFuture<B>(ResponseFutureInner<B>);
+pub struct ResponseFuture<B>(Kind<B>);
 
-enum ResponseFutureInner<B> {
-    Pending(ResponseReceiver<B>),
+enum Kind<B> {
+    Receiver(ResponseReceiver<B>),
     /// Boxed so an immediate send failure does not inflate every in-flight future by `Request<B>`.
     Error(Ready<Box<TrySendError<Request<B>>>>),
     #[cfg(feature = "http3")]
-    Http3(BoxFuture<'static, Result<Response<Incoming>, TrySendError<Request<B>>>>),
+    Boxed(BoxFuture<'static, Result<Response<Incoming>, TrySendError<Request<B>>>>),
 }
 
 impl<B> ResponseFuture<B> {
     /// Creates a new [`ResponseFuture`] from an HTTP/1 or HTTP/2 dispatch attempt.
     fn new(sent: Result<ResponseReceiver<B>, TrySendError<Request<B>>>) -> Self {
         Self(match sent {
-            Ok(receiver) => ResponseFutureInner::Pending(receiver),
-            Err(error) => ResponseFutureInner::Error(future::ready(Box::new(error))),
+            Ok(receiver) => Kind::Receiver(receiver),
+            Err(error) => Kind::Error(future::ready(Box::new(error))),
         })
     }
 
-    /// Creates a new [`ResponseFuture`] from an HTTP/3 request exchange future.
+    /// Creates a new [`ResponseFuture`] from a type-erased response future.
     #[cfg(feature = "http3")]
-    fn http3(
+    fn boxed(
         future: BoxFuture<'static, Result<Response<Incoming>, TrySendError<Request<B>>>>,
     ) -> Self {
-        Self(ResponseFutureInner::Http3(future))
+        Self(Kind::Boxed(future))
     }
 }
 
@@ -65,15 +65,13 @@ impl<B> Future for ResponseFuture<B> {
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut self.get_mut().0 {
-            ResponseFutureInner::Pending(receiver) => {
+            Kind::Receiver(receiver) => {
                 let response = ready!(Pin::new(receiver).poll(cx));
                 Poll::Ready(response.expect("dispatch dropped without returning error"))
             }
-            ResponseFutureInner::Error(error) => {
-                Poll::Ready(Err(*ready!(Pin::new(error).poll(cx))))
-            }
+            Kind::Error(error) => Poll::Ready(Err(*ready!(Pin::new(error).poll(cx)))),
             #[cfg(feature = "http3")]
-            ResponseFutureInner::Http3(future) => future.as_mut().poll(cx),
+            Kind::Boxed(future) => future.as_mut().poll(cx),
         }
     }
 }
