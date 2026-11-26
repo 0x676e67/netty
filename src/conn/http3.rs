@@ -42,18 +42,16 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_util::future::BoxFuture;
-use http::{Request, Response};
+use http::Request;
 use http_body::Body;
 use http3::error::Code;
 use tokio::sync::oneshot;
 
+use super::ResponseFuture;
 #[cfg(feature = "http3-datagram")]
 use crate::proto::http3::datagram::{Drive, Registry};
 use crate::{
     Error, Result,
-    body::Incoming,
-    dispatch::TrySendError,
     error::BoxError,
     proto::http3::{
         Http3Options,
@@ -63,12 +61,6 @@ use crate::{
     },
     rt::{bounds::Http3ClientConnExec, quic},
 };
-
-/// Drives an HTTP/3 request to its response, as returned by [`SendRequest::try_send_request`].
-#[must_use = "poll or await this future to receive the response"]
-pub struct ResponseFuture<B>(
-    BoxFuture<'static, Result<Response<Incoming>, TrySendError<Request<B>>>>,
-);
 
 /// Starts requests on the connection. Erasing the QUIC backend and executor
 /// here keeps handles at `SendRequest<B>`, like the HTTP/1 and HTTP/2 ones.
@@ -240,17 +232,6 @@ where
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .call(request, reservation)
-    }
-}
-
-// ===== impl ResponseFuture =====
-
-impl<B> Future for ResponseFuture<B> {
-    type Output = Result<Response<Incoming>, TrySendError<Request<B>>>;
-
-    #[inline(always)]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.0.as_mut().poll(cx)
     }
 }
 
@@ -440,7 +421,7 @@ impl<E> Builder<E> {
             let shared = shared.clone();
             let exec = self.exec;
             Box::new(move |request, reservation| {
-                ResponseFuture(client::request::<Q, _, _>(
+                ResponseFuture::http3(client::request::<Q, _, _>(
                     sender.clone(),
                     exec.clone(),
                     shared.clone(),
