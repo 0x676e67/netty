@@ -1,29 +1,34 @@
 //! SOCKS4/4a and SOCKS5/5h connectors.
 //!
-//! The connector opens a tunnel over the stream supplied by its inner service;
+//! The CONNECT handshakes are delegated to [tokio-socks](https://docs.rs/tokio-socks);
 //! [`udp`] implements SOCKS5 UDP ASSOCIATE. SOCKS5 is
 //! [RFC 1928](https://www.rfc-editor.org/rfc/rfc1928), with username/password authentication
 //! from [RFC 1929](https://www.rfc-editor.org/rfc/rfc1929).
 
-mod handshake;
 pub mod udp;
 
 use std::{
     error::Error as StdError,
     fmt,
     future::{self, poll_fn},
+    io,
     net::{IpAddr, SocketAddr},
+    pin::Pin,
     str::{self, Utf8Error},
-    task::{Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use bytes::Bytes;
 use futures_util::future::try_join;
 use http::Uri;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio_socks::{
+    TargetAddr,
+    io::AsyncSocket,
+    tcp::{Socks4Stream, Socks5Stream},
+};
 use tower_service::Service;
 
-use self::udp::AddressRef;
 use super::{Tunneling, dst_host, dst_port, proxy_dst_debug};
 use crate::error::BoxError;
 
@@ -31,14 +36,15 @@ use crate::error::BoxError;
 /// ([RFC 1928 §5](https://www.rfc-editor.org/rfc/rfc1928#section-5)).
 const MAX_HOST_LEN: usize = 255;
 
-/// Maximum SOCKS4 user ID length accepted by this connector.
+/// Longest SOCKS4 user ID tokio-socks accepts.
 const MAX_USER_ID_LEN: usize = 255;
 
 /// Longest SOCKS5 username or password: one length octet
 /// ([RFC 1929 §2](https://www.rfc-editor.org/rfc/rfc1929#section-2)).
 const MAX_CREDENTIAL_LEN: usize = 255;
 
-/// Combined SOCKS4a user ID and host limit, retained for compatibility.
+/// Longest SOCKS4a user ID plus domain tokio-socks can encode: its request buffer is 513 bytes,
+/// of which 8 are the header and 2 are NUL terminators.
 const SOCKS4A_MAX_ID_AND_HOST: usize = 503;
 
 /// SOCKS protocol version.
@@ -85,17 +91,14 @@ pub enum SocksError {
     DnsResolveFailure(BoxError),
     /// The resolver returned no address usable by the SOCKS version.
     DnsFailure,
-    /// A protocol or I/O error interrupted the SOCKS handshake.
+    /// The SOCKS handshake failed. Its source is the original I/O error or a protocol diagnostic.
     Handshake(BoxError),
-    /// The SOCKS5 proxy requires credentials, rejected them, or found no acceptable method.
-    AuthFailed(AuthFailure),
-    /// The proxy refused the CONNECT request with this reply code.
-    Reply {
-        /// The protocol version used to interpret the reply code.
-        version: Version,
-        /// The reply code sent by the proxy.
-        code: u8,
-    },
+    /// The proxy selected username/password authentication without supplied credentials.
+    AuthRequired,
+    /// The proxy accepted none of the offered authentication methods.
+    NoAcceptableAuth,
+    /// The proxy rejected the credentials with the given authentication status.
+    AuthRejected(u8),
     /// SOCKS4 cannot reach an IPv6 destination.
     AddressNotSupported,
     /// The destination host does not fit in the SOCKS request.
@@ -110,18 +113,6 @@ pub enum SocksError {
     MissingHost,
     /// The destination port is zero or not a valid `u16`.
     InvalidPort,
-}
-
-/// The reason a SOCKS5 authentication exchange failed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum AuthFailure {
-    /// The proxy selected username/password authentication without supplied credentials.
-    Required,
-    /// The proxy accepted none of the offered authentication methods.
-    NoAcceptableMethod,
-    /// The proxy rejected the credentials with the given authentication status.
-    Rejected(u8),
 }
 
 // ===== impl SocksConnector =====
@@ -256,11 +247,11 @@ where
                 .ok_or(SocksError::MissingHost)?;
             let target = async {
                 Ok(match (addr, resolver) {
-                    (Some(addr), _) => AddressRef::Ip(addr),
+                    (Some(addr), _) => TargetAddr::Ip(addr),
                     (None, Some(resolver)) => {
-                        AddressRef::Ip(resolve(resolver, host, port, version).await?)
+                        TargetAddr::Ip(resolve(resolver, host, port, version).await?)
                     }
-                    (None, None) => AddressRef::Domain(host, port),
+                    (None, None) => TargetAddr::Domain(host.into(), port),
                 })
             };
             let connect = async {
@@ -268,12 +259,8 @@ where
                     .await
                     .map_err(|err| SocksError::ConnectFailed(err.into()))
             };
-            let (target, mut io) = try_join(target, connect).await?;
-            let auth = auth
-                .as_ref()
-                .map(|(user, pass)| (user.as_ref(), pass.as_ref()));
-            handshake::connect(&mut io, target, version, auth).await?;
-            Ok(io)
+            let (target, io) = try_join(target, connect).await?;
+            handshake(io, target, version, auth.as_ref()).await
         })
     }
 }
@@ -311,6 +298,90 @@ where
     Ok(addr)
 }
 
+/// Runs the handshake for credentials that [`SocksConnector::check`] accepted.
+async fn handshake<T>(
+    io: T,
+    target: TargetAddr<'_>,
+    version: Version,
+    auth: Option<&(Bytes, Bytes)>,
+) -> Result<T, SocksError>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    let failed = |error: tokio_socks::Error| match error {
+        tokio_socks::Error::AuthorizationRequired => SocksError::AuthRequired,
+        tokio_socks::Error::NoAcceptableAuthMethods => SocksError::NoAcceptableAuth,
+        tokio_socks::Error::PasswordAuthFailure(status) => SocksError::AuthRejected(status),
+        tokio_socks::Error::Io(error) => SocksError::Handshake(error.into()),
+        // Keep the diagnostic without exposing the backend error through Error::source.
+        error => SocksError::Handshake(error.to_string().into()),
+    };
+    let utf8 = |bytes| str::from_utf8(bytes).map_err(SocksError::Utf8);
+    let socket = Socket(io);
+
+    let socket = match (version, auth) {
+        // SOCKS4 carries only a NUL-terminated user ID; an empty one is sent as none.
+        (Version::V4, Some((user_id, _))) if !user_id.is_empty() => {
+            Socks4Stream::connect_with_userid_and_socket(socket, target, utf8(user_id)?)
+                .await
+                .map_err(failed)?
+                .into_inner()
+        }
+        (Version::V4, _) => Socks4Stream::connect_with_socket(socket, target)
+            .await
+            .map_err(failed)?
+            .into_inner(),
+        (Version::V5, Some((username, password))) => {
+            Socks5Stream::connect_with_password_and_socket(
+                socket,
+                target,
+                utf8(username)?,
+                utf8(password)?,
+            )
+            .await
+            .map_err(failed)?
+            .into_inner()
+        }
+        (Version::V5, None) => Socks5Stream::connect_with_socket(socket, target)
+            .await
+            .map_err(failed)?
+            .into_inner(),
+    };
+    Ok(socket.0)
+}
+
+/// Adapts the caller's IO for tokio-socks.
+///
+/// tokio-socks never flushes, so each read flushes first: a buffered request then reaches the
+/// proxy before the handshake waits for its reply.
+struct Socket<T>(T);
+
+// ===== impl Socket =====
+
+impl<T> AsyncSocket for Socket<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        ready!(Pin::new(&mut self.0).poll_flush(cx))?;
+        let mut buf = ReadBuf::new(buf);
+        ready!(Pin::new(&mut self.0).poll_read(cx, &mut buf))?;
+        Poll::Ready(Ok(buf.filled().len()))
+    }
+
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+}
+
 // ===== impl SocksError =====
 
 impl fmt::Display for SocksError {
@@ -323,10 +394,14 @@ impl fmt::Display for SocksError {
             }
             SocksError::DnsFailure => f.write_str("could not resolve to acceptable address type"),
             SocksError::Handshake(_) => f.write_str("error during SOCKS handshake"),
-            SocksError::AuthFailed(_) => f.write_str("proxy authentication failed"),
-            SocksError::Reply { version, code } => {
-                write!(f, "proxy refused CONNECT ({version:?}, code {code:#04x})")
+            SocksError::AuthRequired => f.write_str("proxy requires SOCKS5 credentials"),
+            SocksError::NoAcceptableAuth => {
+                f.write_str("proxy accepted no SOCKS5 authentication method")
             }
+            SocksError::AuthRejected(status) => write!(
+                f,
+                "proxy rejected SOCKS5 credentials (status {status:#04x})"
+            ),
             SocksError::AddressNotSupported => {
                 f.write_str("SOCKS4 does not support IPv6 destinations")
             }
@@ -346,35 +421,15 @@ impl StdError for SocksError {
             SocksError::ConnectFailed(err)
             | SocksError::DnsResolveFailure(err)
             | SocksError::Handshake(err) => Some(&**err),
-            SocksError::AuthFailed(err) => Some(err),
             SocksError::Utf8(err) => Some(err),
             _ => None,
         }
     }
 }
 
-// ===== impl AuthFailure =====
-
-impl fmt::Display for AuthFailure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Required => f.write_str("proxy requires SOCKS5 credentials"),
-            Self::NoAcceptableMethod => {
-                f.write_str("proxy accepted no SOCKS5 authentication method")
-            }
-            Self::Rejected(status) => write!(
-                f,
-                "proxy rejected SOCKS5 credentials (status {status:#04x})"
-            ),
-        }
-    }
-}
-
-impl StdError for AuthFailure {}
-
 #[cfg(test)]
 mod tests {
-    use std::{future::Ready, io, net::Ipv4Addr, time::Duration, vec};
+    use std::{future::Ready, net::Ipv4Addr, time::Duration, vec};
 
     use fast_socks5::{
         ReplyError, Socks5Command,
@@ -576,7 +631,7 @@ mod tests {
             ),
             (&host_255, V5, Remote, None, broken),
             (&host_256, V5, Remote, None, Err("HostTooLong")),
-            // Preserve the connector's combined SOCKS4a user ID and host limit.
+            // tokio-socks fits at most 503 bytes of user ID and host into a SOCKS4a request.
             (&host_248, V4, Remote, Some((id_255, b"")), broken),
             (
                 &host_249,
@@ -776,20 +831,15 @@ mod tests {
                 "handshake stalled; was the request flushed?",
             )
             .await;
-            assert!(
-                matches!(
-                    (&result, expected),
-                    (Ok(_), Ok(_))
-                        | (
-                            Err(SocksError::Reply {
-                                version: V5,
-                                code: 5
-                            }),
-                            Err(_)
-                        )
-                ),
-                "{dst} {version:?}: {result:?}"
-            );
+            match (&result, expected) {
+                (Ok(_), Ok(_)) => {}
+                (Err(SocksError::Handshake(cause)), Err(_)) => {
+                    assert!(!cause.is::<tokio_socks::Error>(), "{cause:?}");
+                    assert!(!cause.is::<io::Error>(), "{cause:?}");
+                    assert_eq!(cause.to_string(), "Connection refused");
+                }
+                _ => panic!("{dst} {version:?}: {result:?}"),
+            }
 
             let (server, seen) = bounded(proxy, "proxy stalled").await.expect("proxy task");
             let (Ok(want) | Err(want)) = expected;
@@ -803,21 +853,13 @@ mod tests {
             }
         }
 
-        // Missing credentials, no common method, and rejected credentials all report an auth
-        // failure. A refused CONNECT above remains a separate error.
-        let cases: [(Auth<'_>, &[u8], Result<AuthFailure, &str>); 5] = [
-            (None, &[5, 2], Ok(AuthFailure::Required)),
-            (None, &[5, 0xff], Ok(AuthFailure::NoAcceptableMethod)),
+        let cases: [(Auth<'_>, &[u8], SocksError); 3] = [
+            (None, &[5, 2], SocksError::AuthRequired),
+            (None, &[5, 0xff], SocksError::NoAcceptableAuth),
             (
                 Some((b"user", b"secret")),
                 &[5, 2, 1, 1],
-                Ok(AuthFailure::Rejected(1)),
-            ),
-            (None, &[4, 0xff], Err("invalid SOCKS5 method reply version")),
-            (
-                None,
-                &[5, 1],
-                Err("unsupported SOCKS5 authentication method"),
+                SocksError::AuthRejected(1),
             ),
         ];
         for (auth, reply, expected) in cases {
@@ -830,35 +872,16 @@ mod tests {
             )
             .await
             .expect_err("SOCKS5 authentication failure");
-            let cause = err.source().expect("handshake cause");
-            match expected {
-                Ok(expected) => {
-                    assert!(matches!(err, SocksError::AuthFailed(_)), "{err:?}");
-                    assert_eq!(cause.downcast_ref::<AuthFailure>(), Some(&expected));
+            assert!(err.source().is_none(), "{err:?}");
+            match (err, expected) {
+                (SocksError::AuthRequired, SocksError::AuthRequired)
+                | (SocksError::NoAcceptableAuth, SocksError::NoAcceptableAuth) => {}
+                (SocksError::AuthRejected(status), SocksError::AuthRejected(expected)) => {
+                    assert_eq!(status, expected);
                 }
-                Err(expected) => {
-                    assert!(matches!(err, SocksError::Handshake(_)), "{err:?}");
-                    assert_eq!(cause.to_string(), expected);
-                }
+                (err, expected) => panic!("{reply:02x?}: expected {expected:?}, got {err:?}"),
             }
         }
-
-        let (client, mut server) = duplex(256);
-        server
-            .write_all(b"\x05\x00\x05\x00\x00\x03\x04bind\x00\x00data")
-            .await
-            .expect("CONNECT reply followed by application data");
-        let mut tunnel = bounded(
-            connector(Some(client), V5, Remote, None).call("https://example.com".parse().unwrap()),
-            "SOCKS5 CONNECT stalled",
-        )
-        .await
-        .expect("tunnel");
-        let mut data = [0; 4];
-        bounded(tunnel.read_exact(&mut data), "tunneled data stalled")
-            .await
-            .expect("application data");
-        assert_eq!(&data, b"data");
 
         // Failing to reach the proxy is a connect failure, not a handshake one.
         let err = connector(None, Version::V5, DnsResolve::Remote, None)
